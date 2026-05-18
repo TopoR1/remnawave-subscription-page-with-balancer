@@ -1,0 +1,42 @@
+services:
+  remnawave-subscription-page-with-balancer:
+    image: ghcr.io/topor1/remnawave-subscription-page-with-balancer:latest
+    container_name: remnawave-subscription-page-with-balancer
+    hostname: remnawave-subscription-page-with-balancer
+    restart: unless-stopped
+    env_file:
+      - ../.env
+    ports:
+      - '127.0.0.1:3010:3010'
+    volumes:
+      - ../topor-balancer.config.json:/opt/app/topor-balancer.config.json:ro
+    networks:
+      - remnawave-network
+
+  topor-balancer-postgres:
+    image: postgres:16-alpine
+    container_name: topor-balancer-postgres
+    hostname: topor-balancer-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: topor_balancer
+      POSTGRES_USER: topor_balancer
+      POSTGRES_PASSWORD: change_me
+    volumes:
+      - topor-balancer-postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U topor_balancer -d topor_balancer']
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - remnawave-network
+    profiles:
+      - database
+
+volumes:
+  topor-balancer-postgres-data:
+
+networks:
+  remnawave-network:
+    external: true

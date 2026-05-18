@@ -33,6 +33,25 @@ export const configSchema = z
             .default('false')
             .transform((val) => (val === '' ? 'false' : val))
             .refine((val) => val === 'true' || val === 'false', 'Must be "true" or "false".'),
+        TOPOR_BALANCER_ENABLED: z
+            .string()
+            .default('false')
+            .transform((val) => val === 'true'),
+        TOPOR_BALANCER_DEBUG: z
+            .string()
+            .default('false')
+            .transform((val) => val === 'true'),
+        TOPOR_BALANCER_CONFIG_PATH: z.string().default('/opt/app/topor-balancer.config.json'),
+        TOPOR_BALANCER_ASSIGNMENT_MODE: z
+            .string()
+            .default('hash')
+            .transform((val) => (val === 'database' ? 'database' : 'hash')),
+        TOPOR_BALANCER_DATABASE_URL: z.optional(z.string()),
+        TOPOR_BALANCER_DB_FALLBACK_TO_HASH: z
+            .string()
+            .default('true')
+            .transform((val) => val === 'true'),
+        TOPOR_BALANCER_ADMIN_TOKEN: z.optional(z.string()),
         INTERNAL_JWT_SECRET: z.string(),
         EGAMES_COOKIE: z.optional(z.string()),
     })

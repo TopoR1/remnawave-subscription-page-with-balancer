@@ -3,7 +3,7 @@ import {
     SubscriptionPageRawConfigSchema
 } from '@remnawave/subscription-page-types'
 import { GetSubscriptionInfoByShortUuidCommand } from '@remnawave/backend-contract'
-import { Outlet } from 'react-router-dom'
+import { Outlet, useLocation } from 'react-router-dom'
 import { useLayoutEffect } from 'react'
 import consola from 'consola/browser'
 import { ofetch } from 'ofetch'
@@ -18,13 +18,19 @@ import { LoadingScreen } from '@shared/ui'
 import classes from './root.module.css'
 
 export function RootLayout() {
+    const location = useLocation()
     const subscriptionActions = useSubscriptionInfoStoreActions()
     const configActions = useAppConfigStoreActions()
 
     const { subscription } = useSubscriptionInfoStoreInfo()
     const isConfigLoaded = useIsConfigLoaded()
+    const isToporBalancerAdminRoute = location.pathname === '/admin/topor-balancer'
 
     useLayoutEffect(() => {
+        if (isToporBalancerAdminRoute) {
+            return
+        }
+
         const subPageDiv = document.getElementById('sbpg')
 
         if (subPageDiv) {
@@ -71,9 +77,9 @@ export function RootLayout() {
         }
 
         fetchConfig()
-    }, [])
+    }, [isToporBalancerAdminRoute])
 
-    if (!isConfigLoaded || !subscription) {
+    if (!isToporBalancerAdminRoute && (!isConfigLoaded || !subscription)) {
         return (
             <div className={classes.root}>
                 <div className="animated-background"></div>

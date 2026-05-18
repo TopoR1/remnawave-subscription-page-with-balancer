@@ -13,6 +13,8 @@ import { AxiosService } from '@common/axios/axios.service';
 import { IGNORED_HEADERS } from '@common/constants';
 import { sanitizeUsername } from '@common/utils';
 
+import { ToporBalancerService } from '@modules/topor-balancer';
+
 import { SubpageConfigService } from './subpage-config.service';
 
 @Injectable()
@@ -22,11 +24,14 @@ export class RootService {
     private readonly isMarzbanLegacyLinkEnabled: boolean;
     private readonly marzbanSecretKeys: string[];
     private readonly mlDropRevokedSubscriptions: boolean;
+    private readonly isToporBalancerDebugEnabled: boolean;
+
     constructor(
         private readonly configService: ConfigService,
         private readonly jwtService: JwtService,
         private readonly axiosService: AxiosService,
         private readonly subpageConfigService: SubpageConfigService,
+        private readonly toporBalancerService: ToporBalancerService,
     ) {
         this.isMarzbanLegacyLinkEnabled = this.configService.getOrThrow<boolean>(
             'MARZBAN_LEGACY_LINK_ENABLED',
@@ -34,6 +39,8 @@ export class RootService {
         this.mlDropRevokedSubscriptions = this.configService.getOrThrow<boolean>(
             'MARZBAN_LEGACY_DROP_REVOKED_SUBSCRIPTIONS',
         );
+        this.isToporBalancerDebugEnabled =
+            this.configService.getOrThrow<boolean>('TOPOR_BALANCER_DEBUG');
 
         const marzbanSecretKeys = this.configService.get<string>('MARZBAN_LEGACY_SECRET_KEY');
 
@@ -119,7 +126,21 @@ export class RootService {
                     });
             }
 
-            res.status(200).send(subscriptionDataResponse.response);
+            const contentTypeHeader = res.getHeader('content-type');
+            const contentType = Array.isArray(contentTypeHeader)
+                ? contentTypeHeader.join(', ')
+                : contentTypeHeader?.toString();
+            const balancedResponse = await this.toporBalancerService.process({
+                shortUuid: shortUuidLocal,
+                body: subscriptionDataResponse.response,
+                contentType,
+                requestPath: req.path,
+                userAgent: Array.isArray(userAgent) ? userAgent.join(', ') : userAgent,
+            });
+
+            this.logToporBalancerDebug(req, res, balancedResponse, clientType);
+
+            res.status(200).send(balancedResponse);
             return;
         } catch (error) {
             this.logger.error('Error in serveSubscriptionPage', error);
@@ -224,10 +245,27 @@ export class RootService {
                 maxAge: 1_800_000, // 30 minutes
             });
 
-            res.render('index', {
+            const viewModel = {
                 metaTitle: baseSettings.metaTitle,
                 metaDescription: baseSettings.metaDescription,
                 panelData: Buffer.from(JSON.stringify(subscriptionData)).toString('base64'),
+            };
+
+            if (!this.isToporBalancerDebugEnabled) {
+                res.render('index', viewModel);
+                return;
+            }
+
+            res.render('index', viewModel, (error, html) => {
+                if (error) {
+                    this.logger.error(`Error in returnWebpage render: ${error}`);
+                    res.socket?.destroy();
+                    return;
+                }
+
+                res.type('html');
+                this.logToporBalancerDebug(req, res, html, 'browser-html');
+                res.send(html);
             });
         } catch (error) {
             this.logger.error(`Error in returnWebpage: ${error}`);
@@ -375,5 +413,123 @@ export class RootService {
         }
 
         return true;
+    }
+
+    private logToporBalancerDebug(
+        req: Request,
+        res: Response,
+        body: unknown,
+        clientType?: TRequestTemplateTypeKeys | 'browser-html',
+    ): void {
+        if (!this.isToporBalancerDebugEnabled) {
+            return;
+        }
+
+        try {
+            const bodyText = this.stringifyResponseBody(body);
+            const decodedBase64BodyText = this.tryDecodeBase64(bodyText);
+            const vlessLinksCount =
+                this.countVlessLinks(bodyText) || this.countVlessLinks(decodedBase64BodyText);
+            const contentTypeHeader = res.getHeader('content-type');
+            const contentType = Array.isArray(contentTypeHeader)
+                ? contentTypeHeader.join(', ')
+                : contentTypeHeader?.toString() || null;
+
+            this.logger.log(
+                `[TOPOR_BALANCER_DEBUG] ${JSON.stringify({
+                    path: req.path,
+                    userAgent: req.headers['user-agent'] || null,
+                    contentType,
+                    bodyLength: Buffer.byteLength(bodyText),
+                    detectedFormat: this.detectResponseFormat(
+                        body,
+                        bodyText,
+                        decodedBase64BodyText,
+                        contentType,
+                        clientType,
+                    ),
+                    vlessLinksCount,
+                })}`,
+            );
+        } catch (error) {
+            this.logger.warn(`TOPOR_BALANCER_DEBUG logging failed: ${error}`);
+        }
+    }
+
+    private stringifyResponseBody(body: unknown): string {
+        if (typeof body === 'string') {
+            return body;
+        }
+
+        if (Buffer.isBuffer(body)) {
+            return body.toString('utf8');
+        }
+
+        if (body === null || body === undefined) {
+            return '';
+        }
+
+        if (typeof body === 'object') {
+            return JSON.stringify(body);
+        }
+
+        return String(body);
+    }
+
+    private detectResponseFormat(
+        body: unknown,
+        bodyText: string,
+        decodedBase64BodyText: string,
+        contentType: string | null,
+        clientType?: TRequestTemplateTypeKeys | 'browser-html',
+    ): string {
+        const contentTypeLower = contentType?.toLowerCase() || '';
+
+        if (clientType === 'browser-html' || contentTypeLower.includes('text/html')) {
+            return 'browser-html';
+        }
+
+        if (
+            contentTypeLower.includes('application/json') ||
+            (!Buffer.isBuffer(body) && body !== null && typeof body === 'object')
+        ) {
+            return 'json';
+        }
+
+        if (this.countVlessLinks(bodyText) > 0) {
+            return 'plain-subscription-links';
+        }
+
+        if (this.countVlessLinks(decodedBase64BodyText) > 0) {
+            return 'base64-subscription-links';
+        }
+
+        if (clientType) {
+            return `app-specific:${clientType}`;
+        }
+
+        return 'unknown';
+    }
+
+    private countVlessLinks(bodyText: string): number {
+        return bodyText.match(/vless:\/\//g)?.length || 0;
+    }
+
+    private tryDecodeBase64(bodyText: string): string {
+        const normalizedBodyText = bodyText.trim();
+
+        if (!normalizedBodyText || normalizedBodyText.length % 4 !== 0) {
+            return '';
+        }
+
+        if (!/^[A-Za-z0-9+/]+={0,2}$/.test(normalizedBodyText)) {
+            return '';
+        }
+
+        try {
+            return Buffer.from(normalizedBodyText, 'base64').toString('utf8');
+        } catch {
+            return '';
+        }
     }
 }

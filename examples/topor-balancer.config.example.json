@@ -1,0 +1,71 @@
+{
+  "enabled": true,
+  "locations": [
+    {
+      "publicHostCode": "fi_standard",
+      "publicName": "Finland Standard",
+      "locationCode": "FI",
+      "planCode": "standard",
+      "nodes": [
+        {
+          "technicalHostName": "FI-STD-01",
+          "weight": 1,
+          "maxUsers": 300,
+          "status": "active"
+        }
+      ]
+    },
+    {
+      "publicHostCode": "de_standard",
+      "publicName": "Germany Standard",
+      "locationCode": "DE",
+      "planCode": "standard",
+      "nodes": [
+        {
+          "technicalHostName": "DE-STD-01",
+          "weight": 2,
+          "maxUsers": 500,
+          "status": "active"
+        },
+        {
+          "technicalHostName": "DE-STD-02",
+          "weight": 1,
+          "maxUsers": 300,
+          "status": "active"
+        },
+        {
+          "technicalHostName": "DE-STD-03",
+          "weight": 1,
+          "maxUsers": 300,
+          "status": "draining"
+        }
+      ]
+    },
+    {
+      "publicHostCode": "fi_game",
+      "publicName": "Finland Game",
+      "locationCode": "FI",
+      "planCode": "game",
+      "nodes": [
+        {
+          "technicalHostName": "FI-GAME-01",
+          "weight": 1,
+          "maxUsers": 200,
+          "status": "active"
+        },
+        {
+          "technicalHostName": "FI-GAME-02",
+          "weight": 1,
+          "maxUsers": 200,
+          "status": "disabled"
+        },
+        {
+          "technicalHostName": "FI-GAME-03",
+          "weight": 1,
+          "maxUsers": 200,
+          "status": "dead"
+        }
+      ]
+    }
+  ]
+}

@@ -1,0 +1,93 @@
+.titleIcon {
+    color: var(--mantine-color-cyan-4);
+    flex-shrink: 0;
+}
+
+.loginCard {
+    max-width: 480px;
+    background: rgb(22 27 35 / 72%);
+    border: 1px solid rgb(255 255 255 / 8%);
+}
+
+.statusCard {
+    min-height: 112px;
+    background: rgb(22 27 35 / 72%);
+    border: 1px solid rgb(255 255 255 / 8%);
+}
+
+.statusValue {
+    font-size: 1.35rem;
+    line-height: 1.25;
+    overflow-wrap: anywhere;
+}
+
+.tableCard {
+    overflow: hidden;
+    background: rgb(22 27 35 / 72%);
+    border: 1px solid rgb(255 255 255 / 8%);
+}
+
+.nodesTable {
+    min-width: 1280px;
+}
+
+.assignmentsTable {
+    min-width: 1120px;
+}
+
+.requestsTable {
+    min-width: 1220px;
+}
+
+.nodesTable th {
+    white-space: nowrap;
+}
+
+.nodesTable td {
+    white-space: nowrap;
+}
+
+.assignmentsTable th {
+    white-space: nowrap;
+}
+
+.assignmentsTable td {
+    white-space: nowrap;
+}
+
+.requestsTable th {
+    white-space: nowrap;
+}
+
+.requestsTable td {
+    white-space: nowrap;
+}
+
+.wrapCell {
+    max-width: 360px;
+    white-space: normal !important;
+    overflow-wrap: anywhere;
+}
+
+.row-active {
+    border-left: 3px solid var(--mantine-color-green-5);
+}
+
+.row-draining {
+    border-left: 3px solid var(--mantine-color-yellow-5);
+}
+
+.row-disabled {
+    opacity: 0.72;
+    border-left: 3px solid var(--mantine-color-gray-6);
+}
+
+.row-dead {
+    opacity: 0.64;
+    border-left: 3px solid var(--mantine-color-red-6);
+}
+
+.emptyState {
+    min-height: 180px;
+    padding: var(--mantine-spacing-xl);
+}

@@ -29,6 +29,15 @@ export class RootController {
         return await this.subpageConfigService.getSubscriptionPageConfig(user.su, request);
     }
 
+    @Get('admin/topor-balancer')
+    async getToporBalancerAdminPage(@Res() response: Response) {
+        return response.render('index', {
+            metaTitle: 'Remnawave Balancer by TopoR',
+            metaDescription: 'TopoR Balancer admin panel',
+            panelData: '',
+        });
+    }
+
     @Get([':shortUuid', ':shortUuid/:clientType'])
     async root(
         @ClientIp() clientIp: string,
