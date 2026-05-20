@@ -99,6 +99,19 @@ POSTGRES_DB=topor_balancer
 TOPOR_BALANCER_DATABASE_URL=postgres://topor_balancer:change_me@topor-balancer-postgres:5432/topor_balancer
 ```
 
+Сравните переменные внутри контейнеров:
+
+```bash
+docker exec remnawave-subscription-page-with-balancer printenv | grep -E "TOPOR_BALANCER_DATABASE_URL|POSTGRES"
+docker exec topor-balancer-postgres printenv | grep -E "POSTGRES_USER|POSTGRES_PASSWORD|POSTGRES_DB"
+```
+
+Посмотрите итоговый compose после подстановки `.env`:
+
+```bash
+docker compose -f examples/docker-compose.topor-balancer.yml config
+```
+
 Для тестового стенда можно пересоздать volume:
 
 ```bash

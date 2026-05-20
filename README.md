@@ -113,6 +113,12 @@ TOPOR_BALANCER_ADMIN_TOKEN=replace_me_long_random_admin_token
 
 Если поменять пароль после первого запуска, существующий Docker volume PostgreSQL сохранит старый пароль. Для тестового стенда проще пересоздать volume, для production - обновить пароль в PostgreSQL через `ALTER USER` или вернуть старый пароль в `TOPOR_BALANCER_DATABASE_URL`.
 
+Проверьте, что compose подставил тот же пароль в PostgreSQL:
+
+```bash
+docker compose -f examples/docker-compose.topor-balancer.yml config
+```
+
 `APP_PORT` - внутренний порт приложения в контейнере.  
 `TOPOR_BALANCER_HOST_PORT` - порт на сервере.
 
@@ -296,6 +302,14 @@ TopoR balancer will fail open with original responses.
 ```
 
 PostgreSQL создает пользователя и пароль только при первом создании Docker volume. Если потом изменить `POSTGRES_PASSWORD` или пароль внутри `TOPOR_BALANCER_DATABASE_URL`, старая база продолжит ждать старый пароль.
+
+Сравните env в контейнерах:
+
+```bash
+docker exec remnawave-subscription-page-with-balancer printenv | grep -E "TOPOR_BALANCER_DATABASE_URL|POSTGRES"
+docker exec topor-balancer-postgres printenv | grep -E "POSTGRES_USER|POSTGRES_PASSWORD|POSTGRES_DB"
+docker compose -f examples/docker-compose.topor-balancer.yml config
+```
 
 Для тестового стенда можно удалить volume:
 
