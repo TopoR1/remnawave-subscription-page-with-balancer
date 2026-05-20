@@ -11,8 +11,9 @@ services:
       - ../.env
     ports:
       - '127.0.0.1:3010:3010'
-    volumes:
-      - ../topor-balancer.config.json:/opt/app/topor-balancer.config.json:ro
+    depends_on:
+      topor-balancer-postgres:
+        condition: service_healthy
 
   topor-balancer-postgres:
     image: postgres:16-alpine
@@ -30,8 +31,6 @@ services:
       interval: 10s
       timeout: 5s
       retries: 5
-    profiles:
-      - database
 
 volumes:
   topor-balancer-postgres-data:

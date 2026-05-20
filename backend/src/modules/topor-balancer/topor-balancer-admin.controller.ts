@@ -1,4 +1,4 @@
-import { Body, Controller, Get, Param, Patch, Post, Query, UseGuards } from '@nestjs/common';
+import { Body, Controller, Delete, Get, Param, Patch, Post, Query, UseGuards } from '@nestjs/common';
 
 import type { ToporBalancerNodeStatus } from './types';
 
@@ -20,23 +20,53 @@ export class ToporBalancerAdminController {
         return this.toporBalancerService.listAdminNodes();
     }
 
+    @Post('nodes')
+    public async createNode(
+        @Body()
+        body: {
+            technicalHostName: string;
+            publicHostCode: string;
+            publicName: string;
+            locationCode?: string;
+            planCode: string;
+            weight: number;
+            maxUsers: number;
+            status: ToporBalancerNodeStatus;
+        },
+    ) {
+        return this.toporBalancerService.createAdminNode(body);
+    }
+
     @Patch('nodes/:id')
     public async updateNode(
         @Param('id') id: string,
         @Body()
         body: {
+            technicalHostName?: string;
+            publicHostCode?: string;
             weight?: number;
             maxUsers?: number;
             status?: ToporBalancerNodeStatus;
             publicName?: string;
+            locationCode?: string;
+            planCode?: string;
         },
     ) {
         return this.toporBalancerService.updateAdminNode(id, {
+            technicalHostName: body.technicalHostName,
+            publicHostCode: body.publicHostCode,
             weight: body.weight,
             maxUsers: body.maxUsers,
             status: body.status,
             publicName: body.publicName,
+            locationCode: body.locationCode,
+            planCode: body.planCode,
         });
+    }
+
+    @Delete('nodes/:id')
+    public async deleteNode(@Param('id') id: string) {
+        return this.toporBalancerService.deleteAdminNode(id);
     }
 
     @Get('assignments')

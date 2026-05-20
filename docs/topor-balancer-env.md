@@ -1,81 +1,55 @@
 # Переменные окружения TopoR Balancer
 
-Основной файл для Docker Compose в этом репозитории: `.env` в корне проекта.
-
-Создать его можно так:
+Основной файл для Docker Compose: `.env` в корне проекта.
 
 ```bash
 cp examples/topor-balancer.env.example .env
 ```
 
-## Минимум для запуска
+## Минимум для рекомендуемого database mode
 
 ```env
 APP_PORT=3010
-
 REMNAWAVE_PANEL_URL=https://panel.example.com
 REMNAWAVE_API_TOKEN=replace_me
 INTERNAL_JWT_SECRET=replace_me_long_random_secret
-
-TOPOR_BALANCER_ENABLED=true
-TOPOR_BALANCER_ASSIGNMENT_MODE=hash
-TOPOR_BALANCER_CONFIG_PATH=/opt/app/topor-balancer.config.json
-TOPOR_BALANCER_ADMIN_TOKEN=replace_me_long_random_admin_token
-TOPOR_BALANCER_DB_FALLBACK_TO_HASH=true
-```
-
-## Основные переменные Remnawave Subscription Page
-
-| Переменная                                  | Обязательна               | Пример                                 | Что делает                                                           |
-| ------------------------------------------- | ------------------------- | -------------------------------------- | -------------------------------------------------------------------- |
-| `APP_PORT`                                  | нет                       | `3010`                                 | Порт backend внутри контейнера.                                      |
-| `REMNAWAVE_PANEL_URL`                       | да                        | `https://panel.example.com`            | URL Remnawave Panel.                                                 |
-| `REMNAWAVE_API_TOKEN`                       | да                        | `replace_me`                           | API token из Remnawave Panel.                                        |
-| `INTERNAL_JWT_SECRET`                       | да                        | `long_random_secret`                   | Секрет для внутренних JWT/cookie механик Subscription Page.          |
-| `SUBPAGE_CONFIG_UUID`                       | нет                       | `00000000-0000-0000-0000-000000000000` | UUID конфига страницы подписки.                                      |
-| `CUSTOM_SUB_PREFIX`                         | нет                       | пусто                                  | Дополнительный prefix для подписки, если используется в вашей схеме. |
-| `CADDY_AUTH_API_TOKEN`                      | нет                       | пусто                                  | Опциональная интеграция upstream Subscription Page.                  |
-| `CLOUDFLARE_ZERO_TRUST_CLIENT_ID`           | нет                       | пусто                                  | Cloudflare Zero Trust client id, если используется.                  |
-| `CLOUDFLARE_ZERO_TRUST_CLIENT_SECRET`       | нет                       | пусто                                  | Cloudflare Zero Trust client secret, если используется.              |
-| `MARZBAN_LEGACY_LINK_ENABLED`               | нет                       | `false`                                | Поддержка legacy Marzban-ссылок.                                     |
-| `MARZBAN_LEGACY_SECRET_KEY`                 | только для legacy Marzban | пусто                                  | Secret key для legacy Marzban.                                       |
-| `MARZBAN_LEGACY_SUBSCRIPTION_VALID_FROM`    | нет                       | пусто                                  | Минимальная дата валидности legacy Marzban-подписки.                 |
-| `MARZBAN_LEGACY_DROP_REVOKED_SUBSCRIPTIONS` | нет                       | `false`                                | Отбрасывать отозванные legacy Marzban-подписки.                      |
-
-## Переменные TopoR Balancer
-
-| Переменная                           | Обязательна       | Пример                                | Что делает                                                                           |
-| ------------------------------------ | ----------------- | ------------------------------------- | ------------------------------------------------------------------------------------ |
-| `TOPOR_BALANCER_ENABLED`             | нет               | `true`                                | Включает обработку подписок балансировщиком. По умолчанию `false`.                   |
-| `TOPOR_BALANCER_DEBUG`               | нет               | `false`                               | Включает подробные диагностические логи. Для обычного запуска не нужен.              |
-| `TOPOR_BALANCER_CONFIG_PATH`         | нет               | `/opt/app/topor-balancer.config.json` | Путь к JSON-конфигу внутри контейнера.                                               |
-| `TOPOR_BALANCER_ASSIGNMENT_MODE`     | нет               | `hash`                                | `hash` или `database`. Любое значение кроме `database` работает как `hash`.          |
-| `TOPOR_BALANCER_DATABASE_URL`        | да для `database` | `postgres://user:pass@host:5432/db`   | PostgreSQL для database mode.                                                        |
-| `TOPOR_BALANCER_DB_FALLBACK_TO_HASH` | нет               | `true`                                | Если БД недоступна в database mode, перейти на hash mode.                            |
-| `TOPOR_BALANCER_ADMIN_TOKEN`         | да для админки    | `long_random_token`                   | Bearer token для Admin API и данных Admin UI. Если пустой, Admin API отвечает `404`. |
-
-## Hash mode
-
-```env
-TOPOR_BALANCER_ENABLED=true
-TOPOR_BALANCER_ASSIGNMENT_MODE=hash
-TOPOR_BALANCER_DATABASE_URL=
-TOPOR_BALANCER_DB_FALLBACK_TO_HASH=true
-```
-
-PostgreSQL не нужен.
-
-## Database mode
-
-```env
 TOPOR_BALANCER_ENABLED=true
 TOPOR_BALANCER_ASSIGNMENT_MODE=database
 TOPOR_BALANCER_DATABASE_URL=postgres://topor_balancer:change_me@topor-balancer-postgres:5432/topor_balancer
-TOPOR_BALANCER_DB_FALLBACK_TO_HASH=true
+TOPOR_BALANCER_DB_FALLBACK_TO_HASH=false
+TOPOR_BALANCER_ADMIN_TOKEN=replace_me_long_random_admin_token
 ```
 
-Для Docker Compose из этого репозитория запускайте database profile:
+## Основные переменные
 
-```bash
-docker compose -f examples/docker-compose.topor-balancer.yml --profile database up -d
+| Переменная | Пример | Что делает |
+| --- | --- | --- |
+| `APP_PORT` | `3010` | Порт приложения внутри контейнера. |
+| `REMNAWAVE_PANEL_URL` | `https://panel.example.com` | URL Remnawave Panel. |
+| `REMNAWAVE_API_TOKEN` | `replace_me` | API token Remnawave. |
+| `INTERNAL_JWT_SECRET` | `long_random_secret` | Секрет внутренних JWT/cookie механизмов. |
+| `TOPOR_BALANCER_ENABLED` | `true` | Включает balancer. |
+| `TOPOR_BALANCER_ASSIGNMENT_MODE` | `database` | `database` или `hash`. |
+| `TOPOR_BALANCER_DATABASE_URL` | `postgres://...` | PostgreSQL для database mode. |
+| `TOPOR_BALANCER_DB_FALLBACK_TO_HASH` | `false` | При ошибке БД пытаться fallback в hash mode. Для UI-only setup обычно `false`. |
+| `TOPOR_BALANCER_ADMIN_TOKEN` | `long_random_token` | Bearer token для Admin UI/API. Если пустой, Admin API отвечает `404`. |
+| `TOPOR_BALANCER_DEBUG` | `false` | Подробные диагностические логи. |
+
+## Опциональные JSON-переменные
+
+Для обычной настройки через Admin UI они не нужны.
+
+| Переменная | Пример | Что делает |
+| --- | --- | --- |
+| `TOPOR_BALANCER_CONFIG_PATH` | `/opt/app/topor-balancer.config.json` | Путь к JSON-конфигу внутри контейнера. |
+| `TOPOR_BALANCER_IMPORT_CONFIG_ON_START` | `false` | Импортировать JSON в БД при старте. |
+
+## Hash mode
+
+Hash mode не использует БД, поэтому ему нужен JSON-конфиг:
+
+```env
+TOPOR_BALANCER_ASSIGNMENT_MODE=hash
+TOPOR_BALANCER_CONFIG_PATH=/opt/app/topor-balancer.config.json
+TOPOR_BALANCER_DB_FALLBACK_TO_HASH=true
 ```

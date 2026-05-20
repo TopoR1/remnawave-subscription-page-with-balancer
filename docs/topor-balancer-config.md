@@ -1,111 +1,69 @@
-# Конфиг Remnawave Balancer by TopoR
+# JSON-конфиг TopoR Balancer
 
-Файл конфига задается переменной `TOPOR_BALANCER_CONFIG_PATH`. В Docker-примере он монтируется как:
+Обычная production-настройка делается через Admin UI и PostgreSQL. `topor-balancer.config.json` не нужен для старта database mode.
+
+JSON-конфиг нужен только для:
+
+- hash mode без базы;
+- первичного импорта нод в БД;
+- аварийного статического режима;
+- продвинутых сценариев.
+
+## Hash mode
+
+```bash
+cp examples/topor-balancer.config.example.json topor-balancer.config.json
+```
+
+В `.env`:
+
+```env
+TOPOR_BALANCER_ASSIGNMENT_MODE=hash
+TOPOR_BALANCER_CONFIG_PATH=/opt/app/topor-balancer.config.json
+TOPOR_BALANCER_DB_FALLBACK_TO_HASH=true
+```
+
+В compose добавьте mount:
+
+```yaml
+volumes:
+  - ../topor-balancer.config.json:/opt/app/topor-balancer.config.json:ro
+```
+
+## Импорт в database mode
+
+Если хотите один раз загрузить ноды из JSON:
+
+```env
+TOPOR_BALANCER_IMPORT_CONFIG_ON_START=true
+TOPOR_BALANCER_CONFIG_PATH=/opt/app/topor-balancer.config.json
+```
+
+После успешного импорта лучше вернуть:
+
+```env
+TOPOR_BALANCER_IMPORT_CONFIG_ON_START=false
+```
+
+Иначе поля нод из JSON будут снова синхронизироваться при старте.
+
+## Поля
+
+- `publicHostCode` - код публичной группы.
+- `publicName` - имя, которое увидит пользователь.
+- `locationCode` - опциональный код локации.
+- `planCode` - план/тариф.
+- `technicalHostName` - точный remark технической VLESS-ноды после `#`.
+- `weight` - вес ноды.
+- `maxUsers` - условная емкость.
+- `status` - `active`, `draining`, `disabled` или `dead`.
+
+`technicalHostName` должен точно совпадать с VLESS remark:
 
 ```text
-/opt/app/topor-balancer.config.json
+vless://...#FI-STD-01
 ```
-
-Формат - обычный JSON. Комментарии внутри файла нельзя.
-
-## Пример
 
 ```json
-{
-  "enabled": true,
-  "locations": [
-    {
-      "publicHostCode": "fi_standard",
-      "publicName": "🇫🇮 Finland",
-      "locationCode": "FI",
-      "planCode": "standard",
-      "nodes": [
-        {
-          "technicalHostName": "FI-STD-01",
-          "weight": 1,
-          "maxUsers": 300,
-          "status": "active"
-        },
-        {
-          "technicalHostName": "FI-STD-02",
-          "weight": 1,
-          "maxUsers": 300,
-          "status": "active"
-        }
-      ]
-    }
-  ]
-}
+"technicalHostName": "FI-STD-01"
 ```
-
-## Поля верхнего уровня
-
-| Поле        | Обязательное | Что значит                                                                                                                                   |
-| ----------- | ------------ | -------------------------------------------------------------------------------------------------------------------------------------------- |
-| `enabled`   | нет          | Поле есть в формате конфига и обычно ставится `true`. В текущей реализации фактическое включение/выключение делает `TOPOR_BALANCER_ENABLED`. |
-| `locations` | да           | Список публичных групп балансировки.                                                                                                         |
-
-## Поля location
-
-| Поле             | Обязательное | Пример        | Что значит                                                      |
-| ---------------- | ------------ | ------------- | --------------------------------------------------------------- |
-| `publicHostCode` | да           | `fi_standard` | Код публичной группы. Вместе с `planCode` образует ключ группы. |
-| `publicName`     | да           | `🇫🇮 Finland`  | Имя, которое будет записано в VLESS remark для пользователя.    |
-| `locationCode`   | нет          | `FI`          | Вспомогательный код локации. Показывается в админке/БД.         |
-| `planCode`       | да           | `standard`    | Код тарифа/плана внутри группы.                                 |
-| `nodes`          | да           | массив        | Технические ноды этой публичной группы.                         |
-
-Пара `publicHostCode + planCode` не должна повторяться в другом location.
-
-## Поля node
-
-| Поле                | Обязательное | Пример      | Что значит                                                                                                  |
-| ------------------- | ------------ | ----------- | ----------------------------------------------------------------------------------------------------------- |
-| `technicalHostName` | да           | `FI-STD-01` | Должен точно совпадать с VLESS remark после `#`.                                                            |
-| `weight`            | нет          | `1`         | Положительное целое число. В hash mode влияет на шанс выбора. В database mode участвует в расчете нагрузки. |
-| `maxUsers`          | нет          | `300`       | Положительное целое число. В database mode используется в расчете нагрузки.                                 |
-| `status`            | нет          | `active`    | Один из `active`, `draining`, `disabled`, `dead`. По умолчанию `active`.                                    |
-
-`technicalHostName` должен быть уникальным во всем конфиге.
-
-## Как сопоставляется VLESS
-
-Балансировщик ищет только строки, которые начинаются с `vless://`. Техническая нода определяется по remark после `#`.
-
-Пример ссылки:
-
-```text
-vless://uuid@example.com:443?security=reality&type=tcp#FI-STD-01
-```
-
-Для такой ссылки в конфиге должна быть нода:
-
-```json
-{
-  "technicalHostName": "FI-STD-01",
-  "weight": 1,
-  "maxUsers": 300,
-  "status": "active"
-}
-```
-
-Если нода выбрана, remark заменится на `publicName`, например `#🇫🇮%20Finland`.
-
-## Статусы
-
-- `active` - можно назначать новым пользователям, существующие назначения остаются.
-- `draining` - новые пользователи не назначаются. В database mode старые назначения остаются рабочими.
-- `disabled` - не назначается. В database mode старые назначения будут переназначены, если есть активная нода.
-- `dead` - не назначается. В database mode старые назначения будут переназначены, если есть активная нода.
-
-В hash mode выбираются только `active` ноды. Если активных нод в группе нет, оригинальные ссылки группы сохраняются.
-
-## Частые ошибки
-
-- `technicalHostName` не совпадает с remark после `#`.
-- В Remnawave remark URL-encoded или отличается пробелом/регистром.
-- Одинаковый `technicalHostName` указан в двух местах.
-- Одинаковая пара `publicHostCode + planCode` указана дважды.
-- В JSON оставлены комментарии или лишняя запятая.
-- Все ноды группы переведены из `active` в `disabled`/`dead`.
-- Конфиг смонтирован не туда, куда указывает `TOPOR_BALANCER_CONFIG_PATH`.

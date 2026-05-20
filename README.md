@@ -2,7 +2,7 @@
 
 Форк `remnawave/subscription-page` с балансировкой пользователей между техническими нодами одной публичной локации.
 
-Пользователь продолжает получать обычную ссылку подписки, а внутри balancer оставляет только одну подходящую VLESS-ноду из группы. Например, Remnawave отдает `FI-STD-01`, `FI-STD-02`, `FI-STD-03`, а пользователь видит одну публичную локацию `Finland`.
+Обычный production-сценарий: поставить контейнеры, открыть Admin UI, добавить группы и ноды. JSON-конфиг для этого не нужен.
 
 ## Быстрый запуск
 
@@ -11,13 +11,7 @@
 - Docker
 - Docker Compose plugin
 
-Не нужны:
-
-- Node.js на сервере
-- npm, pnpm или yarn на сервере
-- ручная сборка frontend/backend
-- `docker login` в GHCR
-- заранее опубликованный Docker image
+Не нужны Node.js, npm, pnpm/yarn, ручная сборка frontend/backend, `docker login` в GHCR и заранее опубликованный image.
 
 ### 1. Скачать проект
 
@@ -32,7 +26,7 @@ cd remnawave-subscription-page-with-balancer
 cp examples/topor-balancer.env.example .env
 ```
 
-Минимально проверьте и замените значения:
+Минимально проверьте и замените:
 
 ```env
 APP_PORT=3010
@@ -40,113 +34,114 @@ REMNAWAVE_PANEL_URL=https://panel.example.com
 REMNAWAVE_API_TOKEN=replace_me
 INTERNAL_JWT_SECRET=replace_me_long_random_secret
 TOPOR_BALANCER_ENABLED=true
-TOPOR_BALANCER_ASSIGNMENT_MODE=hash
-TOPOR_BALANCER_CONFIG_PATH=/opt/app/topor-balancer.config.json
+TOPOR_BALANCER_ASSIGNMENT_MODE=database
+TOPOR_BALANCER_DATABASE_URL=postgres://topor_balancer:change_me@topor-balancer-postgres:5432/topor_balancer
+TOPOR_BALANCER_DB_FALLBACK_TO_HASH=false
 TOPOR_BALANCER_ADMIN_TOKEN=replace_me_long_random_admin_token
-TOPOR_BALANCER_DB_FALLBACK_TO_HASH=true
 ```
 
-### 3. Создать конфиг
-
-```bash
-cp examples/topor-balancer.config.example.json topor-balancer.config.json
-```
-
-Отредактируйте `topor-balancer.config.json`. Поле `technicalHostName` должно точно совпадать с remark в VLESS-ссылке после `#`.
-
-Если Remnawave отдает:
-
-```text
-vless://...#FI-STD-01
-```
-
-то в конфиге должно быть:
-
-```json
-"technicalHostName": "FI-STD-01"
-```
-
-### 4. Запуск в hash mode без PostgreSQL
+### 3. Запустить
 
 ```bash
 docker compose -f examples/docker-compose.topor-balancer.yml up -d --build
 ```
 
-### 5. Запуск в database mode с PostgreSQL
+Compose сам поднимет PostgreSQL и локально соберет image из исходников.
 
-В `.env` измените или добавьте:
+### 4. Открыть Admin UI
 
-```env
-TOPOR_BALANCER_ASSIGNMENT_MODE=database
-TOPOR_BALANCER_DATABASE_URL=postgres://topor_balancer:change_me@topor-balancer-postgres:5432/topor_balancer
-```
-
-Запустите compose с profile `database`:
-
-```bash
-docker compose -f examples/docker-compose.topor-balancer.yml --profile database up -d --build
-```
-
-### 6. Логи
-
-```bash
-docker compose -f examples/docker-compose.topor-balancer.yml logs -f
-```
-
-### 7. Admin UI
-
-По умолчанию compose публикует порт только на `127.0.0.1`:
-
-```text
-http://127.0.0.1:3010/admin/topor-balancer
-```
-
-За доменом или reverse proxy:
+Если используете reverse proxy:
 
 ```text
 https://sub.example.com/admin/topor-balancer
 ```
 
-Если хотите открыть порт напрямую по IP сервера, измените `127.0.0.1:3010:3010` на `3010:3010` в `examples/docker-compose.topor-balancer.yml`.
+Локально на сервере:
 
-После этого Admin UI будет доступен так:
+```text
+http://127.0.0.1:3010/admin/topor-balancer
+```
+
+Если нужно открыть порт напрямую по IP сервера, измените в compose `127.0.0.1:3010:3010` на `3010:3010`, затем откройте:
 
 ```text
 http://server-ip:3010/admin/topor-balancer
 ```
 
-### 8. Health check
+### 5. Добавить первую группу/ноду
+
+В Admin UI нажмите `Add node` и заполните:
+
+- `technicalHostName` - remark технической VLESS-ноды после `#`, например `FI-STD-01`
+- `publicHostCode` - код публичной группы, например `fi_standard`
+- `publicName` - имя, которое увидит пользователь, например `Finland`
+- `locationCode` - опционально, например `FI`
+- `planCode` - тариф/план, например `standard`
+- `weight`, `maxUsers`, `status`
+
+Для одной публичной локации добавьте несколько нод с одинаковыми `publicHostCode` и `planCode`, но разными `technicalHostName`.
+
+### 6. Логи, health, остановка
 
 ```bash
+docker compose -f examples/docker-compose.topor-balancer.yml logs -f
 curl -H "Authorization: Bearer YOUR_ADMIN_TOKEN" http://127.0.0.1:3010/api/topor-balancer/health
-```
-
-### 9. Остановка
-
-```bash
 docker compose -f examples/docker-compose.topor-balancer.yml down
 ```
 
-### 10. Обновление
+### 7. Обновление
 
 ```bash
 git pull
 docker compose -f examples/docker-compose.topor-balancer.yml up -d --build
 ```
 
-## Опционально: prebuilt image
+## Опционально: JSON-конфиг и hash mode
 
-По умолчанию проект собирается локально из исходников. GHCR не нужен.
+JSON-конфиг больше не нужен для обычной database/Admin UI установки.
 
-Опытные пользователи могут заменить `build` на `image: ghcr.io/...` только если сами опубликовали image и имеют доступ к registry.
+Он полезен только для:
+
+- hash mode без PostgreSQL;
+- первичного импорта в БД;
+- аварийного статического конфига;
+- продвинутых сценариев.
+
+Для hash mode:
+
+```bash
+cp examples/topor-balancer.config.example.json topor-balancer.config.json
+```
+
+В `.env`:
+
+```env
+TOPOR_BALANCER_ASSIGNMENT_MODE=hash
+TOPOR_BALANCER_CONFIG_PATH=/opt/app/topor-balancer.config.json
+TOPOR_BALANCER_DB_FALLBACK_TO_HASH=true
+```
+
+И добавьте bind mount в сервис приложения:
+
+```yaml
+volumes:
+  - ../topor-balancer.config.json:/opt/app/topor-balancer.config.json:ro
+```
+
+Для одноразового импорта JSON в database mode:
+
+```env
+TOPOR_BALANCER_IMPORT_CONFIG_ON_START=true
+TOPOR_BALANCER_CONFIG_PATH=/opt/app/topor-balancer.config.json
+```
+
+Важно: импорт синхронизирует поля нод из JSON в БД. Не включайте его постоянно, если управляете нодами из UI.
 
 ## Частые ошибки установки
 
 ### `error from registry: denied`
 
-Причина: compose пытается скачать приватный или несуществующий GHCR image.
-
-Исправление: используйте локальную сборку:
+Старый compose пытался скачать приватный или несуществующий GHCR image. Используйте локальную сборку:
 
 ```bash
 docker compose -f examples/docker-compose.topor-balancer.yml up -d --build
@@ -154,25 +149,25 @@ docker compose -f examples/docker-compose.topor-balancer.yml up -d --build
 
 ### `"/frontend/dist": not found`
 
-Причина: старый Dockerfile ожидал, что frontend уже собран на хосте.
-
-Исправление: используйте обновленный Dockerfile и пересоберите image:
+Старый Dockerfile ожидал frontend, собранный на хосте. В актуальном Dockerfile frontend собирается внутри Docker:
 
 ```bash
 docker compose -f examples/docker-compose.topor-balancer.yml build --no-cache
 ```
 
+### `ERESOLVE could not resolve`
+
+Во frontend dev-зависимостях есть peer-конфликт ESLint 9 и `eslint-config-airbnb-base`. Dockerfile использует `npm ci --legacy-peer-deps` в build stage. Production build это не меняет: ESLint не участвует в сборке приложения.
+
 ### `node: command not found` или `npm: command not found`
 
-Причина: старые инструкции требовали ручную сборку на сервере.
-
-Исправление: Node.js и npm на хосте не нужны. Сборка идет внутри Docker. Установите только Docker и Docker Compose plugin.
+Node.js и npm на сервере не нужны. Сборка идет внутри Docker.
 
 ## Документация
 
 - [Переменные окружения](docs/topor-balancer-env.md)
-- [Конфиг балансировщика](docs/topor-balancer-config.md)
-- [Расширенный деплой](docs/topor-balancer-deployment.md)
+- [JSON-конфиг и hash mode](docs/topor-balancer-config.md)
+- [Deployment](docs/topor-balancer-deployment.md)
 - [Admin UI](docs/topor-balancer-ui.md)
 - [Admin API](docs/topor-balancer-admin-api.md)
 - [Troubleshooting](docs/topor-balancer-troubleshooting.md)

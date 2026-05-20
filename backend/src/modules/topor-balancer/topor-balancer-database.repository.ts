@@ -65,11 +65,28 @@ export interface ToporBalancerRequestFilters {
 }
 
 export interface ToporBalancerNodeUpdateInput {
+    technicalHostName?: string;
+    publicHostCode?: string;
     weight?: number;
     maxUsers?: number;
     status?: ToporBalancerNodeStatus;
     publicName?: string;
+    locationCode?: string;
+    planCode?: string;
 }
+
+export interface ToporBalancerNodeCreateInput {
+    technicalHostName: string;
+    publicHostCode: string;
+    publicName: string;
+    locationCode?: string;
+    planCode: string;
+    weight: number;
+    maxUsers: number;
+    status: ToporBalancerNodeStatus;
+}
+
+export type ToporBalancerNodeDeleteResult = 'deleted' | 'has_assignments' | 'not_found';
 
 export interface ToporBalancerManualReassignInput {
     shortUuid: string;
@@ -90,10 +107,12 @@ export interface ToporBalancerAssignmentRepository {
     countAssignments(): Promise<number>;
     countRequests(): Promise<number>;
     listNodes(): Promise<ToporBalancerAdminNode[]>;
+    createNode(input: ToporBalancerNodeCreateInput): Promise<ToporBalancerAdminNode | null>;
     updateNode(
         id: string,
         input: ToporBalancerNodeUpdateInput,
     ): Promise<ToporBalancerAdminNode | null>;
+    deleteNode(id: string): Promise<ToporBalancerNodeDeleteResult>;
     listAssignments(filters: ToporBalancerAssignmentFilters): Promise<ToporBalancerDbAssignment[]>;
     reassign(input: ToporBalancerManualReassignInput): Promise<ToporBalancerDbAssignment | null>;
     listRequests(filters: ToporBalancerRequestFilters): Promise<ToporBalancerAdminRequest[]>;
@@ -328,6 +347,53 @@ export class ToporBalancerPostgresRepository implements ToporBalancerAssignmentR
         return result.rows.map(mapAdminNodeRow);
     }
 
+    public async createNode(
+        input: ToporBalancerNodeCreateInput,
+    ): Promise<ToporBalancerAdminNode | null> {
+        const existing = await this.pool.query<DbNodeRow>(
+            'SELECT * FROM topor_balancer_nodes WHERE technical_host_name = $1 LIMIT 1',
+            [input.technicalHostName],
+        );
+
+        if (existing.rows[0]) {
+            return null;
+        }
+
+        const id = randomUUID();
+
+        await this.pool.query(
+            `
+            INSERT INTO topor_balancer_nodes (
+                id,
+                technical_host_name,
+                public_host_code,
+                public_name,
+                location_code,
+                plan_code,
+                weight,
+                max_users,
+                status
+            )
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+            `,
+            [
+                id,
+                input.technicalHostName,
+                input.publicHostCode,
+                input.publicName,
+                input.locationCode ?? null,
+                input.planCode,
+                input.weight,
+                input.maxUsers,
+                input.status,
+            ],
+        );
+
+        const nodes = await this.listNodes();
+
+        return nodes.find((node) => node.id === id) ?? null;
+    }
+
     public async updateNode(
         id: string,
         input: ToporBalancerNodeUpdateInput,
@@ -335,10 +401,14 @@ export class ToporBalancerPostgresRepository implements ToporBalancerAssignmentR
         const updates: string[] = [];
         const params: unknown[] = [];
 
+        addUpdate(updates, params, 'technical_host_name', input.technicalHostName);
+        addUpdate(updates, params, 'public_host_code', input.publicHostCode);
+        addUpdate(updates, params, 'public_name', input.publicName);
+        addUpdate(updates, params, 'location_code', input.locationCode);
+        addUpdate(updates, params, 'plan_code', input.planCode);
         addUpdate(updates, params, 'weight', input.weight);
         addUpdate(updates, params, 'max_users', input.maxUsers);
         addUpdate(updates, params, 'status', input.status);
-        addUpdate(updates, params, 'public_name', input.publicName);
 
         if (updates.length === 0) {
             const nodes = await this.listNodes();
@@ -360,6 +430,31 @@ export class ToporBalancerPostgresRepository implements ToporBalancerAssignmentR
         const nodes = await this.listNodes();
 
         return nodes.find((node) => node.id === id) ?? null;
+    }
+
+    public async deleteNode(id: string): Promise<ToporBalancerNodeDeleteResult> {
+        const assignmentCount = await this.pool.query<DbCountRow>(
+            'SELECT COUNT(*) AS count FROM topor_balancer_assignments WHERE node_id = $1',
+            [id],
+        );
+
+        if (Number(assignmentCount.rows[0]?.count ?? 0) > 0) {
+            return 'has_assignments';
+        }
+
+        const result = await this.pool.query<DbCountRow>(
+            `
+            WITH deleted AS (
+                DELETE FROM topor_balancer_nodes
+                WHERE id = $1
+                RETURNING id
+            )
+            SELECT COUNT(*) AS count FROM deleted
+            `,
+            [id],
+        );
+
+        return Number(result.rows[0]?.count ?? 0) > 0 ? 'deleted' : 'not_found';
     }
 
     public async listAssignments(

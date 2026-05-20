@@ -21,7 +21,9 @@ WORKDIR /opt/app/frontend
 
 COPY frontend/package*.json ./
 
-RUN npm ci
+# Frontend dev tooling still has an ESLint 9 / airbnb peer range conflict.
+# The production build does not use ESLint, so keep npm ci deterministic and relax peer resolution here.
+RUN npm ci --legacy-peer-deps
 
 COPY frontend/ ./
 

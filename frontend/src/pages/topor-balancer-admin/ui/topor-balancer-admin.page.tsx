@@ -23,9 +23,11 @@ import {
     IconDatabase,
     IconEdit,
     IconLogout,
+    IconPlus,
     IconRefresh,
     IconShieldLock,
-    IconSwitchHorizontal
+    IconSwitchHorizontal,
+    IconTrash
 } from '@tabler/icons-react'
 import { FormEvent, useCallback, useEffect, useMemo, useState } from 'react'
 import { notifications } from '@mantine/notifications'
@@ -96,8 +98,13 @@ interface ToporBalancerRequest {
 }
 
 interface NodeEditForm {
+    locationCode: string
     maxUsers: number
+    planCode: string
+    publicHostCode: string
     publicName: string
+    status: ToporBalancerNodeStatus
+    technicalHostName: string
     weight: number
 }
 
@@ -272,14 +279,21 @@ export function ToporBalancerAdminPage() {
     const [requestShortUuidFilter, setRequestShortUuidFilter] = useState('')
     const [requestResponseFormatFilter, setRequestResponseFormatFilter] = useState<null | string>(null)
     const [requestStatusFilter, setRequestStatusFilter] = useState<null | string>(null)
+    const [isCreateNodeModalOpen, setIsCreateNodeModalOpen] = useState(false)
     const [editingNode, setEditingNode] = useState<null | ToporBalancerNode>(null)
     const [pendingDisableNode, setPendingDisableNode] = useState<null | ToporBalancerNode>(null)
+    const [pendingDeleteNode, setPendingDeleteNode] = useState<null | ToporBalancerNode>(null)
     const [pendingReassignAssignment, setPendingReassignAssignment] =
         useState<null | ToporBalancerAssignment>(null)
     const [targetTechnicalHostName, setTargetTechnicalHostName] = useState<null | string>(null)
     const [editForm, setEditForm] = useState<NodeEditForm>({
+        locationCode: '',
         maxUsers: 1,
+        planCode: 'standard',
+        publicHostCode: '',
         publicName: '',
+        status: 'active',
+        technicalHostName: '',
         weight: 1
     })
 
@@ -645,6 +659,14 @@ export function ToporBalancerAdminPage() {
         () => selectOptions(requests.map((request) => request.status || 'unknown')),
         [requests]
     )
+    const nodeStatusOptions = useMemo(
+        () =>
+            NODE_STATUSES.map((status) => ({
+                label: status,
+                value: status
+            })),
+        []
+    )
 
     const filteredRequests = useMemo(() => {
         const normalizedShortUuid = requestShortUuidFilter.trim().toLowerCase()
@@ -678,8 +700,8 @@ export function ToporBalancerAdminPage() {
                 value: health.assignmentMode
             },
             {
-                color: health.configLoaded ? 'green' : 'red',
-                label: 'Config loaded',
+                color: health.configLoaded ? 'green' : 'gray',
+                label: 'JSON config',
                 value: health.configLoaded ? 'Yes' : 'No'
             },
             {
@@ -718,17 +740,91 @@ export function ToporBalancerAdminPage() {
         ]
     }, [health])
 
+    const resetNodeForm = () => {
+        setEditForm({
+            locationCode: '',
+            maxUsers: 300,
+            planCode: 'standard',
+            publicHostCode: '',
+            publicName: '',
+            status: 'active',
+            technicalHostName: '',
+            weight: 1
+        })
+    }
+
+    const openCreateNodeModal = () => {
+        resetNodeForm()
+        setIsCreateNodeModalOpen(true)
+    }
+
+    const closeCreateNodeModal = () => {
+        setIsCreateNodeModalOpen(false)
+        resetNodeForm()
+    }
+
     const openEditModal = (node: ToporBalancerNode) => {
         setEditingNode(node)
         setEditForm({
+            locationCode: node.locationCode || '',
             maxUsers: node.maxUsers,
+            planCode: node.planCode,
+            publicHostCode: node.publicHostCode,
             publicName: node.publicName,
+            status: node.status,
+            technicalHostName: node.technicalHostName,
             weight: node.weight
         })
     }
 
     const closeEditModal = () => {
         setEditingNode(null)
+    }
+
+    const getValidatedNodePayload = () => {
+        const technicalHostName = editForm.technicalHostName.trim()
+        const publicHostCode = editForm.publicHostCode.trim()
+        const publicName = editForm.publicName.trim()
+        const locationCode = editForm.locationCode.trim()
+        const planCode = editForm.planCode.trim()
+
+        if (!technicalHostName || !publicHostCode || !publicName || !planCode) {
+            notifications.show({
+                color: 'red',
+                message: 'technicalHostName, publicHostCode, publicName and planCode are required',
+                title: 'Invalid node values'
+            })
+            return null
+        }
+
+        if (editForm.weight <= 0) {
+            notifications.show({
+                color: 'red',
+                message: 'Weight must be greater than 0',
+                title: 'Invalid node values'
+            })
+            return null
+        }
+
+        if (editForm.maxUsers < 1) {
+            notifications.show({
+                color: 'red',
+                message: 'Max users must be at least 1',
+                title: 'Invalid node values'
+            })
+            return null
+        }
+
+        return {
+            locationCode: locationCode || undefined,
+            maxUsers: editForm.maxUsers,
+            planCode,
+            publicHostCode,
+            publicName,
+            status: editForm.status,
+            technicalHostName,
+            weight: editForm.weight
+        }
     }
 
     const executeNodeStatusAction = async (
@@ -871,32 +967,9 @@ export function ToporBalancerAdminPage() {
             return
         }
 
-        const publicName = editForm.publicName.trim()
+        const payload = getValidatedNodePayload()
 
-        if (!publicName) {
-            notifications.show({
-                color: 'red',
-                message: 'Public name is required',
-                title: 'Invalid node values'
-            })
-            return
-        }
-
-        if (editForm.weight <= 0) {
-            notifications.show({
-                color: 'red',
-                message: 'Weight must be greater than 0',
-                title: 'Invalid node values'
-            })
-            return
-        }
-
-        if (editForm.maxUsers < 1) {
-            notifications.show({
-                color: 'red',
-                message: 'Max users must be at least 1',
-                title: 'Invalid node values'
-            })
+        if (!payload) {
             return
         }
 
@@ -904,11 +977,7 @@ export function ToporBalancerAdminPage() {
 
         try {
             await fetchAdminJson<unknown>(`${ADMIN_NODES_URL}/${editingNode.id}`, {
-                body: JSON.stringify({
-                    maxUsers: editForm.maxUsers,
-                    publicName,
-                    weight: editForm.weight
-                }),
+                body: JSON.stringify(payload),
                 method: 'PATCH'
             })
 
@@ -924,6 +993,71 @@ export function ToporBalancerAdminPage() {
                 color: 'red',
                 message: `Unable to save ${editingNode.technicalHostName}`,
                 title: 'Node save failed'
+            })
+        } finally {
+            setIsNodeActionLoading(false)
+        }
+    }
+
+    const createNode = async () => {
+        const payload = getValidatedNodePayload()
+
+        if (!payload) {
+            return
+        }
+
+        setIsNodeActionLoading(true)
+
+        try {
+            await fetchAdminJson<unknown>(ADMIN_NODES_URL, {
+                body: JSON.stringify(payload),
+                method: 'POST'
+            })
+
+            closeCreateNodeModal()
+            await refreshAdminData()
+            notifications.show({
+                color: 'green',
+                message: `${payload.technicalHostName} created`,
+                title: 'Node added'
+            })
+        } catch {
+            notifications.show({
+                color: 'red',
+                message: `Unable to create ${payload.technicalHostName}`,
+                title: 'Node create failed'
+            })
+        } finally {
+            setIsNodeActionLoading(false)
+        }
+    }
+
+    const confirmDeleteNode = async () => {
+        if (!pendingDeleteNode) {
+            return
+        }
+
+        const node = pendingDeleteNode
+
+        setIsNodeActionLoading(true)
+
+        try {
+            await fetchAdminJson<unknown>(`${ADMIN_NODES_URL}/${node.id}`, {
+                method: 'DELETE'
+            })
+
+            setPendingDeleteNode(null)
+            await refreshAdminData()
+            notifications.show({
+                color: 'green',
+                message: `${node.technicalHostName} deleted`,
+                title: 'Node deleted'
+            })
+        } catch {
+            notifications.show({
+                color: 'red',
+                message: `Unable to delete ${node.technicalHostName}. Nodes with assignments cannot be deleted.`,
+                title: 'Node delete failed'
             })
         } finally {
             setIsNodeActionLoading(false)
@@ -1047,6 +1181,12 @@ export function ToporBalancerAdminPage() {
                                                 {filteredNodes.length} of {nodes.length} nodes
                                             </Text>
                                         </div>
+                                        <Button
+                                            leftSection={<IconPlus size={16} />}
+                                            onClick={openCreateNodeModal}
+                                        >
+                                            Add node
+                                        </Button>
                                     </Group>
 
                                     <SimpleGrid cols={{ base: 1, sm: 2, lg: 4 }} spacing="md">
@@ -1058,10 +1198,7 @@ export function ToporBalancerAdminPage() {
                                         />
                                         <Select
                                             clearable
-                                            data={NODE_STATUSES.map((status) => ({
-                                                label: status,
-                                                value: status
-                                            }))}
+                                            data={nodeStatusOptions}
                                             label="Status"
                                             onChange={setStatusFilter}
                                             placeholder="All statuses"
@@ -1088,10 +1225,13 @@ export function ToporBalancerAdminPage() {
                                     <Card className={classes.tableCard} p={0} radius="md">
                                         {filteredNodes.length === 0 ? (
                                             <Stack align="center" className={classes.emptyState} gap={6}>
-                                                <Text fw={700}>No nodes found</Text>
+                                                <Text fw={700}>Добавьте первую группу/ноду</Text>
                                                 <Text c="dimmed" size="sm">
-                                                    Adjust filters or refresh the Admin API data.
+                                                    Create a node in database mode or clear filters if nodes already exist.
                                                 </Text>
+                                                <Button leftSection={<IconPlus size={16} />} onClick={openCreateNodeModal}>
+                                                    Add node
+                                                </Button>
                                             </Stack>
                                         ) : (
                                             <ScrollArea>
@@ -1191,6 +1331,16 @@ export function ToporBalancerAdminPage() {
                                                                                 variant="subtle"
                                                                             >
                                                                                 Edit
+                                                                            </Button>
+                                                                            <Button
+                                                                                color="red"
+                                                                                disabled={node.assignedUsers > 0}
+                                                                                leftSection={<IconTrash size={14} />}
+                                                                                onClick={() => setPendingDeleteNode(node)}
+                                                                                size="xs"
+                                                                                variant="subtle"
+                                                                            >
+                                                                                Delete
                                                                             </Button>
                                                                         </Group>
                                                                     </Table.Td>
@@ -1442,6 +1592,110 @@ export function ToporBalancerAdminPage() {
                 </Stack>
             </Container>
 
+            <Modal centered onClose={closeCreateNodeModal} opened={isCreateNodeModalOpen} title="Add node">
+                <Stack gap="md">
+                    <TextInput
+                        label="technicalHostName"
+                        onChange={(event) =>
+                            setEditForm((current) => ({
+                                ...current,
+                                technicalHostName: event.currentTarget.value
+                            }))
+                        }
+                        placeholder="FI-STD-01"
+                        value={editForm.technicalHostName}
+                    />
+                    <TextInput
+                        label="publicHostCode"
+                        onChange={(event) =>
+                            setEditForm((current) => ({
+                                ...current,
+                                publicHostCode: event.currentTarget.value
+                            }))
+                        }
+                        placeholder="fi_standard"
+                        value={editForm.publicHostCode}
+                    />
+                    <TextInput
+                        label="publicName"
+                        onChange={(event) =>
+                            setEditForm((current) => ({
+                                ...current,
+                                publicName: event.currentTarget.value
+                            }))
+                        }
+                        placeholder="Finland"
+                        value={editForm.publicName}
+                    />
+                    <TextInput
+                        label="locationCode"
+                        onChange={(event) =>
+                            setEditForm((current) => ({
+                                ...current,
+                                locationCode: event.currentTarget.value
+                            }))
+                        }
+                        placeholder="FI"
+                        value={editForm.locationCode}
+                    />
+                    <TextInput
+                        label="planCode"
+                        onChange={(event) =>
+                            setEditForm((current) => ({
+                                ...current,
+                                planCode: event.currentTarget.value
+                            }))
+                        }
+                        value={editForm.planCode}
+                    />
+                    <Select
+                        data={nodeStatusOptions}
+                        label="status"
+                        onChange={(value) =>
+                            setEditForm((current) => ({
+                                ...current,
+                                status: (value as ToporBalancerNodeStatus | null) || 'active'
+                            }))
+                        }
+                        value={editForm.status}
+                    />
+                    <NumberInput
+                        allowDecimal
+                        decimalScale={4}
+                        label="weight"
+                        min={0.0001}
+                        onChange={(value) =>
+                            setEditForm((current) => ({
+                                ...current,
+                                weight: typeof value === 'number' ? value : Number(value)
+                            }))
+                        }
+                        value={editForm.weight}
+                    />
+                    <NumberInput
+                        allowDecimal={false}
+                        label="maxUsers"
+                        min={1}
+                        onChange={(value) =>
+                            setEditForm((current) => ({
+                                ...current,
+                                maxUsers: typeof value === 'number' ? value : Number(value)
+                            }))
+                        }
+                        value={editForm.maxUsers}
+                    />
+
+                    <Group justify="flex-end">
+                        <Button onClick={closeCreateNodeModal} variant="subtle">
+                            Cancel
+                        </Button>
+                        <Button loading={isNodeActionLoading} onClick={createNode}>
+                            Create
+                        </Button>
+                    </Group>
+                </Stack>
+            </Modal>
+
             <Modal centered onClose={closeEditModal} opened={Boolean(editingNode)} title="Edit node">
                 <Stack gap="md">
                     {editingNode && (
@@ -1451,6 +1705,26 @@ export function ToporBalancerAdminPage() {
                     )}
 
                     <TextInput
+                        label="technicalHostName"
+                        onChange={(event) =>
+                            setEditForm((current) => ({
+                                ...current,
+                                technicalHostName: event.currentTarget.value
+                            }))
+                        }
+                        value={editForm.technicalHostName}
+                    />
+                    <TextInput
+                        label="publicHostCode"
+                        onChange={(event) =>
+                            setEditForm((current) => ({
+                                ...current,
+                                publicHostCode: event.currentTarget.value
+                            }))
+                        }
+                        value={editForm.publicHostCode}
+                    />
+                    <TextInput
                         label="publicName"
                         onChange={(event) =>
                             setEditForm((current) => ({
@@ -1459,6 +1733,37 @@ export function ToporBalancerAdminPage() {
                             }))
                         }
                         value={editForm.publicName}
+                    />
+                    <TextInput
+                        label="locationCode"
+                        onChange={(event) =>
+                            setEditForm((current) => ({
+                                ...current,
+                                locationCode: event.currentTarget.value
+                            }))
+                        }
+                        value={editForm.locationCode}
+                    />
+                    <TextInput
+                        label="planCode"
+                        onChange={(event) =>
+                            setEditForm((current) => ({
+                                ...current,
+                                planCode: event.currentTarget.value
+                            }))
+                        }
+                        value={editForm.planCode}
+                    />
+                    <Select
+                        data={nodeStatusOptions}
+                        label="status"
+                        onChange={(value) =>
+                            setEditForm((current) => ({
+                                ...current,
+                                status: (value as ToporBalancerNodeStatus | null) || 'active'
+                            }))
+                        }
+                        value={editForm.status}
                     />
                     <NumberInput
                         allowDecimal
@@ -1492,6 +1797,30 @@ export function ToporBalancerAdminPage() {
                         </Button>
                         <Button loading={isNodeActionLoading} onClick={saveNodeEdit}>
                             Save
+                        </Button>
+                    </Group>
+                </Stack>
+            </Modal>
+
+            <Modal
+                centered
+                onClose={() => setPendingDeleteNode(null)}
+                opened={Boolean(pendingDeleteNode)}
+                title="Delete node"
+            >
+                <Stack gap="md">
+                    <Text>
+                        Delete node <strong>{pendingDeleteNode?.technicalHostName}</strong>?
+                    </Text>
+                    <Text c="dimmed" size="sm">
+                        Nodes with assignments are rejected by the API and cannot be deleted.
+                    </Text>
+                    <Group justify="flex-end">
+                        <Button onClick={() => setPendingDeleteNode(null)} variant="subtle">
+                            Cancel
+                        </Button>
+                        <Button color="red" loading={isNodeActionLoading} onClick={confirmDeleteNode}>
+                            Delete
                         </Button>
                     </Group>
                 </Stack>

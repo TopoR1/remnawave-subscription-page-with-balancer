@@ -51,6 +51,10 @@ export const configSchema = z
             .string()
             .default('true')
             .transform((val) => val === 'true'),
+        TOPOR_BALANCER_IMPORT_CONFIG_ON_START: z
+            .string()
+            .default('false')
+            .transform((val) => val === 'true'),
         TOPOR_BALANCER_ADMIN_TOKEN: z.optional(z.string()),
         INTERNAL_JWT_SECRET: z.string(),
         EGAMES_COOKIE: z.optional(z.string()),

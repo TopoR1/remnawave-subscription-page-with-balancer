@@ -9,6 +9,8 @@ import type {
     ToporBalancerAssignmentRepository,
     ToporBalancerAssignmentSelectionInput,
     ToporBalancerManualReassignInput,
+    ToporBalancerNodeCreateInput,
+    ToporBalancerNodeDeleteResult,
     ToporBalancerNodeUpdateInput,
     ToporBalancerRequestLogInput,
     ToporBalancerRequestFilters,
@@ -916,6 +918,156 @@ test('admin service lists, updates, and manually reassigns nodes', async () => {
     assert.ok(nodes.some((node) => node.technicalHostName === 'FI-STD-01'));
 });
 
+test('database mode starts without a JSON config and exposes an empty nodes list', async () => {
+    const repository = new InMemoryToporBalancerRepository();
+    const service = new ToporBalancerService(
+        createConfigServiceStub({
+            TOPOR_BALANCER_ENABLED: true,
+            TOPOR_BALANCER_ASSIGNMENT_MODE: 'database',
+            TOPOR_BALANCER_DATABASE_URL: 'postgres://unit-test',
+            TOPOR_BALANCER_CONFIG_PATH: '/missing/topor-balancer.config.json',
+            TOPOR_BALANCER_ADMIN_TOKEN: 'secret',
+            TOPOR_BALANCER_IMPORT_CONFIG_ON_START: false,
+        }),
+    );
+
+    setServiceRepository(service, repository);
+
+    await service.onModuleInit();
+
+    const health = await service.getAdminHealth();
+    const nodes = await service.listAdminNodes();
+
+    assert.equal(health.databaseConnected, true);
+    assert.equal(health.configLoaded, false);
+    assert.equal(nodes.length, 0);
+});
+
+test('admin service creates nodes from UI payloads', async () => {
+    const repository = new InMemoryToporBalancerRepository();
+    const service = new ToporBalancerService(
+        createConfigServiceStub({
+            TOPOR_BALANCER_DATABASE_URL: 'postgres://unit-test',
+        }),
+    );
+
+    setServiceRepository(service, repository);
+
+    const node = await service.createAdminNode({
+        technicalHostName: 'FI-STD-01',
+        publicHostCode: 'fi_standard',
+        publicName: 'Finland',
+        locationCode: 'FI',
+        planCode: 'standard',
+        weight: 1,
+        maxUsers: 300,
+        status: 'active',
+    });
+
+    assert.equal(node.technicalHostName, 'FI-STD-01');
+    assert.equal(node.publicHostCode, 'fi_standard');
+    assert.equal((await service.listAdminNodes()).length, 1);
+});
+
+test('admin service rejects invalid node creation', async () => {
+    const repository = new InMemoryToporBalancerRepository();
+    const service = new ToporBalancerService(
+        createConfigServiceStub({
+            TOPOR_BALANCER_DATABASE_URL: 'postgres://unit-test',
+        }),
+    );
+
+    setServiceRepository(service, repository);
+
+    await assert.rejects(
+        () =>
+            service.createAdminNode({
+                technicalHostName: '',
+                publicHostCode: 'fi_standard',
+                publicName: 'Finland',
+                planCode: 'standard',
+                weight: 1,
+                maxUsers: 300,
+                status: 'active',
+            }),
+        /technicalHostName must be a non-empty string/,
+    );
+    await assert.rejects(
+        () =>
+            service.createAdminNode({
+                technicalHostName: 'FI-STD-01',
+                publicHostCode: 'fi_standard',
+                publicName: 'Finland',
+                planCode: 'standard',
+                weight: 0,
+                maxUsers: 300,
+                status: 'active',
+            }),
+        /weight must be a finite number > 0/,
+    );
+});
+
+test('admin service rejects duplicate technicalHostName creation', async () => {
+    const repository = InMemoryToporBalancerRepository.fromConfig(balancerConfig);
+    const service = new ToporBalancerService(
+        createConfigServiceStub({
+            TOPOR_BALANCER_DATABASE_URL: 'postgres://unit-test',
+        }),
+    );
+
+    setServiceRepository(service, repository);
+
+    await assert.rejects(
+        () =>
+            service.createAdminNode({
+                technicalHostName: 'FI-STD-01',
+                publicHostCode: 'fi_standard',
+                publicName: 'Finland',
+                planCode: 'standard',
+                weight: 1,
+                maxUsers: 300,
+                status: 'active',
+            }),
+        /technicalHostName already exists/,
+    );
+});
+
+test('admin service rejects deleting a node with assignments', async () => {
+    const repository = InMemoryToporBalancerRepository.fromConfig(balancerConfig);
+    const service = new ToporBalancerService(
+        createConfigServiceStub({
+            TOPOR_BALANCER_DATABASE_URL: 'postgres://unit-test',
+        }),
+    );
+
+    setServiceRepository(service, repository);
+    repository.assign('admin-user', 'fi_standard', 'standard', 'FI-STD-01');
+
+    await assert.rejects(
+        () => service.deleteAdminNode('FI-STD-01'),
+        /has assignments and cannot be deleted/,
+    );
+});
+
+test('admin service deletes a node without assignments', async () => {
+    const repository = InMemoryToporBalancerRepository.fromConfig(balancerConfig);
+    const service = new ToporBalancerService(
+        createConfigServiceStub({
+            TOPOR_BALANCER_DATABASE_URL: 'postgres://unit-test',
+        }),
+    );
+
+    setServiceRepository(service, repository);
+
+    const result = await service.deleteAdminNode('FR-STD-01');
+
+    assert.equal(result.deleted, true);
+    assert.equal(
+        (await service.listAdminNodes()).some((node) => node.technicalHostName === 'FR-STD-01'),
+        false,
+    );
+});
+
 test('admin service rejects invalid node updates', async () => {
     const repository = InMemoryToporBalancerRepository.fromConfig(balancerConfig);
     const service = new ToporBalancerService(
@@ -936,7 +1088,7 @@ test('admin service rejects invalid node updates', async () => {
     );
     await assert.rejects(
         () => service.updateAdminNode('FI-STD-01', { publicName: '   ' }),
-        /publicName must be non-empty/,
+        /publicName must be a non-empty string/,
     );
     await assert.rejects(
         () =>
@@ -1081,6 +1233,35 @@ class InMemoryToporBalancerRepository implements ToporBalancerAssignmentReposito
         }));
     }
 
+    public async createNode(
+        input: ToporBalancerNodeCreateInput,
+    ): Promise<ToporBalancerAdminNode | null> {
+        if (this.nodes.has(input.technicalHostName)) {
+            return null;
+        }
+
+        const node: ToporBalancerDbNode = {
+            id: input.technicalHostName,
+            technicalHostName: input.technicalHostName,
+            publicHostCode: input.publicHostCode,
+            publicName: input.publicName,
+            locationCode: input.locationCode,
+            planCode: input.planCode,
+            weight: input.weight,
+            maxUsers: input.maxUsers,
+            status: input.status,
+            createdAt: new Date(0).toISOString(),
+            updatedAt: new Date(0).toISOString(),
+        };
+
+        this.nodes.set(node.id, node);
+
+        return {
+            ...node,
+            assignedUsers: 0,
+        };
+    }
+
     public async updateNode(
         id: string,
         input: ToporBalancerNodeUpdateInput,
@@ -1089,6 +1270,25 @@ class InMemoryToporBalancerRepository implements ToporBalancerAssignmentReposito
 
         if (!node) {
             return null;
+        }
+
+        if (input.technicalHostName !== undefined) {
+            this.nodes.delete(id);
+            node.id = input.technicalHostName;
+            node.technicalHostName = input.technicalHostName;
+            this.nodes.set(node.id, node);
+        }
+
+        if (input.publicHostCode !== undefined) {
+            node.publicHostCode = input.publicHostCode;
+        }
+
+        if (input.locationCode !== undefined) {
+            node.locationCode = input.locationCode;
+        }
+
+        if (input.planCode !== undefined) {
+            node.planCode = input.planCode;
         }
 
         if (input.weight !== undefined) {
@@ -1111,6 +1311,20 @@ class InMemoryToporBalancerRepository implements ToporBalancerAssignmentReposito
             ...node,
             assignedUsers: this.countAssignmentsForNode(node.id),
         };
+    }
+
+    public async deleteNode(id: string): Promise<ToporBalancerNodeDeleteResult> {
+        if (!this.nodes.has(id)) {
+            return 'not_found';
+        }
+
+        if (this.countAssignmentsForNode(id) > 0) {
+            return 'has_assignments';
+        }
+
+        this.nodes.delete(id);
+
+        return 'deleted';
     }
 
     public async listAssignments(

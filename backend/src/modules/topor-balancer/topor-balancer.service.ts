@@ -1,5 +1,6 @@
 import {
     BadRequestException,
+    ConflictException,
     Injectable,
     Logger,
     NotFoundException,
@@ -13,6 +14,7 @@ import type {
     ToporBalancerAssignmentFilters,
     ToporBalancerAssignmentRepository,
     ToporBalancerManualReassignInput,
+    ToporBalancerNodeCreateInput,
     ToporBalancerNodeUpdateInput,
     ToporBalancerRequestFilters,
 } from './topor-balancer-database.repository';
@@ -61,12 +63,22 @@ export class ToporBalancerService implements OnModuleDestroy, OnModuleInit {
 
         try {
             const repository = this.getOrCreateRepository();
-            const config = await this.loadConfig();
 
             await repository.initializeSchema();
-            await repository.upsertConfiguredNodes(config);
-            this.startupConfig = config;
-            this.logger.log('TopoR balancer database schema initialized and nodes upserted.');
+
+            if (this.shouldImportConfigOnStart()) {
+                const config = await this.loadOptionalConfig();
+
+                if (config) {
+                    await repository.upsertConfiguredNodes(config);
+                    this.startupConfig = config;
+                    this.logger.log('TopoR balancer config imported into database.');
+                } else {
+                    this.logger.log('TopoR balancer config import skipped: config file not found.');
+                }
+            }
+
+            this.logger.log('TopoR balancer database schema initialized.');
         } catch (error) {
             this.logger.error('TopoR balancer database startup initialization failed', error);
 
@@ -96,6 +108,18 @@ export class ToporBalancerService implements OnModuleDestroy, OnModuleInit {
 
     public async loadConfig(): Promise<ToporBalancerConfig> {
         return loadToporBalancerConfigFromFile(this.getConfigPath());
+    }
+
+    public async loadOptionalConfig(): Promise<ToporBalancerConfig | null> {
+        try {
+            return await this.loadConfig();
+        } catch (error) {
+            if (this.isMissingFileError(error)) {
+                return null;
+            }
+
+            throw error;
+        }
     }
 
     public async process(input: ToporBalancerProcessInput): Promise<unknown> {
@@ -158,8 +182,7 @@ export class ToporBalancerService implements OnModuleDestroy, OnModuleInit {
         let lastError: string | undefined;
 
         try {
-            await this.loadConfig();
-            configLoaded = true;
+            configLoaded = Boolean(await this.loadOptionalConfig());
         } catch (error) {
             configLoaded = false;
             lastError = this.getErrorMessage(error);
@@ -194,19 +217,66 @@ export class ToporBalancerService implements OnModuleDestroy, OnModuleInit {
         return this.getAdminRepository().listNodes();
     }
 
+    public async createAdminNode(
+        input: ToporBalancerNodeCreateInput,
+    ): Promise<ToporBalancerAdminNode> {
+        this.validateNodeCreate(input);
+
+        const node = await this.getAdminRepository().createNode({
+            ...input,
+            technicalHostName: input.technicalHostName.trim(),
+            publicHostCode: input.publicHostCode.trim(),
+            publicName: input.publicName.trim(),
+            locationCode: this.normalizeOptionalString(input.locationCode),
+            planCode: input.planCode.trim(),
+        });
+
+        if (!node) {
+            throw new ConflictException('TopoR balancer node technicalHostName already exists');
+        }
+
+        return node;
+    }
+
     public async updateAdminNode(
         id: string,
         input: ToporBalancerNodeUpdateInput,
     ): Promise<ToporBalancerAdminNode> {
         this.validateNodeUpdate(input);
 
-        const node = await this.getAdminRepository().updateNode(id, input);
+        const node = await this.getAdminRepository().updateNode(id, {
+            ...input,
+            technicalHostName: this.normalizeOptionalString(input.technicalHostName),
+            publicHostCode: this.normalizeOptionalString(input.publicHostCode),
+            publicName: this.normalizeOptionalString(input.publicName),
+            locationCode:
+                input.locationCode === undefined
+                    ? undefined
+                    : this.normalizeOptionalString(input.locationCode),
+            planCode: this.normalizeOptionalString(input.planCode),
+        });
 
         if (!node) {
             throw new NotFoundException('TopoR balancer node not found');
         }
 
         return node;
+    }
+
+    public async deleteAdminNode(id: string): Promise<{ deleted: true }> {
+        const result = await this.getAdminRepository().deleteNode(id);
+
+        if (result === 'has_assignments') {
+            throw new ConflictException(
+                'TopoR balancer node has assignments and cannot be deleted',
+            );
+        }
+
+        if (result === 'not_found') {
+            throw new NotFoundException('TopoR balancer node not found');
+        }
+
+        return { deleted: true };
     }
 
     public async listAdminAssignments(
@@ -255,11 +325,10 @@ export class ToporBalancerService implements OnModuleDestroy, OnModuleInit {
                 throw new Error('TOPOR_BALANCER_DATABASE_URL is not configured');
             }
 
-            const config = this.startupConfig ?? (await this.loadConfig());
             const repository = this.getOrCreateRepository();
 
             await repository.initializeSchema();
-            await repository.upsertConfiguredNodes(config);
+            const config = await this.getDatabaseProcessingConfig(repository);
 
             return await processSubscriptionWithDatabaseBalancer({
                 shortUuid: input.shortUuid,
@@ -335,6 +404,11 @@ export class ToporBalancerService implements OnModuleDestroy, OnModuleInit {
     }
 
     private validateNodeUpdate(input: ToporBalancerNodeUpdateInput): void {
+        this.validateOptionalNonEmptyString(input.technicalHostName, 'technicalHostName');
+        this.validateOptionalNonEmptyString(input.publicHostCode, 'publicHostCode');
+        this.validateOptionalNonEmptyString(input.publicName, 'publicName');
+        this.validateOptionalNonEmptyString(input.planCode, 'planCode');
+
         if (input.status !== undefined && !ADMIN_NODE_STATUSES.has(input.status)) {
             throw new BadRequestException('Invalid TopoR balancer node status');
         }
@@ -355,16 +429,68 @@ export class ToporBalancerService implements OnModuleDestroy, OnModuleInit {
             throw new BadRequestException('TopoR balancer node maxUsers must be an integer >= 1');
         }
 
-        if (
-            input.publicName !== undefined &&
-            (typeof input.publicName !== 'string' || input.publicName.trim().length === 0)
-        ) {
-            throw new BadRequestException('TopoR balancer node publicName must be non-empty');
-        }
     }
 
     private shouldFallbackToHash(): boolean {
         return this.configService.getOrThrow<boolean>('TOPOR_BALANCER_DB_FALLBACK_TO_HASH');
+    }
+
+    private shouldImportConfigOnStart(): boolean {
+        return this.configService.get<boolean>('TOPOR_BALANCER_IMPORT_CONFIG_ON_START') === true;
+    }
+
+    private async getDatabaseProcessingConfig(
+        repository: ToporBalancerAssignmentRepository,
+    ): Promise<ToporBalancerConfig> {
+        if (this.startupConfig) {
+            return this.startupConfig;
+        }
+
+        const nodes = await repository.listNodes();
+
+        return this.buildConfigFromAdminNodes(nodes);
+    }
+
+    private buildConfigFromAdminNodes(nodes: ToporBalancerAdminNode[]): ToporBalancerConfig {
+        const locations = new Map<string, ToporBalancerConfig['locations'][number]>();
+
+        for (const node of nodes) {
+            const key = `${node.publicHostCode}:${node.planCode}`;
+            const location =
+                locations.get(key) ??
+                {
+                    publicHostCode: node.publicHostCode,
+                    publicName: node.publicName,
+                    locationCode: node.locationCode,
+                    planCode: node.planCode,
+                    nodes: [],
+                };
+
+            location.nodes.push({
+                technicalHostName: node.technicalHostName,
+                weight: node.weight,
+                maxUsers: node.maxUsers,
+                status: node.status,
+            });
+            locations.set(key, location);
+        }
+
+        return {
+            enabled: true,
+            locations: Array.from(locations.values()),
+        };
+    }
+
+    private validateNodeCreate(input: ToporBalancerNodeCreateInput): void {
+        this.validateNonEmptyString(input.technicalHostName, 'technicalHostName');
+        this.validateNonEmptyString(input.publicHostCode, 'publicHostCode');
+        this.validateNonEmptyString(input.publicName, 'publicName');
+        this.validateNonEmptyString(input.planCode, 'planCode');
+        this.validateNodeUpdate({
+            maxUsers: input.maxUsers,
+            status: input.status,
+            weight: input.weight,
+        });
     }
 
     private async validateManualReassign(input: ToporBalancerManualReassignInput): Promise<void> {
@@ -401,7 +527,34 @@ export class ToporBalancerService implements OnModuleDestroy, OnModuleInit {
         }
     }
 
+    private validateOptionalNonEmptyString(value: unknown, fieldName: string): void {
+        if (value === undefined || value === null) {
+            return;
+        }
+
+        this.validateNonEmptyString(value, fieldName);
+    }
+
+    private normalizeOptionalString(value: string | undefined): string | undefined {
+        if (value === undefined) {
+            return undefined;
+        }
+
+        const trimmed = value.trim();
+
+        return trimmed.length > 0 ? trimmed : undefined;
+    }
+
     private getErrorMessage(error: unknown): string {
         return error instanceof Error ? error.message : String(error);
+    }
+
+    private isMissingFileError(error: unknown): boolean {
+        return (
+            typeof error === 'object' &&
+            error !== null &&
+            'code' in error &&
+            (error as { code?: string }).code === 'ENOENT'
+        );
     }
 }
