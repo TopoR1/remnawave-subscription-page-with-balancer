@@ -93,6 +93,7 @@ nano .env
 APP_PORT=3010
 TOPOR_BALANCER_HOST_BIND=127.0.0.1
 TOPOR_BALANCER_HOST_PORT=3011
+REMNAWAVE_DOCKER_NETWORK=remnawave-network
 
 POSTGRES_USER=topor_balancer
 POSTGRES_PASSWORD=change_me
@@ -120,7 +121,8 @@ docker compose -f examples/docker-compose.topor-balancer.yml config
 ```
 
 `APP_PORT` - внутренний порт приложения в контейнере.  
-`TOPOR_BALANCER_HOST_PORT` - порт на сервере.
+`TOPOR_BALANCER_HOST_PORT` - порт на сервере.  
+`REMNAWAVE_DOCKER_NETWORK` - Docker network, где находится Caddy container.
 
 Пример выше означает:
 
@@ -129,6 +131,18 @@ docker compose -f examples/docker-compose.topor-balancer.yml config
 ```
 
 Если обычный Remnawave Subscription Page уже использует `3010`, оставьте `APP_PORT=3010` и поменяйте только `TOPOR_BALANCER_HOST_PORT`, например на `3011`.
+
+Если Caddy уже работает в Docker, узнайте его сеть и укажите ее в `REMNAWAVE_DOCKER_NETWORK`:
+
+```bash
+docker inspect caddy --format '{{range $name, $_ := .NetworkSettings.Networks}}{{println $name}}{{end}}'
+```
+
+Если Caddy еще нет, но вы хотите использовать сеть по умолчанию из примера:
+
+```bash
+docker network create remnawave-network
+```
 
 ### 3. Запустить
 
@@ -196,9 +210,47 @@ curl -A "v2rayNG/1.9.0" "https://sub.example.com/<shortUuid>"
 curl -A "v2rayNG/1.9.0" "https://sub.example.com/<shortUuid>" | base64 -d
 ```
 
-## Публикация через Caddy
+## Публикация через Docker Caddy
 
-Если Balancer слушает на сервере `127.0.0.1:3011`, Caddy должен проксировать домен туда:
+Если Caddy работает в Docker, рекомендуемый способ - подключить Balancer к той же Docker network и проксировать по имени контейнера.
+
+Узнайте сеть Caddy:
+
+```bash
+docker inspect caddy --format '{{range $name, $_ := .NetworkSettings.Networks}}{{println $name}}{{end}}'
+```
+
+Укажите ее в `.env`:
+
+```env
+REMNAWAVE_DOCKER_NETWORK=<network_name>
+```
+
+Перезапустите compose:
+
+```bash
+docker compose -f examples/docker-compose.topor-balancer.yml up -d --build
+```
+
+Проверьте доступ из Caddy container:
+
+```bash
+docker exec caddy sh -c "wget -S -O- --timeout=5 http://remnawave-subscription-page-with-balancer:3010/admin/topor-balancer 2>&1 | head -80"
+```
+
+Рекомендуемый Caddyfile:
+
+```caddy
+sub.example.com {
+    reverse_proxy remnawave-subscription-page-with-balancer:3010 {
+        header_up X-Forwarded-Proto https
+        header_up X-Forwarded-Host {host}
+        header_up X-Real-IP {remote_host}
+    }
+}
+```
+
+Если Caddy установлен прямо на хосте, а не в Docker, можно использовать fallback:
 
 ```caddy
 sub.example.com {
@@ -225,7 +277,7 @@ curl -I https://sub.example.com
 - DNS A-record для `sub.example.com` должен указывать на IP сервера;
 - порты `80` и `443` должны быть открыты;
 - Caddy сам выпустит HTTPS-сертификат, если DNS настроен правильно;
-- для публикации через Caddy лучше держать Docker bind на `127.0.0.1`, а наружу открывать только HTTPS через Caddy.
+- если Caddy в Docker, не используйте `127.0.0.1:3011` внутри Caddy container: это localhost самого Caddy container, а не Balancer.
 
 ### Дополнительная защита Admin UI/API
 
@@ -247,7 +299,11 @@ sub.example.com {
         admin <bcrypt_hash>
     }
 
-    reverse_proxy 127.0.0.1:3011
+    reverse_proxy remnawave-subscription-page-with-balancer:3010 {
+        header_up X-Forwarded-Proto https
+        header_up X-Forwarded-Host {host}
+        header_up X-Real-IP {remote_host}
+    }
 }
 ```
 

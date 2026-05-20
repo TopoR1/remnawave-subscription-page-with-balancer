@@ -8,9 +8,22 @@
 git clone https://github.com/TopoR1/remnawave-subscription-page-with-balancer.git
 cd remnawave-subscription-page-with-balancer
 cp examples/topor-balancer.env.example .env
+nano .env
 ```
 
-Отредактируйте `.env`, затем запустите:
+Если Caddy работает в Docker, узнайте его network:
+
+```bash
+docker inspect caddy --format '{{range $name, $_ := .NetworkSettings.Networks}}{{println $name}}{{end}}'
+```
+
+Укажите сеть в `.env`:
+
+```env
+REMNAWAVE_DOCKER_NETWORK=<network_name>
+```
+
+Запуск:
 
 ```bash
 docker compose -f examples/docker-compose.topor-balancer.yml up -d --build
@@ -18,17 +31,9 @@ docker compose -f examples/docker-compose.topor-balancer.yml up -d --build
 
 PostgreSQL входит в compose по умолчанию.
 
-## Reverse proxy
+## Caddy в Docker
 
-Пример Caddy:
-
-```caddy
-sub.example.com {
-    reverse_proxy 127.0.0.1:3011
-}
-```
-
-Если Caddy тоже работает в Docker и проксирует по имени контейнера:
+Рекомендуемый Caddyfile:
 
 ```caddy
 sub.example.com {
@@ -40,9 +45,25 @@ sub.example.com {
 }
 ```
 
-В этом случае Caddy и Balancer должны быть подключены к одной Docker network.
+Проверка из Caddy container:
 
-Admin API уже требует Bearer token. Дополнительная защита на reverse proxy рекомендуется.
+```bash
+docker exec caddy sh -c "wget -S -O- --timeout=5 http://remnawave-subscription-page-with-balancer:3010/admin/topor-balancer 2>&1 | head -80"
+```
+
+Если ответ `bad address`, Caddy и Balancer не в одной Docker network.
+
+## Caddy на хосте
+
+Если Caddy установлен прямо на сервере, а не в Docker, можно проксировать внешний host port:
+
+```caddy
+sub.example.com {
+    reverse_proxy 127.0.0.1:3011
+}
+```
+
+Не используйте `127.0.0.1:3011` внутри Docker Caddy: для Caddy container это его собственный localhost.
 
 ## Обновление
 
@@ -57,4 +78,4 @@ docker compose -f examples/docker-compose.topor-balancer.yml up -d --build
 docker compose -f examples/docker-compose.topor-balancer.yml down
 ```
 
-Чтобы удалить данные PostgreSQL, удалите volume вручную только после backup.
+Чтобы удалить данные PostgreSQL, удаляйте volume вручную только после backup.

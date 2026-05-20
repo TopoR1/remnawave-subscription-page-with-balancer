@@ -12,6 +12,7 @@ cp examples/topor-balancer.env.example .env
 APP_PORT=3010
 TOPOR_BALANCER_HOST_BIND=127.0.0.1
 TOPOR_BALANCER_HOST_PORT=3011
+REMNAWAVE_DOCKER_NETWORK=remnawave-network
 POSTGRES_USER=topor_balancer
 POSTGRES_PASSWORD=change_me
 POSTGRES_DB=topor_balancer
@@ -32,6 +33,7 @@ TOPOR_BALANCER_ADMIN_TOKEN=replace_me_long_random_admin_token
 | `APP_PORT` | `3010` | Порт приложения внутри контейнера. |
 | `TOPOR_BALANCER_HOST_BIND` | `127.0.0.1` | Адрес на сервере, куда Docker публикует порт. |
 | `TOPOR_BALANCER_HOST_PORT` | `3011` | Внешний порт на сервере. |
+| `REMNAWAVE_DOCKER_NETWORK` | `remnawave-network` | Внешняя Docker network, где находится Caddy container. |
 | `POSTGRES_USER` | `topor_balancer` | Пользователь PostgreSQL, создается при первом создании volume. |
 | `POSTGRES_PASSWORD` | `change_me` | Пароль PostgreSQL, должен совпадать с паролем в `TOPOR_BALANCER_DATABASE_URL`. |
 | `POSTGRES_DB` | `topor_balancer` | Имя базы PostgreSQL. |

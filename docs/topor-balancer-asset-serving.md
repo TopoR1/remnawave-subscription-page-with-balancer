@@ -55,3 +55,15 @@ docker exec caddy wget -S -O- --timeout=5 http://remnawave-subscription-page-wit
 ```
 
 Если Caddy работает в Docker, контейнер Caddy и контейнер Balancer должны быть в одной Docker network, иначе имя `remnawave-subscription-page-with-balancer` не будет резолвиться.
+
+Найти сеть Caddy:
+
+```bash
+docker inspect caddy --format '{{range $name, $_ := .NetworkSettings.Networks}}{{println $name}}{{end}}'
+```
+
+Указать ее в `.env`:
+
+```env
+REMNAWAVE_DOCKER_NETWORK=<network_name>
+```

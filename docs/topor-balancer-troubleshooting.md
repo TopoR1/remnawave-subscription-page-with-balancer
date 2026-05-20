@@ -2,9 +2,7 @@
 
 ## `error from registry: denied`
 
-Причина: старый compose пытался скачать приватный или несуществующий GHCR image.
-
-Исправление:
+Старый compose пытался скачать приватный или несуществующий GHCR image.
 
 ```bash
 docker compose -f examples/docker-compose.topor-balancer.yml up -d --build
@@ -12,54 +10,62 @@ docker compose -f examples/docker-compose.topor-balancer.yml up -d --build
 
 ## `ERESOLVE could not resolve`
 
-Причина: peer-конфликт frontend dev tooling: `eslint-config-airbnb-base@15` ожидает ESLint 7/8, а проект использует ESLint 9.
-
-Исправление уже в Dockerfile: build stage использует `npm ci --legacy-peer-deps`. На хосте ничего делать не нужно.
+Peer-конфликт frontend dev tooling уже обработан в Dockerfile через `npm ci --legacy-peer-deps`. Node.js/npm на хосте не нужны.
 
 ## `"/frontend/dist": not found`
 
-Причина: старый Dockerfile ожидал frontend, собранный на хосте.
-
-Исправление:
+Старый Dockerfile ожидал frontend, собранный на хосте.
 
 ```bash
 docker compose -f examples/docker-compose.topor-balancer.yml build --no-cache
 docker compose -f examples/docker-compose.topor-balancer.yml up -d
 ```
 
+## `wget: bad address 'remnawave-subscription-page-with-balancer:3010'`
+
+Причина: Caddy container и Balancer container находятся в разных Docker networks, поэтому Caddy не может резолвить имя `remnawave-subscription-page-with-balancer`.
+
+Найдите Docker network Caddy:
+
+```bash
+docker inspect caddy --format '{{range $name, $_ := .NetworkSettings.Networks}}{{println $name}}{{end}}'
+```
+
+Вариант 1: подключить уже запущенный контейнер вручную:
+
+```bash
+docker network connect <network_name> remnawave-subscription-page-with-balancer
+docker exec caddy sh -c "wget -S -O- --timeout=5 http://remnawave-subscription-page-with-balancer:3010/admin/topor-balancer 2>&1 | head -80"
+```
+
+Вариант 2: указать сеть в `.env` и перезапустить compose:
+
+```env
+REMNAWAVE_DOCKER_NETWORK=<network_name>
+```
+
+```bash
+docker compose -f examples/docker-compose.topor-balancer.yml up -d
+```
+
 ## Черный экран в Admin UI и 502 на `/assets/*`
 
-Симптомы:
+Чаще всего Caddy не может достучаться до Balancer или не может резолвить имя контейнера.
 
-```text
-https://subs.example.com/admin/topor-balancer открывается
-/assets/index-*.css -> 502
-/assets/index-*.js -> 502
-/assets/favicon.svg -> 502
-```
-
-Это значит, что домен и TLS уже работают, но frontend assets не отдаются backend-ом или Caddy не может достучаться до upstream.
-
-Проверьте файлы внутри app container:
+Проверьте, что frontend файлы есть внутри Balancer:
 
 ```bash
-docker exec remnawave-subscription-page-with-balancer sh -c "find /opt/app -maxdepth 4 -type f | grep -E 'index.html|assets|favicon' | head -80"
+docker exec remnawave-subscription-page-with-balancer sh -c "find /opt/app -maxdepth 4 -type f | grep -E 'index.html|assets|favicon' | head -100"
 ```
 
-Проверьте Admin UI и один реальный asset через домен:
+Проверьте доступ из Caddy container:
 
 ```bash
-curl -vk https://subs.example.com/admin/topor-balancer
-curl -vk https://subs.example.com/assets/<real-asset-file>
+docker exec caddy sh -c "wget -S -O- --timeout=5 http://remnawave-subscription-page-with-balancer:3010/admin/topor-balancer 2>&1 | head -80"
+docker exec caddy sh -c "wget -S -O- --timeout=5 http://remnawave-subscription-page-with-balancer:3010/assets/<asset> 2>&1 | head -80"
 ```
 
-Если Caddy в Docker, проверьте доступ к backend из Caddy container:
-
-```bash
-docker exec caddy wget -S -O- --timeout=5 http://remnawave-subscription-page-with-balancer:3010/admin/topor-balancer 2>&1 | head -80
-```
-
-Caddy и Balancer должны быть в одной Docker network. Рабочий upstream:
+Рабочий Caddyfile для Docker Caddy:
 
 ```caddy
 subs.example.com {
@@ -71,7 +77,7 @@ subs.example.com {
 }
 ```
 
-Специальные Caddy routes для `/assets/*` не нужны: backend должен отдавать `/assets/*` сам.
+Специальные Caddy routes для `/assets/*` не нужны.
 
 ## `node: command not found` или `npm: command not found`
 
@@ -95,8 +101,6 @@ curl -H "Authorization: Bearer <admin-token>" http://127.0.0.1:3011/api/topor-ba
 
 ## Порт занят
 
-Если Docker пишет `port is already allocated`, проверьте занятые порты:
-
 ```bash
 ss -ltnp | grep ':3010'
 docker ps --format "table {{.Names}}\t{{.Ports}}"
@@ -112,8 +116,6 @@ TOPOR_BALANCER_HOST_PORT=3011
 
 ## Database offline
 
-Проверьте, что compose поднял PostgreSQL:
-
 ```bash
 docker compose -f examples/docker-compose.topor-balancer.yml logs -f topor-balancer-postgres
 ```
@@ -126,7 +128,7 @@ TOPOR_BALANCER_DATABASE_URL=postgres://topor_balancer:change_me@topor-balancer-p
 
 ## PostgreSQL не принимает пароль
 
-В логах приложения:
+В логах:
 
 ```text
 FATAL: password authentication failed for user "topor_balancer"
@@ -134,27 +136,13 @@ TopoR balancer database startup initialization failed
 TopoR balancer will fail open with original responses.
 ```
 
-Причина: PostgreSQL создает пользователя и пароль только при первом создании Docker volume. Если позже поменять `POSTGRES_PASSWORD` или пароль в `TOPOR_BALANCER_DATABASE_URL`, существующий volume сохранит старый пароль. Приложение не сможет подключиться, и database mode не будет работать.
+PostgreSQL создает пользователя и пароль только при первом создании Docker volume. Если позже поменять `POSTGRES_PASSWORD` или пароль в `TOPOR_BALANCER_DATABASE_URL`, существующий volume сохранит старый пароль.
 
-Проверьте, что значения согласованы:
-
-```env
-POSTGRES_USER=topor_balancer
-POSTGRES_PASSWORD=change_me
-POSTGRES_DB=topor_balancer
-TOPOR_BALANCER_DATABASE_URL=postgres://topor_balancer:change_me@topor-balancer-postgres:5432/topor_balancer
-```
-
-Сравните переменные внутри контейнеров:
+Сравните env:
 
 ```bash
 docker exec remnawave-subscription-page-with-balancer printenv | grep -E "TOPOR_BALANCER_DATABASE_URL|POSTGRES"
 docker exec topor-balancer-postgres printenv | grep -E "POSTGRES_USER|POSTGRES_PASSWORD|POSTGRES_DB"
-```
-
-Посмотрите итоговый compose после подстановки `.env`:
-
-```bash
 docker compose -f examples/docker-compose.topor-balancer.yml config
 ```
 
@@ -166,20 +154,13 @@ docker volume rm examples_topor-balancer-postgres-data
 docker compose -f examples/docker-compose.topor-balancer.yml up -d --build
 ```
 
-Для production не удаляйте volume, если важны assignments. Безопасные варианты:
-
-- обновить пароль пользователя внутри PostgreSQL через `ALTER USER`;
-- или вернуть пароль в `TOPOR_BALANCER_DATABASE_URL` к тому, который уже сохранен в базе.
-
-Если меняете пароль после первого запуска, пересоздайте volume только на тестовом стенде или обновите пароль в БД вручную.
+Для production не удаляйте volume, если важны assignments. Обновите пароль через `ALTER USER` или верните старый пароль в `TOPOR_BALANCER_DATABASE_URL`.
 
 ## Hash mode без JSON не работает
 
-Это ожидаемо. Hash mode не использует БД, поэтому ему нужен `topor-balancer.config.json`.
+Hash mode не использует БД, поэтому ему нужен `topor-balancer.config.json`.
 
 ## `technicalHostName` не совпадает с VLESS remark
-
-Balancer сопоставляет техническую ноду по remark после `#`:
 
 ```text
 vless://...#FI-STD-01

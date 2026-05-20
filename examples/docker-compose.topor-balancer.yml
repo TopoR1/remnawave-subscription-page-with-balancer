@@ -14,6 +14,9 @@ services:
     depends_on:
       topor-balancer-postgres:
         condition: service_healthy
+    networks:
+      - default
+      - remnawave-network
 
   topor-balancer-postgres:
     image: postgres:16-alpine
@@ -33,6 +36,13 @@ services:
       interval: 10s
       timeout: 5s
       retries: 5
+    networks:
+      - default
 
 volumes:
   topor-balancer-postgres-data:
+
+networks:
+  remnawave-network:
+    external: true
+    name: ${REMNAWAVE_DOCKER_NETWORK:-remnawave-network}
