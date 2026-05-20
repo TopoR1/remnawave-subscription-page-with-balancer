@@ -42,6 +42,7 @@ import { processSubscriptionWithHashBalancer } from './topor-balancer-hash.proce
 import { parseToporBalancerConfig } from './topor-balancer-config.loader';
 import { ToporBalancerAdminGuard } from './topor-balancer-admin.guard';
 import { ToporBalancerService } from './topor-balancer.service';
+import { checkAssetsCookieMiddleware } from '../../common/middlewares/check-assets-cookie.middleware';
 
 const realityLink =
     'vless://11111111-1111-4111-8111-111111111111@example.com:443?type=tcp&security=reality&sni=www.microsoft.com&flow=xtls-rprx-vision&pbk=publicKeyValue&sid=abcd&fp=chrome#Finland';
@@ -877,6 +878,56 @@ test('admin guard requires a matching bearer token', () => {
         /Unauthorized/,
     );
     assert.equal(guard.canActivate(createExecutionContextStub('Bearer secret')), true);
+});
+
+test('static asset middleware allows public frontend assets without session cookie', () => {
+    let nextCalled = false;
+    let socketDestroyed = false;
+
+    checkAssetsCookieMiddleware(
+        {
+            cookies: {},
+            path: '/assets/index.js',
+        } as never,
+        {
+            socket: {
+                destroy: () => {
+                    socketDestroyed = true;
+                },
+            },
+        } as never,
+        () => {
+            nextCalled = true;
+        },
+    );
+
+    assert.equal(nextCalled, true);
+    assert.equal(socketDestroyed, false);
+});
+
+test('static asset middleware does not destroy non-asset requests with no session cookie', () => {
+    let nextCalled = false;
+    let socketDestroyed = false;
+
+    checkAssetsCookieMiddleware(
+        {
+            cookies: {},
+            path: '/admin/topor-balancer',
+        } as never,
+        {
+            socket: {
+                destroy: () => {
+                    socketDestroyed = true;
+                },
+            },
+        } as never,
+        () => {
+            nextCalled = true;
+        },
+    );
+
+    assert.equal(nextCalled, true);
+    assert.equal(socketDestroyed, false);
 });
 
 test('admin service lists, updates, and manually reassigns nodes', async () => {

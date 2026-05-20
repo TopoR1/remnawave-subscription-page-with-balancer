@@ -48,6 +48,9 @@ COPY --from=backend-build /opt/app/node_modules ./node_modules
 
 COPY --from=frontend-build /opt/app/frontend/dist ./frontend
 
+RUN test -f /opt/app/frontend/index.html || (echo "frontend index.html missing" && exit 1)
+RUN test -d /opt/app/frontend/assets || (echo "frontend assets missing" && exit 1)
+
 COPY backend/package*.json ./
 
 

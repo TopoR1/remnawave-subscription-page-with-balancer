@@ -1,4 +1,5 @@
 import { Request, Response } from 'express';
+import path from 'node:path';
 
 import { Get, Controller, Res, Req, Param, Logger } from '@nestjs/common';
 
@@ -11,6 +12,7 @@ import { APP_CONFIG_ROUTE_WO_LEADING_PATH } from '@remnawave/subscription-page-t
 import { GetJWTPayload } from '@common/decorators/get-jwt-payload';
 import { ClientIp } from '@common/decorators/get-ip';
 import { IJwtPayload } from '@common/constants';
+import { isDevelopment } from '@common/utils/startup-app';
 
 import { SubpageConfigService } from './subpage-config.service';
 import { RootService } from './root.service';
@@ -18,6 +20,9 @@ import { RootService } from './root.service';
 @Controller()
 export class RootController {
     private readonly logger = new Logger(RootController.name);
+    private readonly assetsPath = isDevelopment()
+        ? path.join(__dirname, '..', '..', 'dev_frontend')
+        : '/opt/app/frontend';
 
     constructor(
         private readonly rootService: RootService,
@@ -36,6 +41,28 @@ export class RootController {
             metaDescription: 'TopoR Balancer admin panel',
             panelData: '',
         });
+    }
+
+    @Get('admin/topor-balancer/*path')
+    async getToporBalancerAdminSpaFallback(@Res() response: Response) {
+        return this.getToporBalancerAdminPage(response);
+    }
+
+    @Get(['favicon.svg', 'favicon-32x32.png', 'favicon-16x16.png'])
+    async getRootFavicons(@Req() request: Request, @Res() response: Response) {
+        return response.sendFile(
+            path.join(this.assetsPath, 'assets', request.path.slice(1)),
+            (error) => {
+                if (error && !response.headersSent) {
+                    response.sendStatus(404);
+                }
+            },
+        );
+    }
+
+    @Get(['assets', 'assets/*path', 'locales', 'locales/*path'])
+    async getMissingStaticAsset(@Res() response: Response) {
+        return response.sendStatus(404);
     }
 
     @Get([':shortUuid', ':shortUuid/:clientType'])

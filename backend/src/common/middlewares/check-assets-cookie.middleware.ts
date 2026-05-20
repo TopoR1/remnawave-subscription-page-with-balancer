@@ -12,33 +12,24 @@ export function checkAssetsCookieMiddleware(
     res: Response,
     next: NextFunction,
 ) {
+    // Static frontend files are public assets for both the subscription UI and Admin UI.
+    // Admin UI is protected by its own API token; blocking assets here breaks production SPA loading.
     if (req.path.startsWith('/assets') || req.path.startsWith('/locales')) {
-        const secret = process.env.INTERNAL_JWT_SECRET;
+        return next();
+    }
 
-        if (!secret) {
-            logger.error('INTERNAL_JWT_SECRET is not set');
-            res.socket?.destroy();
+    const secret = process.env.INTERNAL_JWT_SECRET;
 
-            return;
-        }
+    if (!secret || !req.cookies.session) {
+        return next();
+    }
 
-        if (!req.cookies.session) {
-            logger.debug('No session cookie found');
-            res.socket?.destroy();
+    try {
+        const jwtPayload = jwt.verify(req.cookies.session, secret);
 
-            return;
-        }
-
-        try {
-            const jwtPayload = jwt.verify(req.cookies.session, secret);
-
-            req.user = jwtPayload as unknown as IJwtPayload;
-        } catch (error) {
-            logger.debug(error);
-            res.socket?.destroy();
-
-            return;
-        }
+        req.user = jwtPayload as unknown as IJwtPayload;
+    } catch (error) {
+        logger.debug(error);
     }
 
     return next();

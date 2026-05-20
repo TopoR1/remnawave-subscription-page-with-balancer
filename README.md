@@ -349,3 +349,4 @@ docker compose -f examples/docker-compose.topor-balancer.yml down
 - [Admin UI](docs/topor-balancer-ui.md)
 - [Admin API](docs/topor-balancer-admin-api.md)
 - [Troubleshooting](docs/topor-balancer-troubleshooting.md)
+- [Static assets / Admin UI](docs/topor-balancer-asset-serving.md)

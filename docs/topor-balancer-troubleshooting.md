@@ -27,6 +27,52 @@ docker compose -f examples/docker-compose.topor-balancer.yml build --no-cache
 docker compose -f examples/docker-compose.topor-balancer.yml up -d
 ```
 
+## Черный экран в Admin UI и 502 на `/assets/*`
+
+Симптомы:
+
+```text
+https://subs.example.com/admin/topor-balancer открывается
+/assets/index-*.css -> 502
+/assets/index-*.js -> 502
+/assets/favicon.svg -> 502
+```
+
+Это значит, что домен и TLS уже работают, но frontend assets не отдаются backend-ом или Caddy не может достучаться до upstream.
+
+Проверьте файлы внутри app container:
+
+```bash
+docker exec remnawave-subscription-page-with-balancer sh -c "find /opt/app -maxdepth 4 -type f | grep -E 'index.html|assets|favicon' | head -80"
+```
+
+Проверьте Admin UI и один реальный asset через домен:
+
+```bash
+curl -vk https://subs.example.com/admin/topor-balancer
+curl -vk https://subs.example.com/assets/<real-asset-file>
+```
+
+Если Caddy в Docker, проверьте доступ к backend из Caddy container:
+
+```bash
+docker exec caddy wget -S -O- --timeout=5 http://remnawave-subscription-page-with-balancer:3010/admin/topor-balancer 2>&1 | head -80
+```
+
+Caddy и Balancer должны быть в одной Docker network. Рабочий upstream:
+
+```caddy
+subs.example.com {
+    reverse_proxy remnawave-subscription-page-with-balancer:3010 {
+        header_up X-Forwarded-Proto https
+        header_up X-Forwarded-Host {host}
+        header_up X-Real-IP {remote_host}
+    }
+}
+```
+
+Специальные Caddy routes для `/assets/*` не нужны: backend должен отдавать `/assets/*` сам.
+
 ## `node: command not found` или `npm: command not found`
 
 Node.js и npm на сервере не нужны. Сборка идет внутри Docker.

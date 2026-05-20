@@ -28,6 +28,20 @@ sub.example.com {
 }
 ```
 
+Если Caddy тоже работает в Docker и проксирует по имени контейнера:
+
+```caddy
+sub.example.com {
+    reverse_proxy remnawave-subscription-page-with-balancer:3010 {
+        header_up X-Forwarded-Proto https
+        header_up X-Forwarded-Host {host}
+        header_up X-Real-IP {remote_host}
+    }
+}
+```
+
+В этом случае Caddy и Balancer должны быть подключены к одной Docker network.
+
 Admin API уже требует Bearer token. Дополнительная защита на reverse proxy рекомендуется.
 
 ## Обновление
