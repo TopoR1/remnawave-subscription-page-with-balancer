@@ -44,8 +44,25 @@ Node.js и npm на сервере не нужны. Сборка идет вну
 Неверный Bearer token.
 
 ```bash
-curl -H "Authorization: Bearer <admin-token>" http://127.0.0.1:3010/api/topor-balancer/health
+curl -H "Authorization: Bearer <admin-token>" http://127.0.0.1:3011/api/topor-balancer/health
 ```
+
+## Порт занят
+
+Если Docker пишет `port is already allocated`, проверьте занятые порты:
+
+```bash
+ss -ltnp | grep ':3010'
+docker ps --format "table {{.Names}}\t{{.Ports}}"
+```
+
+Обычно достаточно изменить внешний порт:
+
+```env
+TOPOR_BALANCER_HOST_PORT=3011
+```
+
+`APP_PORT` обычно оставляют `3010`.
 
 ## Database offline
 

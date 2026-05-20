@@ -10,7 +10,7 @@ services:
     env_file:
       - ../.env
     ports:
-      - '127.0.0.1:3010:3010'
+      - '${TOPOR_BALANCER_HOST_BIND:-127.0.0.1}:${TOPOR_BALANCER_HOST_PORT:-3011}:${APP_PORT:-3010}'
     depends_on:
       topor-balancer-postgres:
         condition: service_healthy

@@ -25,7 +25,6 @@ npm run cb
 
 ```bash
 docker compose -f examples/docker-compose.topor-balancer.yml config
-docker compose -f examples/docker-compose.topor-balancer.yml --profile database config
 docker build -t remnawave-subscription-page-with-balancer:local .
 ```
 

@@ -24,7 +24,7 @@ PostgreSQL входит в compose по умолчанию.
 
 ```caddy
 sub.example.com {
-    reverse_proxy 127.0.0.1:3010
+    reverse_proxy 127.0.0.1:3011
 }
 ```
 

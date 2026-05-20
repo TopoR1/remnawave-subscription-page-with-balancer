@@ -10,6 +10,8 @@ cp examples/topor-balancer.env.example .env
 
 ```env
 APP_PORT=3010
+TOPOR_BALANCER_HOST_BIND=127.0.0.1
+TOPOR_BALANCER_HOST_PORT=3011
 REMNAWAVE_PANEL_URL=https://panel.example.com
 REMNAWAVE_API_TOKEN=replace_me
 INTERNAL_JWT_SECRET=replace_me_long_random_secret
@@ -25,6 +27,8 @@ TOPOR_BALANCER_ADMIN_TOKEN=replace_me_long_random_admin_token
 | Переменная | Пример | Что делает |
 | --- | --- | --- |
 | `APP_PORT` | `3010` | Порт приложения внутри контейнера. |
+| `TOPOR_BALANCER_HOST_BIND` | `127.0.0.1` | Адрес на сервере, куда Docker публикует порт. |
+| `TOPOR_BALANCER_HOST_PORT` | `3011` | Внешний порт на сервере. |
 | `REMNAWAVE_PANEL_URL` | `https://panel.example.com` | URL Remnawave Panel. |
 | `REMNAWAVE_API_TOKEN` | `replace_me` | API token Remnawave. |
 | `INTERNAL_JWT_SECRET` | `long_random_secret` | Секрет внутренних JWT/cookie механизмов. |
