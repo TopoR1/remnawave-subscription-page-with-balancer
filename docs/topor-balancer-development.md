@@ -6,6 +6,7 @@
 
 ```bash
 cd backend
+npm ci
 npm run build
 npm run test:topor-balancer
 npm run lint
@@ -15,12 +16,22 @@ npm run lint
 
 ```bash
 cd frontend
+npm ci
 npm run typecheck
 npm run cb
 ```
 
-## Известные нюансы
+## Docker-проверки
 
-- `frontend` stylelint может падать на существующих CSS-правилах, не связанных с поведением TopoR Balancer.
-- Некоторые npm-скрипты используют Unix-стиль `NODE_ENV=...` и на Windows могут требовать `cross-env`, WSL или Linux-shell.
-- Docker build и реальный запуск с Remnawave Panel проверяйте отдельно на целевом окружении.
+```bash
+docker compose -f examples/docker-compose.topor-balancer.yml config
+docker compose -f examples/docker-compose.topor-balancer.yml --profile database config
+docker build -t remnawave-subscription-page-with-balancer:local .
+```
+
+## Нюансы
+
+- Для production-установки Node.js/npm на хосте не нужны.
+- `npm run cb` собирает frontend в `frontend/dist`.
+- Dockerfile сам собирает backend и frontend внутри build stages.
+- Некоторые npm-скрипты используют Unix-стиль env-переменных и на Windows могут требовать WSL или Linux-shell.

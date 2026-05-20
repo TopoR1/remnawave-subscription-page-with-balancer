@@ -1,6 +1,9 @@
 services:
   remnawave-subscription-page-with-balancer:
-    image: ghcr.io/topor1/remnawave-subscription-page-with-balancer:latest
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    image: remnawave-subscription-page-with-balancer:local
     container_name: remnawave-subscription-page-with-balancer
     hostname: remnawave-subscription-page-with-balancer
     restart: unless-stopped
@@ -10,8 +13,6 @@ services:
       - '127.0.0.1:3010:3010'
     volumes:
       - ../topor-balancer.config.json:/opt/app/topor-balancer.config.json:ro
-    networks:
-      - remnawave-network
 
   topor-balancer-postgres:
     image: postgres:16-alpine
@@ -29,14 +30,8 @@ services:
       interval: 10s
       timeout: 5s
       retries: 5
-    networks:
-      - remnawave-network
     profiles:
       - database
 
 volumes:
   topor-balancer-postgres-data:
-
-networks:
-  remnawave-network:
-    external: true

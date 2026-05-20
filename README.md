@@ -1,31 +1,23 @@
-# Remnawave Balancer by TopoR (TEST)
+# Remnawave Balancer by TopoR
 
-## Что это
+Форк `remnawave/subscription-page` с балансировкой пользователей между техническими нодами одной публичной локации.
 
-Это форк [`remnawave/subscription-page`](https://github.com/remnawave/subscription-page). Он ставится вместо обычного Remnawave Subscription Page и добавляет балансировку между техническими нодами внутри одной публичной локации.
+Пользователь продолжает получать обычную ссылку подписки, а внутри balancer оставляет только одну подходящую VLESS-ноду из группы. Например, Remnawave отдает `FI-STD-01`, `FI-STD-02`, `FI-STD-03`, а пользователь видит одну публичную локацию `Finland`.
 
-Пользователи продолжают использовать обычную ссылку подписки. Клиентские приложения менять не нужно.
+## Быстрый запуск
 
-## Как работает
+### Требования
 
-Remnawave возвращает технические ноды:
+- Docker
+- Docker Compose plugin
 
-- `FI-STD-01`
-- `FI-STD-02`
-- `FI-STD-03`
+Не нужны:
 
-Пользователь видит:
-
-- `🇫🇮 Finland`
-
-Внутри:
-
-- пользователь A может быть назначен на `FI-STD-01`;
-- пользователь B может быть назначен на `FI-STD-02`.
-
-`technicalHostName` - внутреннее имя ноды из VLESS remark после `#`. `publicName` - имя, которое видит пользователь.
-
-## Быстрый запуск через Docker Compose
+- Node.js на сервере
+- npm, pnpm или yarn на сервере
+- ручная сборка frontend/backend
+- `docker login` в GHCR
+- заранее опубликованный Docker image
 
 ### 1. Скачать проект
 
@@ -40,15 +32,13 @@ cd remnawave-subscription-page-with-balancer
 cp examples/topor-balancer.env.example .env
 ```
 
-Минимальный `.env` для первого запуска в `hash` mode:
+Минимально проверьте и замените значения:
 
 ```env
 APP_PORT=3010
-
 REMNAWAVE_PANEL_URL=https://panel.example.com
 REMNAWAVE_API_TOKEN=replace_me
 INTERNAL_JWT_SECRET=replace_me_long_random_secret
-
 TOPOR_BALANCER_ENABLED=true
 TOPOR_BALANCER_ASSIGNMENT_MODE=hash
 TOPOR_BALANCER_CONFIG_PATH=/opt/app/topor-balancer.config.json
@@ -56,52 +46,13 @@ TOPOR_BALANCER_ADMIN_TOKEN=replace_me_long_random_admin_token
 TOPOR_BALANCER_DB_FALLBACK_TO_HASH=true
 ```
 
-Что обязательно заменить:
-
-- `REMNAWAVE_PANEL_URL` - URL вашего Remnawave Panel.
-- `REMNAWAVE_API_TOKEN` - API token из Remnawave.
-- `INTERNAL_JWT_SECRET` - длинная случайная строка.
-- `TOPOR_BALANCER_ADMIN_TOKEN` - пароль/токен для Admin UI и Admin API.
-
-Полный список env: [docs/topor-balancer-env.md](docs/topor-balancer-env.md).
-
-### 3. Создать конфиг балансировщика
+### 3. Создать конфиг
 
 ```bash
 cp examples/topor-balancer.config.example.json topor-balancer.config.json
 ```
 
-Минимальный `topor-balancer.config.json`:
-
-```json
-{
-  "enabled": true,
-  "locations": [
-    {
-      "publicHostCode": "fi_standard",
-      "publicName": "🇫🇮 Finland",
-      "locationCode": "FI",
-      "planCode": "standard",
-      "nodes": [
-        {
-          "technicalHostName": "FI-STD-01",
-          "weight": 1,
-          "maxUsers": 300,
-          "status": "active"
-        },
-        {
-          "technicalHostName": "FI-STD-02",
-          "weight": 1,
-          "maxUsers": 300,
-          "status": "active"
-        }
-      ]
-    }
-  ]
-}
-```
-
-Очень важно: `technicalHostName` должен точно совпадать с именем VLESS-ссылки после `#`.
+Отредактируйте `topor-balancer.config.json`. Поле `technicalHostName` должно точно совпадать с remark в VLESS-ссылке после `#`.
 
 Если Remnawave отдает:
 
@@ -115,142 +66,114 @@ vless://...#FI-STD-01
 "technicalHostName": "FI-STD-01"
 ```
 
-### 4. Запустить
+### 4. Запуск в hash mode без PostgreSQL
 
 ```bash
-docker compose -f examples/docker-compose.topor-balancer.yml up -d
+docker compose -f examples/docker-compose.topor-balancer.yml up -d --build
 ```
 
-Логи:
+### 5. Запуск в database mode с PostgreSQL
 
-```bash
-docker compose -f examples/docker-compose.topor-balancer.yml logs -f
-```
-
-Если Docker пишет, что сети `remnawave-network` нет, создайте ее:
-
-```bash
-docker network create remnawave-network
-```
-
-### 5. Открыть админку
-
-```text
-https://sub.example.com/admin/topor-balancer
-```
-
-Введите `TOPOR_BALANCER_ADMIN_TOKEN`, затем проверьте:
-
-- Health;
-- Nodes;
-- Assignments;
-- Requests.
-
-### 6. Проверить подписку
-
-```bash
-curl -A "v2rayNG/1.9.0" "https://sub.example.com/<shortUuid>"
-```
-
-Если ответ в base64:
-
-```bash
-curl -A "v2rayNG/1.9.0" "https://sub.example.com/<shortUuid>" | base64 -d
-```
-
-Ожидаемый результат: вместо нескольких технических ссылок для одной локации пользователь получает одну выбранную публичную локацию.
-
-## Запуск в database mode
-
-`hash` mode хорошо подходит для первого запуска. `database` mode лучше для production: он хранит реальные назначения и делает Admin UI полезнее.
-
-В `.env` добавьте/измените:
+В `.env` измените или добавьте:
 
 ```env
 TOPOR_BALANCER_ASSIGNMENT_MODE=database
 TOPOR_BALANCER_DATABASE_URL=postgres://topor_balancer:change_me@topor-balancer-postgres:5432/topor_balancer
 ```
 
-Пароль `change_me` должен совпадать с `POSTGRES_PASSWORD` в `examples/docker-compose.topor-balancer.yml`.
-
-Запуск с PostgreSQL:
+Запустите compose с profile `database`:
 
 ```bash
-docker compose -f examples/docker-compose.topor-balancer.yml --profile database up -d
+docker compose -f examples/docker-compose.topor-balancer.yml --profile database up -d --build
 ```
 
-Подробнее: [docs/topor-balancer-deployment.md](docs/topor-balancer-deployment.md).
-
-## Как подключить домен
-
-Простой пример Caddy:
-
-```caddy
-sub.example.com {
-    reverse_proxy 127.0.0.1:3010
-}
-```
-
-Более безопасный пример с дополнительной защитой админки:
-
-```caddy
-sub.example.com {
-    @admin path /admin/topor-balancer* /api/topor-balancer*
-    basicauth @admin {
-        admin <bcrypt_hash>
-    }
-
-    reverse_proxy 127.0.0.1:3010
-}
-```
-
-Admin API уже требует Bearer token. Защита на reverse proxy рекомендуется как дополнительный слой.
-
-## Статусы нод
-
-- `active` - можно выдавать новым и старым пользователям.
-- `draining` - старые остаются, новые не назначаются.
-- `disabled` - не используется.
-- `dead` - аварийно не используется, пользователи переназначаются при возможности.
-
-## Как обновить конфиг
-
-1. Отредактируйте `topor-balancer.config.json`.
-2. Перезапустите контейнер:
+### 6. Логи
 
 ```bash
-docker compose -f examples/docker-compose.topor-balancer.yml restart
+docker compose -f examples/docker-compose.topor-balancer.yml logs -f
 ```
 
-В `hash` mode изменение нод может изменить назначения. В `database` mode существующие назначения сохраняются там, где это возможно.
+### 7. Admin UI
 
-## Как отключить балансировщик
+По умолчанию compose публикует порт только на `127.0.0.1`:
 
-В `.env`:
-
-```env
-TOPOR_BALANCER_ENABLED=false
+```text
+http://127.0.0.1:3010/admin/topor-balancer
 ```
 
-Затем:
+За доменом или reverse proxy:
+
+```text
+https://sub.example.com/admin/topor-balancer
+```
+
+Если хотите открыть порт напрямую по IP сервера, измените `127.0.0.1:3010:3010` на `3010:3010` в `examples/docker-compose.topor-balancer.yml`.
+
+После этого Admin UI будет доступен так:
+
+```text
+http://server-ip:3010/admin/topor-balancer
+```
+
+### 8. Health check
 
 ```bash
-docker compose -f examples/docker-compose.topor-balancer.yml restart
+curl -H "Authorization: Bearer YOUR_ADMIN_TOKEN" http://127.0.0.1:3010/api/topor-balancer/health
 ```
 
-После этого проект будет работать ближе к обычному Remnawave Subscription Page.
+### 9. Остановка
 
-## Rollback
+```bash
+docker compose -f examples/docker-compose.topor-balancer.yml down
+```
 
-- Поставьте `TOPOR_BALANCER_ENABLED=false` и перезапустите контейнер.
-- Или переключите image/container обратно на оригинальный `remnawave/subscription-page`.
-- Или верните reverse proxy на старый Subscription Page контейнер.
+### 10. Обновление
 
-## Где читать подробнее
+```bash
+git pull
+docker compose -f examples/docker-compose.topor-balancer.yml up -d --build
+```
 
-- [docs/topor-balancer-config.md](docs/topor-balancer-config.md) - поля конфига и примеры.
-- [docs/topor-balancer-env.md](docs/topor-balancer-env.md) - все переменные окружения.
-- [docs/topor-balancer-deployment.md](docs/topor-balancer-deployment.md) - расширенный Docker/PostgreSQL деплой.
-- [docs/topor-balancer-ui.md](docs/topor-balancer-ui.md) - работа с Admin UI.
-- [docs/topor-balancer-admin-api.md](docs/topor-balancer-admin-api.md) - маршруты Admin API.
-- [docs/topor-balancer-troubleshooting.md](docs/topor-balancer-troubleshooting.md) - частые проблемы.
+## Опционально: prebuilt image
+
+По умолчанию проект собирается локально из исходников. GHCR не нужен.
+
+Опытные пользователи могут заменить `build` на `image: ghcr.io/...` только если сами опубликовали image и имеют доступ к registry.
+
+## Частые ошибки установки
+
+### `error from registry: denied`
+
+Причина: compose пытается скачать приватный или несуществующий GHCR image.
+
+Исправление: используйте локальную сборку:
+
+```bash
+docker compose -f examples/docker-compose.topor-balancer.yml up -d --build
+```
+
+### `"/frontend/dist": not found`
+
+Причина: старый Dockerfile ожидал, что frontend уже собран на хосте.
+
+Исправление: используйте обновленный Dockerfile и пересоберите image:
+
+```bash
+docker compose -f examples/docker-compose.topor-balancer.yml build --no-cache
+```
+
+### `node: command not found` или `npm: command not found`
+
+Причина: старые инструкции требовали ручную сборку на сервере.
+
+Исправление: Node.js и npm на хосте не нужны. Сборка идет внутри Docker. Установите только Docker и Docker Compose plugin.
+
+## Документация
+
+- [Переменные окружения](docs/topor-balancer-env.md)
+- [Конфиг балансировщика](docs/topor-balancer-config.md)
+- [Расширенный деплой](docs/topor-balancer-deployment.md)
+- [Admin UI](docs/topor-balancer-ui.md)
+- [Admin API](docs/topor-balancer-admin-api.md)
+- [Troubleshooting](docs/topor-balancer-troubleshooting.md)
+- [Разработка и проверки](docs/topor-balancer-development.md)
