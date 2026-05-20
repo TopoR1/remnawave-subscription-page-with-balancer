@@ -126,3 +126,26 @@ export interface ToporBalancerAdminRequest {
     errorMessage?: string;
     createdAt?: string;
 }
+
+export interface ToporBalancerBootstrap {
+    version: string;
+    locale: 'ru' | 'en';
+    features: {
+        failover: boolean;
+        healthChecks: boolean;
+        stickyAssignment: boolean;
+        weightedBalancing: boolean;
+    };
+    settings: {
+        assignmentMode: ToporBalancerAssignmentMode;
+        enabled: boolean;
+        fallbackToHash: boolean;
+    };
+    hosts: Array<{
+        publicHostCode: string;
+        publicName: string;
+        locationCode?: string;
+        planCode: string;
+    }>;
+    nodes: ToporBalancerAdminNode[];
+}

@@ -6,12 +6,13 @@ import { getJWTConfig } from '@common/config/jwt/jwt.config';
 import { ToporBalancerModule } from '@modules/topor-balancer';
 
 import { SubpageConfigService } from './subpage-config.service';
+import { RuntimeConfigService } from './runtime-config.service';
 import { RootController } from './root.controller';
 import { RootService } from './root.service';
 
 @Module({
     imports: [JwtModule.registerAsync(getJWTConfig()), ToporBalancerModule],
     controllers: [RootController],
-    providers: [RootService, SubpageConfigService],
+    providers: [RootService, SubpageConfigService, RuntimeConfigService],
 })
 export class RootModule {}

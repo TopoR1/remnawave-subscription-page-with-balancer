@@ -1,11 +1,14 @@
 import { Module } from '@nestjs/common';
 
-import { ToporBalancerAdminController } from './topor-balancer-admin.controller';
+import {
+    ToporBalancerAdminController,
+    ToporBalancerBootstrapController,
+} from './topor-balancer-admin.controller';
 import { ToporBalancerAdminGuard } from './topor-balancer-admin.guard';
 import { ToporBalancerService } from './topor-balancer.service';
 
 @Module({
-    controllers: [ToporBalancerAdminController],
+    controllers: [ToporBalancerBootstrapController, ToporBalancerAdminController],
     providers: [ToporBalancerService, ToporBalancerAdminGuard],
     exports: [ToporBalancerService],
 })

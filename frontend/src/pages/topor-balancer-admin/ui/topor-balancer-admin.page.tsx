@@ -12,16 +12,19 @@ import {
     Select,
     SimpleGrid,
     Stack,
+    Switch,
     Table,
     Tabs,
     Text,
     TextInput,
+    Tooltip,
     Title
 } from '@mantine/core'
 import {
     IconAlertTriangle,
     IconDatabase,
     IconEdit,
+    IconInfoCircle,
     IconLogout,
     IconPlus,
     IconRefresh,
@@ -33,6 +36,7 @@ import { FormEvent, useCallback, useEffect, useMemo, useState } from 'react'
 import { notifications } from '@mantine/notifications'
 
 import { Page } from '@shared/ui'
+import { defaultLocale, i18n } from '../../../i18n'
 
 import classes from './topor-balancer-admin.module.css'
 
@@ -46,6 +50,7 @@ const MAX_ASSIGNMENTS_DISPLAY = 500
 const MAX_REQUESTS_DISPLAY = 500
 
 const NODE_STATUSES = ['active', 'draining', 'disabled', 'dead'] as const
+const t = i18n[defaultLocale]
 
 type ToporBalancerNodeStatus = (typeof NODE_STATUSES)[number]
 
@@ -239,6 +244,14 @@ function selectOptions(values: string[]) {
         }))
 }
 
+function Help({ label }: { label: string }) {
+    return (
+        <Tooltip label={label} maw={360} multiline withArrow>
+            <IconInfoCircle size={16} />
+        </Tooltip>
+    )
+}
+
 function redactSensitiveText(value?: string) {
     if (!value) {
         return '-'
@@ -279,6 +292,7 @@ export function ToporBalancerAdminPage() {
     const [requestShortUuidFilter, setRequestShortUuidFilter] = useState('')
     const [requestResponseFormatFilter, setRequestResponseFormatFilter] = useState<null | string>(null)
     const [requestStatusFilter, setRequestStatusFilter] = useState<null | string>(null)
+    const [showAdvanced, setShowAdvanced] = useState(false)
     const [isCreateNodeModalOpen, setIsCreateNodeModalOpen] = useState(false)
     const [editingNode, setEditingNode] = useState<null | ToporBalancerNode>(null)
     const [pendingDisableNode, setPendingDisableNode] = useState<null | ToporBalancerNode>(null)
@@ -306,7 +320,7 @@ export function ToporBalancerAdminPage() {
         isNodeActionLoading ||
         isAssignmentActionLoading
 
-    const handleAuthFailure = useCallback((message = 'Invalid admin token') => {
+    const handleAuthFailure = useCallback((message = 'Неверный токен администратора') => {
         localStorage.removeItem(ADMIN_TOKEN_STORAGE_KEY)
         setAdminToken(null)
         setHealth(null)
@@ -323,7 +337,7 @@ export function ToporBalancerAdminPage() {
         setAssignments([])
         setRequests([])
         setErrorType('disabled')
-        setErrorMessage('Admin API is disabled. Configure TOPOR_BALANCER_ADMIN_TOKEN on the backend.')
+        setErrorMessage('Admin API отключен. Задайте TOPOR_BALANCER_ADMIN_TOKEN на backend.')
     }, [])
 
     const saveToken = (event: FormEvent<HTMLFormElement>) => {
@@ -413,7 +427,7 @@ export function ToporBalancerAdminPage() {
 
             if (!isToporBalancerHealth(responseBody)) {
                 setErrorType('unknown')
-                setErrorMessage('Admin API returned an unexpected health response')
+                setErrorMessage('Admin API вернул неожиданный ответ статуса')
                 return
             }
 
@@ -429,11 +443,11 @@ export function ToporBalancerAdminPage() {
             }
 
             setErrorType('unknown')
-            setErrorMessage('Unable to load TopoR Balancer status')
+            setErrorMessage('Не удалось загрузить статус TopoR Balancer')
             notifications.show({
                 color: 'red',
-                message: 'Unable to load TopoR Balancer status',
-                title: 'Admin API error'
+                message: 'Не удалось загрузить статус TopoR Balancer',
+                title: 'Ошибка Admin API'
             })
         } finally {
             setIsHealthLoading(false)
@@ -457,7 +471,7 @@ export function ToporBalancerAdminPage() {
             if (!isToporBalancerNodes(responseBody)) {
                 setNodes([])
                 setErrorType('unknown')
-                setErrorMessage('Admin API returned an unexpected nodes response')
+                setErrorMessage('Admin API вернул неожиданный список нод')
                 return
             }
 
@@ -473,8 +487,8 @@ export function ToporBalancerAdminPage() {
             setNodes([])
             notifications.show({
                 color: 'red',
-                message: 'Unable to load TopoR Balancer nodes',
-                title: 'Admin API error'
+                message: 'Не удалось загрузить ноды TopoR Balancer',
+                title: 'Ошибка Admin API'
             })
         } finally {
             setIsNodesLoading(false)
@@ -498,7 +512,7 @@ export function ToporBalancerAdminPage() {
             if (!isToporBalancerAssignments(responseBody)) {
                 setAssignments([])
                 setErrorType('unknown')
-                setErrorMessage('Admin API returned an unexpected assignments response')
+                setErrorMessage('Admin API вернул неожиданный список назначений')
                 return
             }
 
@@ -514,8 +528,8 @@ export function ToporBalancerAdminPage() {
             setAssignments([])
             notifications.show({
                 color: 'red',
-                message: 'Unable to load TopoR Balancer assignments',
-                title: 'Admin API error'
+                message: 'Не удалось загрузить назначения TopoR Balancer',
+                title: 'Ошибка Admin API'
             })
         } finally {
             setIsAssignmentsLoading(false)
@@ -539,7 +553,7 @@ export function ToporBalancerAdminPage() {
 
             if (!isToporBalancerRequests(responseBody)) {
                 setRequests([])
-                setRequestsErrorMessage('Admin API returned an unexpected requests response')
+                setRequestsErrorMessage('Admin API вернул неожиданный список запросов')
                 return
             }
 
@@ -553,11 +567,11 @@ export function ToporBalancerAdminPage() {
             }
 
             setRequests([])
-            setRequestsErrorMessage('Unable to load TopoR Balancer requests')
+            setRequestsErrorMessage('Не удалось загрузить запросы TopoR Balancer')
             notifications.show({
                 color: 'red',
-                message: 'Unable to load TopoR Balancer requests',
-                title: 'Admin API error'
+                message: 'Не удалось загрузить запросы TopoR Balancer',
+                title: 'Ошибка Admin API'
             })
         } finally {
             setIsRequestsLoading(false)
@@ -691,39 +705,39 @@ export function ToporBalancerAdminPage() {
         return [
             {
                 color: health.enabled ? 'green' : 'gray',
-                label: 'Enabled',
-                value: health.enabled ? 'Yes' : 'No'
+                label: 'Включен',
+                value: health.enabled ? 'Да' : 'Нет'
             },
             {
                 color: health.assignmentMode === 'database' ? 'cyan' : 'blue',
-                label: 'Assignment mode',
+                label: 'Режим назначений',
                 value: health.assignmentMode
             },
             {
                 color: health.configLoaded ? 'green' : 'gray',
-                label: 'JSON config',
-                value: health.configLoaded ? 'Yes' : 'No'
+                label: 'JSON-конфиг',
+                value: health.configLoaded ? 'Да' : 'Нет'
             },
             {
                 color: health.databaseConnected ? 'green' : 'red',
-                label: 'Database',
-                value: health.databaseConnected ? 'Connected' : 'Offline'
+                label: 'База данных',
+                value: health.databaseConnected ? 'Подключена' : 'Недоступна'
             },
             {
                 color: 'violet',
-                label: 'Nodes',
+                label: 'Ноды',
                 value: health.nodeCount.toString()
             },
             {
                 color: 'orange',
-                label: 'Assignments',
+                label: 'Назначения',
                 value: health.assignmentCount.toString()
             },
             ...(health.requestCount !== undefined
                 ? [
                     {
                         color: 'teal',
-                        label: 'Requests',
+                        label: 'Запросы',
                         value: health.requestCount.toString()
                     }
                 ]
@@ -732,7 +746,7 @@ export function ToporBalancerAdminPage() {
                 ? [
                     {
                         color: 'red',
-                        label: 'Last error',
+                        label: 'Последняя ошибка',
                         value: health.lastError
                     }
                 ]
@@ -1072,9 +1086,9 @@ export function ToporBalancerAdminPage() {
                         <Group gap="sm">
                             <IconDatabase className={classes.titleIcon} size={28} />
                             <div>
-                                <Title order={2}>Remnawave Balancer by TopoR</Title>
+                                <Title order={2}>{t.admin.title}</Title>
                                 <Text c="dimmed" size="sm">
-                                    Admin status dashboard
+                                    {t.admin.subtitle}
                                 </Text>
                             </div>
                         </Group>
@@ -1087,7 +1101,7 @@ export function ToporBalancerAdminPage() {
                                     onClick={refreshAdminData}
                                     variant="light"
                                 >
-                                    Refresh
+                                    {t.admin.refresh}
                                 </Button>
                                 <Button
                                     color="red"
@@ -1095,7 +1109,7 @@ export function ToporBalancerAdminPage() {
                                     onClick={logout}
                                     variant="subtle"
                                 >
-                                    Logout
+                                    {t.admin.logout}
                                 </Button>
                             </Group>
                         )}
@@ -1117,19 +1131,19 @@ export function ToporBalancerAdminPage() {
                                 <Stack gap="md">
                                     <Group gap="sm">
                                         <IconShieldLock size={22} />
-                                        <Title order={4}>Admin token</Title>
+                                        <Title order={4}>{t.admin.tokenTitle}</Title>
                                     </Group>
 
                                     <PasswordInput
                                         autoComplete="current-password"
-                                        label="Token"
+                                        label={t.admin.tokenLabel}
                                         onChange={(event) => setTokenInput(event.currentTarget.value)}
-                                        placeholder="Paste TOPOR_BALANCER_ADMIN_TOKEN"
+                                        placeholder={t.admin.tokenPlaceholder}
                                         value={tokenInput}
                                     />
 
                                     <Button loading={isLoading} type="submit">
-                                        Sign in
+                                        {t.admin.signIn}
                                     </Button>
                                 </Stack>
                             </form>
@@ -1140,7 +1154,7 @@ export function ToporBalancerAdminPage() {
                         <Stack gap="lg">
                             <Group gap="sm">
                                 <Badge color={health.enabled ? 'green' : 'gray'} variant="light">
-                                    {health.enabled ? 'Enabled' : 'Disabled'}
+                                    {health.enabled ? 'Включен' : 'Отключен'}
                                 </Badge>
                                 <Badge color="cyan" variant="light">
                                     {health.assignmentMode}
@@ -1167,57 +1181,87 @@ export function ToporBalancerAdminPage() {
                     {isLoggedIn && (
                         <Tabs defaultValue="nodes">
                             <Tabs.List>
-                                <Tabs.Tab value="nodes">Nodes</Tabs.Tab>
-                                <Tabs.Tab value="assignments">Assignments</Tabs.Tab>
-                                <Tabs.Tab value="requests">Requests</Tabs.Tab>
+                                <Tabs.Tab value="nodes">{t.admin.nodes}</Tabs.Tab>
+                                {showAdvanced && <Tabs.Tab value="assignments">{t.admin.assignments}</Tabs.Tab>}
+                                {showAdvanced && <Tabs.Tab value="requests">{t.admin.requests}</Tabs.Tab>}
                             </Tabs.List>
 
                             <Tabs.Panel pt="md" value="nodes">
                                 <Stack gap="md">
                                     <Group justify="space-between">
                                         <div>
-                                            <Title order={3}>Nodes</Title>
+                                            <Title order={3}>{t.admin.nodes}</Title>
                                             <Text c="dimmed" size="sm">
-                                                {filteredNodes.length} of {nodes.length} nodes
+                                                {filteredNodes.length} из {nodes.length} нод
                                             </Text>
                                         </div>
-                                        <Button
-                                            leftSection={<IconPlus size={16} />}
-                                            onClick={openCreateNodeModal}
-                                        >
-                                            Add node
-                                        </Button>
+                                        <Group gap="sm">
+                                            <Switch
+                                                checked={showAdvanced}
+                                                label={t.admin.advancedSettings}
+                                                onChange={(event) => setShowAdvanced(event.currentTarget.checked)}
+                                            />
+                                            <Button
+                                                leftSection={<IconPlus size={16} />}
+                                                onClick={openCreateNodeModal}
+                                            >
+                                                {t.admin.addNode}
+                                            </Button>
+                                        </Group>
                                     </Group>
+
+                                    <SimpleGrid cols={{ base: 1, md: showAdvanced ? 4 : 2 }} spacing="md">
+                                        <Alert color="blue" variant="light">
+                                            <Text fw={700}>Sticky Assignment</Text>
+                                            <Text size="sm">{t.balancingHelp.stickyAssignment}</Text>
+                                        </Alert>
+                                        <Alert color="cyan" variant="light">
+                                            <Text fw={700}>Weighted Balancing</Text>
+                                            <Text size="sm">{t.balancingHelp.weightedBalancing}</Text>
+                                        </Alert>
+                                        {showAdvanced && (
+                                            <Alert color="green" variant="light">
+                                                <Text fw={700}>Health Checks</Text>
+                                                <Text size="sm">{t.balancingHelp.healthChecks}</Text>
+                                            </Alert>
+                                        )}
+                                        {showAdvanced && (
+                                            <Alert color="yellow" variant="light">
+                                                <Text fw={700}>Failover</Text>
+                                                <Text size="sm">{t.balancingHelp.failover}</Text>
+                                            </Alert>
+                                        )}
+                                    </SimpleGrid>
 
                                     <SimpleGrid cols={{ base: 1, sm: 2, lg: 4 }} spacing="md">
                                         <TextInput
-                                            label="Search"
+                                            label={t.admin.search}
                                             onChange={(event) => setSearchValue(event.currentTarget.value)}
-                                            placeholder="technical host or public name"
+                                            placeholder="технический хост или публичное имя"
                                             value={searchValue}
                                         />
                                         <Select
                                             clearable
                                             data={nodeStatusOptions}
-                                            label="Status"
+                                            label={t.admin.status}
                                             onChange={setStatusFilter}
-                                            placeholder="All statuses"
+                                            placeholder="Все статусы"
                                             value={statusFilter}
                                         />
                                         <Select
                                             clearable
                                             data={planCodeOptions}
-                                            label="Plan code"
+                                            label={t.admin.planCode}
                                             onChange={setPlanCodeFilter}
-                                            placeholder="All plans"
+                                            placeholder="Все тарифы"
                                             value={planCodeFilter}
                                         />
                                         <Select
                                             clearable
                                             data={publicHostCodeOptions}
-                                            label="Public host"
+                                            label={t.admin.publicHost}
                                             onChange={setPublicHostCodeFilter}
-                                            placeholder="All public hosts"
+                                            placeholder="Все публичные хосты"
                                             value={publicHostCodeFilter}
                                         />
                                     </SimpleGrid>
@@ -1238,18 +1282,47 @@ export function ToporBalancerAdminPage() {
                                                 <Table className={classes.nodesTable} highlightOnHover stickyHeader>
                                                     <Table.Thead>
                                                         <Table.Tr>
-                                                            <Table.Th>publicHostCode</Table.Th>
+                                                            <Table.Th>
+                                                                <Group gap={4} wrap="nowrap">
+                                                                    publicHostCode
+                                                                    <Help label={t.balancingHelp.publicHostCode} />
+                                                                </Group>
+                                                            </Table.Th>
                                                             <Table.Th>publicName</Table.Th>
-                                                            <Table.Th>technicalHostName</Table.Th>
-                                                            <Table.Th>locationCode</Table.Th>
+                                                            <Table.Th>
+                                                                <Group gap={4} wrap="nowrap">
+                                                                    technicalHostName
+                                                                    <Help label={t.balancingHelp.technicalHostName} />
+                                                                </Group>
+                                                            </Table.Th>
+                                                            {showAdvanced && <Table.Th>locationCode</Table.Th>}
                                                             <Table.Th>planCode</Table.Th>
-                                                            <Table.Th>status</Table.Th>
-                                                            <Table.Th>weight</Table.Th>
-                                                            <Table.Th>maxUsers</Table.Th>
+                                                            <Table.Th>
+                                                                <Group gap={4} wrap="nowrap">
+                                                                    status
+                                                                    <Help label={t.balancingHelp.healthChecks} />
+                                                                </Group>
+                                                            </Table.Th>
+                                                            {showAdvanced && (
+                                                                <Table.Th>
+                                                                    <Group gap={4} wrap="nowrap">
+                                                                        weight
+                                                                        <Help label={t.balancingHelp.nodeWeight} />
+                                                                    </Group>
+                                                                </Table.Th>
+                                                            )}
+                                                            {showAdvanced && (
+                                                                <Table.Th>
+                                                                    <Group gap={4} wrap="nowrap">
+                                                                        maxUsers
+                                                                        <Help label={t.balancingHelp.maxUsers} />
+                                                                    </Group>
+                                                                </Table.Th>
+                                                            )}
                                                             <Table.Th>assignedUsers</Table.Th>
                                                             <Table.Th>load</Table.Th>
-                                                            <Table.Th>updatedAt</Table.Th>
-                                                            <Table.Th>actions</Table.Th>
+                                                            {showAdvanced && <Table.Th>updatedAt</Table.Th>}
+                                                            <Table.Th>действия</Table.Th>
                                                         </Table.Tr>
                                                     </Table.Thead>
                                                     <Table.Tbody>
@@ -1265,7 +1338,7 @@ export function ToporBalancerAdminPage() {
                                                                     <Table.Td>{node.publicHostCode}</Table.Td>
                                                                     <Table.Td>{node.publicName}</Table.Td>
                                                                     <Table.Td>{node.technicalHostName}</Table.Td>
-                                                                    <Table.Td>{node.locationCode || '-'}</Table.Td>
+                                                                    {showAdvanced && <Table.Td>{node.locationCode || '-'}</Table.Td>}
                                                                     <Table.Td>{node.planCode}</Table.Td>
                                                                     <Table.Td>
                                                                         <Badge
@@ -1275,8 +1348,8 @@ export function ToporBalancerAdminPage() {
                                                                             {node.status}
                                                                         </Badge>
                                                                     </Table.Td>
-                                                                    <Table.Td>{node.weight}</Table.Td>
-                                                                    <Table.Td>{node.maxUsers}</Table.Td>
+                                                                    {showAdvanced && <Table.Td>{node.weight}</Table.Td>}
+                                                                    {showAdvanced && <Table.Td>{node.maxUsers}</Table.Td>}
                                                                     <Table.Td>{node.assignedUsers}</Table.Td>
                                                                     <Table.Td>
                                                                         <Badge
@@ -1286,7 +1359,7 @@ export function ToporBalancerAdminPage() {
                                                                             {loadPercent}%
                                                                         </Badge>
                                                                     </Table.Td>
-                                                                    <Table.Td>{formatDate(node.updatedAt)}</Table.Td>
+                                                                    {showAdvanced && <Table.Td>{formatDate(node.updatedAt)}</Table.Td>}
                                                                     <Table.Td>
                                                                         <Group gap={6} wrap="nowrap">
                                                                             <Button
@@ -1298,7 +1371,7 @@ export function ToporBalancerAdminPage() {
                                                                                 size="xs"
                                                                                 variant="light"
                                                                             >
-                                                                                Enable
+                                                                                Включить
                                                                             </Button>
                                                                             <Button
                                                                                 color="yellow"
@@ -1310,7 +1383,7 @@ export function ToporBalancerAdminPage() {
                                                                                 size="xs"
                                                                                 variant="light"
                                                                             >
-                                                                                Drain
+                                                                                Draining
                                                                             </Button>
                                                                             <Button
                                                                                 color="red"
@@ -1322,7 +1395,7 @@ export function ToporBalancerAdminPage() {
                                                                                 size="xs"
                                                                                 variant="light"
                                                                             >
-                                                                                Disable
+                                                                                Отключить
                                                                             </Button>
                                                                             <Button
                                                                                 leftSection={<IconEdit size={14} />}
@@ -1330,7 +1403,7 @@ export function ToporBalancerAdminPage() {
                                                                                 size="xs"
                                                                                 variant="subtle"
                                                                             >
-                                                                                Edit
+                                                                                Изменить
                                                                             </Button>
                                                                             <Button
                                                                                 color="red"
@@ -1340,7 +1413,7 @@ export function ToporBalancerAdminPage() {
                                                                                 size="xs"
                                                                                 variant="subtle"
                                                                             >
-                                                                                Delete
+                                                                                Удалить
                                                                             </Button>
                                                                         </Group>
                                                                     </Table.Td>
@@ -1595,6 +1668,7 @@ export function ToporBalancerAdminPage() {
             <Modal centered onClose={closeCreateNodeModal} opened={isCreateNodeModalOpen} title="Add node">
                 <Stack gap="md">
                     <TextInput
+                        description={t.balancingHelp.technicalHostName}
                         label="technicalHostName"
                         onChange={(event) =>
                             setEditForm((current) => ({
@@ -1606,6 +1680,7 @@ export function ToporBalancerAdminPage() {
                         value={editForm.technicalHostName}
                     />
                     <TextInput
+                        description={t.balancingHelp.publicHostCode}
                         label="publicHostCode"
                         onChange={(event) =>
                             setEditForm((current) => ({
@@ -1627,17 +1702,19 @@ export function ToporBalancerAdminPage() {
                         placeholder="Finland"
                         value={editForm.publicName}
                     />
-                    <TextInput
-                        label="locationCode"
-                        onChange={(event) =>
-                            setEditForm((current) => ({
-                                ...current,
-                                locationCode: event.currentTarget.value
-                            }))
-                        }
-                        placeholder="FI"
-                        value={editForm.locationCode}
-                    />
+                    {showAdvanced && (
+                        <TextInput
+                            label="locationCode"
+                            onChange={(event) =>
+                                setEditForm((current) => ({
+                                    ...current,
+                                    locationCode: event.currentTarget.value
+                                }))
+                            }
+                            placeholder="FI"
+                            value={editForm.locationCode}
+                        />
+                    )}
                     <TextInput
                         label="planCode"
                         onChange={(event) =>
@@ -1649,6 +1726,7 @@ export function ToporBalancerAdminPage() {
                         value={editForm.planCode}
                     />
                     <Select
+                        description={t.balancingHelp.healthChecks}
                         data={nodeStatusOptions}
                         label="status"
                         onChange={(value) =>
@@ -1662,6 +1740,7 @@ export function ToporBalancerAdminPage() {
                     <NumberInput
                         allowDecimal
                         decimalScale={4}
+                        description={t.balancingHelp.nodeWeight}
                         label="weight"
                         min={0.0001}
                         onChange={(value) =>
@@ -1674,6 +1753,7 @@ export function ToporBalancerAdminPage() {
                     />
                     <NumberInput
                         allowDecimal={false}
+                        description={t.balancingHelp.maxUsers}
                         label="maxUsers"
                         min={1}
                         onChange={(value) =>
@@ -1705,6 +1785,7 @@ export function ToporBalancerAdminPage() {
                     )}
 
                     <TextInput
+                        description={t.balancingHelp.technicalHostName}
                         label="technicalHostName"
                         onChange={(event) =>
                             setEditForm((current) => ({
@@ -1715,6 +1796,7 @@ export function ToporBalancerAdminPage() {
                         value={editForm.technicalHostName}
                     />
                     <TextInput
+                        description={t.balancingHelp.publicHostCode}
                         label="publicHostCode"
                         onChange={(event) =>
                             setEditForm((current) => ({
@@ -1734,16 +1816,18 @@ export function ToporBalancerAdminPage() {
                         }
                         value={editForm.publicName}
                     />
-                    <TextInput
-                        label="locationCode"
-                        onChange={(event) =>
-                            setEditForm((current) => ({
-                                ...current,
-                                locationCode: event.currentTarget.value
-                            }))
-                        }
-                        value={editForm.locationCode}
-                    />
+                    {showAdvanced && (
+                        <TextInput
+                            label="locationCode"
+                            onChange={(event) =>
+                                setEditForm((current) => ({
+                                    ...current,
+                                    locationCode: event.currentTarget.value
+                                }))
+                            }
+                            value={editForm.locationCode}
+                        />
+                    )}
                     <TextInput
                         label="planCode"
                         onChange={(event) =>
@@ -1755,6 +1839,7 @@ export function ToporBalancerAdminPage() {
                         value={editForm.planCode}
                     />
                     <Select
+                        description={t.balancingHelp.healthChecks}
                         data={nodeStatusOptions}
                         label="status"
                         onChange={(value) =>
@@ -1768,6 +1853,7 @@ export function ToporBalancerAdminPage() {
                     <NumberInput
                         allowDecimal
                         decimalScale={4}
+                        description={t.balancingHelp.nodeWeight}
                         label="weight"
                         min={0.0001}
                         onChange={(value) =>
@@ -1780,6 +1866,7 @@ export function ToporBalancerAdminPage() {
                     />
                     <NumberInput
                         allowDecimal={false}
+                        description={t.balancingHelp.maxUsers}
                         label="maxUsers"
                         min={1}
                         onChange={(value) =>

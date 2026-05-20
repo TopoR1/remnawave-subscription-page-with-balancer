@@ -22,6 +22,7 @@ import type {
     ToporBalancerAdminHealth,
     ToporBalancerAdminNode,
     ToporBalancerAdminRequest,
+    ToporBalancerBootstrap,
     ToporBalancerAssignmentMode,
     ToporBalancerConfig,
     ToporBalancerDbAssignment,
@@ -213,6 +214,29 @@ export class ToporBalancerService implements OnModuleDestroy, OnModuleInit {
         };
     }
 
+    public async getBootstrap(): Promise<ToporBalancerBootstrap> {
+        const nodes = await this.getBootstrapNodes();
+        const hosts = this.getBootstrapHosts(nodes);
+
+        return {
+            version: '1',
+            locale: 'ru',
+            features: {
+                failover: true,
+                healthChecks: true,
+                stickyAssignment: this.getAssignmentMode() === 'database',
+                weightedBalancing: true,
+            },
+            settings: {
+                assignmentMode: this.getAssignmentMode(),
+                enabled: this.isEnabled(),
+                fallbackToHash: this.shouldFallbackToHash(),
+            },
+            hosts,
+            nodes,
+        };
+    }
+
     public async listAdminNodes(): Promise<ToporBalancerAdminNode[]> {
         return this.getAdminRepository().listNodes();
     }
@@ -401,6 +425,63 @@ export class ToporBalancerService implements OnModuleDestroy, OnModuleInit {
                 `TopoR balancer database is not available: ${error}`,
             );
         }
+    }
+
+    private async getBootstrapNodes(): Promise<ToporBalancerAdminNode[]> {
+        try {
+            if (this.configService.get<string | undefined>('TOPOR_BALANCER_DATABASE_URL')) {
+                const repository = this.getOrCreateRepository();
+                await repository.initializeSchema();
+                return await repository.listNodes();
+            }
+        } catch (error) {
+            this.logger.warn(`[ToporBalancerConfig] database bootstrap source failed: ${error}`);
+        }
+
+        try {
+            const config = await this.loadOptionalConfig();
+            if (!config) {
+                return [];
+            }
+
+            return config.locations.flatMap((location) =>
+                location.nodes.map((node, index) => ({
+                    id: `${location.publicHostCode}:${location.planCode}:${node.technicalHostName}:${index}`,
+                    assignedUsers: 0,
+                    createdAt: undefined,
+                    locationCode: location.locationCode,
+                    maxUsers: node.maxUsers,
+                    planCode: location.planCode,
+                    publicHostCode: location.publicHostCode,
+                    publicName: location.publicName,
+                    status: node.status,
+                    technicalHostName: node.technicalHostName,
+                    updatedAt: undefined,
+                    weight: node.weight,
+                })),
+            );
+        } catch (error) {
+            this.logger.error('[ToporBalancerConfig] file bootstrap source failed', error);
+            return [];
+        }
+    }
+
+    private getBootstrapHosts(
+        nodes: ToporBalancerAdminNode[],
+    ): ToporBalancerBootstrap['hosts'] {
+        const hosts = new Map<string, ToporBalancerBootstrap['hosts'][number]>();
+
+        for (const node of nodes) {
+            const key = `${node.publicHostCode}:${node.planCode}`;
+            hosts.set(key, {
+                publicHostCode: node.publicHostCode,
+                publicName: node.publicName,
+                locationCode: node.locationCode,
+                planCode: node.planCode,
+            });
+        }
+
+        return Array.from(hosts.values());
     }
 
     private validateNodeUpdate(input: ToporBalancerNodeUpdateInput): void {

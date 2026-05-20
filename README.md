@@ -1,5 +1,19 @@
 # Remnawave Balancer by TopoR
 
+## Runtime frontend config
+
+Frontend продолжает использовать совместимый путь `/assets/.app-config-v2.json`. В этой версии путь обслуживается backend-контроллером, всегда возвращает JSON и при ошибке генерации отдает безопасный fallback config, чтобы Admin UI и страница подписки не зависали на загрузке.
+
+Новый bootstrap endpoint для будущей миграции frontend:
+
+```bash
+GET /api/topor-balancer/bootstrap
+```
+
+Ответ содержит `version`, `locale`, `features`, `settings`, `hosts` и `nodes`. Сейчас endpoint переиспользует существующие источники balancer config: PostgreSQL в database mode или JSON из `TOPOR_BALANCER_CONFIG_PATH`.
+
+Локализация Admin UI начинается в `frontend/src/i18n/`: `ru.ts` является locale по умолчанию, `en.ts` добавлен как дополнительный язык. Tooltip/help тексты и режим `Расширенные настройки` описаны в `docs/admin-ui.md`, runtime config flow описан в `docs/runtime-config.md`.
+
 Форк `remnawave/subscription-page` с балансировкой пользователей между техническими нодами одной публичной локации.
 
 Обычный сценарий: установить Docker, запустить Docker Compose, открыть Admin UI, добавить ноды и опубликовать сервис через Caddy. JSON-конфиг для нормальной настройки через UI не нужен.

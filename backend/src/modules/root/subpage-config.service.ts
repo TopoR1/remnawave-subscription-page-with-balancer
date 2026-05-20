@@ -80,23 +80,39 @@ export class SubpageConfigService implements OnApplicationBootstrap {
         encryptedSubpageConfigUuid: string,
         req: Request,
     ): Promise<object | void> {
+        const subpageConfig = this.getSubscriptionPageConfigByEncryptedUuid(
+            encryptedSubpageConfigUuid,
+        );
+
+        if (!subpageConfig) {
+            req.socket?.destroy();
+            return;
+        }
+
+        return subpageConfig;
+    }
+
+    public getSubscriptionPageConfigByEncryptedUuid(
+        encryptedSubpageConfigUuid: string | undefined,
+    ): TSubscriptionPageRawConfig | null {
+        if (!encryptedSubpageConfigUuid) {
+            return null;
+        }
+
         const decryptedSubpageConfigUuid = decryptUuid(
             encryptedSubpageConfigUuid,
             this.internalJwtSecret,
         );
 
         if (!decryptedSubpageConfigUuid) {
-            req.socket?.destroy();
-            return;
+            return null;
         }
 
         const subpageConfig = this.subpageConfigMap.get(decryptedSubpageConfigUuid);
 
         if (!subpageConfig) {
             this.logger.error(`[FATAL] SubPage config ${decryptedSubpageConfigUuid} not found`);
-            req.socket?.destroy();
-
-            return;
+            return null;
         }
 
         return subpageConfig;

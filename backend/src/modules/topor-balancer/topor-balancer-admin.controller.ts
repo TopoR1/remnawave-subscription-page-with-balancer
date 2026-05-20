@@ -5,6 +5,16 @@ import type { ToporBalancerNodeStatus } from './types';
 import { ToporBalancerAdminGuard } from './topor-balancer-admin.guard';
 import { ToporBalancerService } from './topor-balancer.service';
 
+@Controller('api/topor-balancer')
+export class ToporBalancerBootstrapController {
+    constructor(private readonly toporBalancerService: ToporBalancerService) {}
+
+    @Get('bootstrap')
+    public async bootstrap() {
+        return this.toporBalancerService.getBootstrap();
+    }
+}
+
 @UseGuards(ToporBalancerAdminGuard)
 @Controller('api/topor-balancer')
 export class ToporBalancerAdminController {

@@ -14,7 +14,7 @@ import { ClientIp } from '@common/decorators/get-ip';
 import { IJwtPayload } from '@common/constants';
 import { isDevelopment } from '@common/utils/startup-app';
 
-import { SubpageConfigService } from './subpage-config.service';
+import { RuntimeConfigService } from './runtime-config.service';
 import { RootService } from './root.service';
 
 @Controller()
@@ -26,12 +26,19 @@ export class RootController {
 
     constructor(
         private readonly rootService: RootService,
-        private readonly subpageConfigService: SubpageConfigService,
+        private readonly runtimeConfigService: RuntimeConfigService,
     ) {}
 
     @Get(APP_CONFIG_ROUTE_WO_LEADING_PATH)
-    async getSubscriptionPageConfig(@GetJWTPayload() user: IJwtPayload, @Req() request: Request) {
-        return await this.subpageConfigService.getSubscriptionPageConfig(user.su, request);
+    async getSubscriptionPageConfig(
+        @GetJWTPayload() user: IJwtPayload | undefined,
+        @Req() request: Request,
+        @Res() response: Response,
+    ) {
+        const config = this.runtimeConfigService.getRuntimeConfig(user, request);
+        const serializedConfig = this.runtimeConfigService.serializeRuntimeConfig(config);
+
+        response.type('application/json').status(200).send(serializedConfig);
     }
 
     @Get('admin/topor-balancer')
