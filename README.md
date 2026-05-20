@@ -94,6 +94,10 @@ APP_PORT=3010
 TOPOR_BALANCER_HOST_BIND=127.0.0.1
 TOPOR_BALANCER_HOST_PORT=3011
 
+POSTGRES_USER=topor_balancer
+POSTGRES_PASSWORD=change_me
+POSTGRES_DB=topor_balancer
+
 REMNAWAVE_PANEL_URL=https://panel.example.com
 REMNAWAVE_API_TOKEN=replace_me
 INTERNAL_JWT_SECRET=replace_me_long_random_secret
@@ -104,6 +108,10 @@ TOPOR_BALANCER_DATABASE_URL=postgres://topor_balancer:change_me@topor-balancer-p
 TOPOR_BALANCER_DB_FALLBACK_TO_HASH=false
 TOPOR_BALANCER_ADMIN_TOKEN=replace_me_long_random_admin_token
 ```
+
+Пароль в `POSTGRES_PASSWORD` должен совпадать с паролем в `TOPOR_BALANCER_DATABASE_URL`.
+
+Если поменять пароль после первого запуска, существующий Docker volume PostgreSQL сохранит старый пароль. Для тестового стенда проще пересоздать volume, для production - обновить пароль в PostgreSQL через `ALTER USER` или вернуть старый пароль в `TOPOR_BALANCER_DATABASE_URL`.
 
 `APP_PORT` - внутренний порт приложения в контейнере.  
 `TOPOR_BALANCER_HOST_PORT` - порт на сервере.
@@ -276,6 +284,28 @@ docker compose -f examples/docker-compose.topor-balancer.yml up -d
 Если ошибка `frontend/dist not found`, значит старый Dockerfile ожидал frontend, собранный на хосте. Актуальный Dockerfile собирает frontend внутри Docker.
 
 Если ошибка `ERESOLVE could not resolve`, обновите Dockerfile из репозитория: frontend build stage использует `npm ci --legacy-peer-deps` для dev-зависимостей ESLint. Node.js/npm на сервере все равно не нужны.
+
+## Если PostgreSQL не принимает пароль
+
+В логах:
+
+```text
+FATAL: password authentication failed for user "topor_balancer"
+TopoR balancer database startup initialization failed
+TopoR balancer will fail open with original responses.
+```
+
+PostgreSQL создает пользователя и пароль только при первом создании Docker volume. Если потом изменить `POSTGRES_PASSWORD` или пароль внутри `TOPOR_BALANCER_DATABASE_URL`, старая база продолжит ждать старый пароль.
+
+Для тестового стенда можно удалить volume:
+
+```bash
+docker compose -f examples/docker-compose.topor-balancer.yml down
+docker volume rm examples_topor-balancer-postgres-data
+docker compose -f examples/docker-compose.topor-balancer.yml up -d --build
+```
+
+Для production не удаляйте volume, если важны assignments. Вместо этого обновите пароль пользователя в PostgreSQL через `ALTER USER` или верните в `TOPOR_BALANCER_DATABASE_URL` старый пароль.
 
 ## Обновление и остановка
 

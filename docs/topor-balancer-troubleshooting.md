@@ -78,6 +78,42 @@ docker compose -f examples/docker-compose.topor-balancer.yml logs -f topor-balan
 TOPOR_BALANCER_DATABASE_URL=postgres://topor_balancer:change_me@topor-balancer-postgres:5432/topor_balancer
 ```
 
+## PostgreSQL не принимает пароль
+
+В логах приложения:
+
+```text
+FATAL: password authentication failed for user "topor_balancer"
+TopoR balancer database startup initialization failed
+TopoR balancer will fail open with original responses.
+```
+
+Причина: PostgreSQL создает пользователя и пароль только при первом создании Docker volume. Если позже поменять `POSTGRES_PASSWORD` или пароль в `TOPOR_BALANCER_DATABASE_URL`, существующий volume сохранит старый пароль. Приложение не сможет подключиться, и database mode не будет работать.
+
+Проверьте, что значения согласованы:
+
+```env
+POSTGRES_USER=topor_balancer
+POSTGRES_PASSWORD=change_me
+POSTGRES_DB=topor_balancer
+TOPOR_BALANCER_DATABASE_URL=postgres://topor_balancer:change_me@topor-balancer-postgres:5432/topor_balancer
+```
+
+Для тестового стенда можно пересоздать volume:
+
+```bash
+docker compose -f examples/docker-compose.topor-balancer.yml down
+docker volume rm examples_topor-balancer-postgres-data
+docker compose -f examples/docker-compose.topor-balancer.yml up -d --build
+```
+
+Для production не удаляйте volume, если важны assignments. Безопасные варианты:
+
+- обновить пароль пользователя внутри PostgreSQL через `ALTER USER`;
+- или вернуть пароль в `TOPOR_BALANCER_DATABASE_URL` к тому, который уже сохранен в базе.
+
+Если меняете пароль после первого запуска, пересоздайте volume только на тестовом стенде или обновите пароль в БД вручную.
+
 ## Hash mode без JSON не работает
 
 Это ожидаемо. Hash mode не использует БД, поэтому ему нужен `topor-balancer.config.json`.
