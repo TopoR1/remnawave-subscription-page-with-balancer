@@ -1,5 +1,5 @@
 import type { ExecutionContext } from '@nestjs/common';
-import type { ConfigService } from '@nestjs/config';
+import { ConfigService } from '@nestjs/config';
 
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
@@ -43,6 +43,7 @@ import { parseToporBalancerConfig } from './topor-balancer-config.loader';
 import { ToporBalancerAdminGuard } from './topor-balancer-admin.guard';
 import { ToporBalancerDiscoveryService } from './topor-balancer-discovery.service';
 import { ToporBalancerService } from './topor-balancer.service';
+import { AxiosService } from '../../common/axios';
 import { checkAssetsCookieMiddleware } from '../../common/middlewares/check-assets-cookie.middleware';
 import { RuntimeConfigService } from '../root/runtime-config.service';
 
@@ -880,6 +881,18 @@ test('admin guard requires a matching bearer token', () => {
         /Unauthorized/,
     );
     assert.equal(guard.canActivate(createExecutionContextStub('Bearer secret')), true);
+});
+
+test('ToporBalancerDiscoveryService has concrete Nest DI metadata', () => {
+    const dependencies = Reflect.getMetadata(
+        'design:paramtypes',
+        ToporBalancerDiscoveryService,
+    ) as unknown[];
+
+    assert.equal(dependencies[0], AxiosService);
+    assert.notEqual(dependencies[0], Function);
+    assert.equal(dependencies[1], ConfigService);
+    assert.equal(dependencies[2], ToporBalancerService);
 });
 
 test('static asset middleware allows public frontend assets without session cookie', () => {

@@ -1,7 +1,7 @@
 import { BadRequestException, Injectable, Logger, ServiceUnavailableException } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 
-import type { AxiosService } from '../../common/axios';
+import { AxiosService } from '../../common/axios';
 
 import type {
     ToporBalancerDiscoveredHost,

@@ -171,3 +171,23 @@ vless://...#FI-STD-01
 ```text
 FI-STD-01
 ```
+
+## PM2 restart loop: Nest dependency injection
+
+Check backend startup logs before changing Caddy or Docker networking:
+
+```bash
+docker logs remnawave-subscription-page-with-balancer --tail=120
+```
+
+Expected:
+
+- no `Nest can't resolve dependencies`;
+- no repeated PM2 restart loop;
+- the app listens on `APP_PORT`.
+
+If Caddy resolves the container name but gets `connection refused`, the backend process is not listening yet. Verify the HTTP response from the Caddy container:
+
+```bash
+docker exec caddy sh -c "wget -S -O- --timeout=5 http://remnawave-subscription-page-with-balancer:3010/admin/topor-balancer 2>&1 | head -80"
+```

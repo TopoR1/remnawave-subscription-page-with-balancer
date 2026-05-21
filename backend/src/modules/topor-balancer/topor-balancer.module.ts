@@ -1,5 +1,7 @@
 import { Module } from '@nestjs/common';
 
+import { AxiosModule } from '../../common/axios';
+
 import {
     ToporBalancerAdminController,
     ToporBalancerBootstrapController,
@@ -9,6 +11,7 @@ import { ToporBalancerDiscoveryService } from './topor-balancer-discovery.servic
 import { ToporBalancerService } from './topor-balancer.service';
 
 @Module({
+    imports: [AxiosModule],
     controllers: [ToporBalancerBootstrapController, ToporBalancerAdminController],
     providers: [ToporBalancerService, ToporBalancerDiscoveryService, ToporBalancerAdminGuard],
     exports: [ToporBalancerService, ToporBalancerAdminGuard],
