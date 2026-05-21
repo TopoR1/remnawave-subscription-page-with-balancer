@@ -14,6 +14,8 @@ import { ConfigService } from '@nestjs/config';
 
 import {
     GetMetadataCommand,
+    GetAllHostsCommand,
+    GetAllNodesCommand,
     GetSubpageConfigByShortUuidCommand,
     GetSubscriptionInfoByShortUuidCommand,
     GetSubscriptionPageConfigCommand,
@@ -23,7 +25,7 @@ import {
     TRequestTemplateTypeKeys,
 } from '@remnawave/backend-contract';
 
-import { IGNORED_HEADERS } from '@common/constants';
+import { IGNORED_HEADERS } from '../constants';
 
 import { ICommandResponse } from '../types/command-response.type';
 
@@ -277,6 +279,58 @@ export class AxiosService implements OnModuleInit {
             };
         } catch (error) {
             this.logger.error('Error in GetSubpageConfig Request:', error);
+            return { isOk: false };
+        }
+    }
+
+    public async getRemnawaveHosts(): Promise<ICommandResponse<GetAllHostsCommand.Response>> {
+        try {
+            const response = await this.axiosInstance.request<GetAllHostsCommand.Response>({
+                method: GetAllHostsCommand.endpointDetails.REQUEST_METHOD,
+                url: GetAllHostsCommand.url,
+            });
+
+            const validationResult = await GetAllHostsCommand.ResponseSchema.parseAsync(
+                response.data,
+            );
+
+            return {
+                isOk: true,
+                response: validationResult,
+            };
+        } catch (error) {
+            if (error instanceof AxiosError) {
+                this.logger.error(`Error in GetAllHosts Request: ${error.message}`);
+            } else {
+                this.logger.error('Error in GetAllHosts Request:', error);
+            }
+
+            return { isOk: false };
+        }
+    }
+
+    public async getRemnawaveNodes(): Promise<ICommandResponse<GetAllNodesCommand.Response>> {
+        try {
+            const response = await this.axiosInstance.request<GetAllNodesCommand.Response>({
+                method: GetAllNodesCommand.endpointDetails.REQUEST_METHOD,
+                url: GetAllNodesCommand.url,
+            });
+
+            const validationResult = await GetAllNodesCommand.ResponseSchema.parseAsync(
+                response.data,
+            );
+
+            return {
+                isOk: true,
+                response: validationResult,
+            };
+        } catch (error) {
+            if (error instanceof AxiosError) {
+                this.logger.error(`Error in GetAllNodes Request: ${error.message}`);
+            } else {
+                this.logger.error('Error in GetAllNodes Request:', error);
+            }
+
             return { isOk: false };
         }
     }

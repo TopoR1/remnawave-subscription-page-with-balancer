@@ -4,6 +4,7 @@ export * from './topor-balancer-config.loader';
 export * from './topor-balancer-config.validator';
 export * from './topor-balancer-database.processor';
 export * from './topor-balancer-database.repository';
+export * from './topor-balancer-discovery.service';
 export * from './topor-balancer-hash.processor';
 export * from './topor-balancer-subscription.parser';
 export * from './topor-balancer.module';

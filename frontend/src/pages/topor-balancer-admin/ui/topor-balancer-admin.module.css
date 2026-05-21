@@ -39,6 +39,10 @@
     min-width: 1220px;
 }
 
+.discoveryTable {
+    min-width: 1180px;
+}
+
 .nodesTable th {
     white-space: nowrap;
 }
@@ -60,6 +64,14 @@
 }
 
 .requestsTable td {
+    white-space: nowrap;
+}
+
+.discoveryTable th {
+    white-space: nowrap;
+}
+
+.discoveryTable td {
     white-space: nowrap;
 }
 

@@ -41,8 +41,10 @@ import { processSubscriptionWithDatabaseBalancer } from './topor-balancer-databa
 import { processSubscriptionWithHashBalancer } from './topor-balancer-hash.processor';
 import { parseToporBalancerConfig } from './topor-balancer-config.loader';
 import { ToporBalancerAdminGuard } from './topor-balancer-admin.guard';
+import { ToporBalancerDiscoveryService } from './topor-balancer-discovery.service';
 import { ToporBalancerService } from './topor-balancer.service';
 import { checkAssetsCookieMiddleware } from '../../common/middlewares/check-assets-cookie.middleware';
+import { RuntimeConfigService } from '../root/runtime-config.service';
 
 const realityLink =
     'vless://11111111-1111-4111-8111-111111111111@example.com:443?type=tcp&security=reality&sni=www.microsoft.com&flow=xtls-rprx-vision&pbk=publicKeyValue&sid=abcd&fp=chrome#Finland';
@@ -930,6 +932,146 @@ test('static asset middleware does not destroy non-asset requests with no sessio
     assert.equal(socketDestroyed, false);
 });
 
+test('runtime config fallback serializes with missing session user', () => {
+    const runtimeConfigService = new RuntimeConfigService({
+        getSubscriptionPageConfigByEncryptedUuid: () => {
+            throw new Error('should not be called');
+        },
+    } as never);
+
+    const config = runtimeConfigService.getRuntimeConfig(undefined, {
+        path: '/assets/.app-config-v2.json',
+    } as never);
+    const serializedConfig = runtimeConfigService.serializeRuntimeConfig(config);
+    const parsedConfig = JSON.parse(serializedConfig);
+    const health = runtimeConfigService.getHealth();
+
+    assert.equal(parsedConfig.version, '1');
+    assert.equal(health.lastConfigSource, 'fallback');
+    assert.deepEqual(health.lastMissingSources, ['session.su']);
+});
+
+test('runtime config fallback handles malformed encrypted subpage UUID', () => {
+    const runtimeConfigService = new RuntimeConfigService({
+        getSubscriptionPageConfigByEncryptedUuid: () => null,
+    } as never);
+
+    const config = runtimeConfigService.getRuntimeConfig(
+        {
+            sessionId: 'unit-test',
+            su: 'malformed',
+        },
+        {
+            path: '/assets/.app-config-v2.json',
+        } as never,
+    );
+    const serializedConfig = runtimeConfigService.serializeRuntimeConfig(config);
+    const parsedConfig = JSON.parse(serializedConfig);
+    const health = runtimeConfigService.getHealth();
+
+    assert.equal(parsedConfig.version, '1');
+    assert.equal(health.lastConfigSource, 'fallback');
+    assert.equal(health.lastRuntimeConfigError?.includes('Subpage config'), true);
+});
+
+test('subscription discovery parses plain and base64 VLESS subscriptions without raw secrets', async () => {
+    const plainBody = [buildVlessLink('FI-STD-01'), buildVlessLink('FI-STD-02')].join('\n');
+    const repository = new InMemoryToporBalancerRepository();
+    const service = new ToporBalancerDiscoveryService(
+        {
+            getSubscription: async () => ({
+                headers: {
+                    'content-type': 'text/plain',
+                },
+                response: plainBody,
+            }),
+        } as never,
+        createConfigServiceStub({
+            REMNAWAVE_PANEL_URL: 'https://panel.example.com',
+        }) as never,
+        {
+            listAdminNodes: () => repository.listNodes(),
+        } as never,
+    );
+
+    const response = await service.discoverFromSubscription('short-uuid');
+
+    assert.equal(response.source, 'subscription');
+    assert.equal(response.items.length, 2);
+    assert.equal(response.items[0].technicalHostName, 'FI-STD-01');
+    assert.equal(response.items[0].protocol, 'vless');
+    assert.equal(response.items[0].pbk?.includes('publicKeyValue'), false);
+
+    const base64Service = new ToporBalancerDiscoveryService(
+        {
+            getSubscription: async () => ({
+                headers: {
+                    'content-type': 'text/plain',
+                },
+                response: Buffer.from(plainBody, 'utf8').toString('base64'),
+            }),
+        } as never,
+        createConfigServiceStub({
+            REMNAWAVE_PANEL_URL: 'https://panel.example.com',
+        }) as never,
+        {
+            listAdminNodes: () => repository.listNodes(),
+        } as never,
+    );
+
+    const base64Response = await base64Service.discoverFromSubscription('short-uuid');
+
+    assert.equal(base64Response.items.length, 2);
+});
+
+test('discovery import creates and updates nodes without duplicates', async () => {
+    const repository = new InMemoryToporBalancerRepository();
+    const service = new ToporBalancerService(
+        createConfigServiceStub({
+            TOPOR_BALANCER_DATABASE_URL: 'postgres://unit-test',
+        }),
+    );
+
+    setServiceRepository(service, repository);
+
+    const firstResult = await service.importDiscoveredNodes({
+        publicHostCode: 'fi_standard',
+        publicName: 'Finland',
+        locationCode: 'FI',
+        planCode: 'standard',
+        nodes: [
+            {
+                technicalHostName: 'FI-STD-01',
+                weight: 1,
+                maxUsers: 300,
+                status: 'active',
+            },
+        ],
+    });
+    const secondResult = await service.importDiscoveredNodes({
+        publicHostCode: 'fi_standard',
+        publicName: 'Finland',
+        locationCode: 'FI',
+        planCode: 'standard',
+        nodes: [
+            {
+                technicalHostName: 'FI-STD-01',
+                weight: 2,
+                maxUsers: 500,
+                status: 'draining',
+            },
+        ],
+    });
+    const nodes = await repository.listNodes();
+
+    assert.equal(firstResult.created.length, 1);
+    assert.equal(secondResult.updated.length, 1);
+    assert.equal(nodes.length, 1);
+    assert.equal(nodes[0].weight, 2);
+    assert.equal(nodes[0].maxUsers, 500);
+    assert.equal(nodes[0].status, 'draining');
+});
+
 test('admin service lists, updates, and manually reassigns nodes', async () => {
     const repository = InMemoryToporBalancerRepository.fromConfig(balancerConfig);
     const service = new ToporBalancerService(
@@ -1362,6 +1504,39 @@ class InMemoryToporBalancerRepository implements ToporBalancerAssignmentReposito
             ...node,
             assignedUsers: this.countAssignmentsForNode(node.id),
         };
+    }
+
+    public async upsertImportedNodes(
+        input: ToporBalancerNodeCreateInput[],
+    ): Promise<{ created: ToporBalancerAdminNode[]; updated: ToporBalancerAdminNode[] }> {
+        const created: ToporBalancerAdminNode[] = [];
+        const updated: ToporBalancerAdminNode[] = [];
+
+        for (const node of input) {
+            if (this.nodes.has(node.technicalHostName)) {
+                const updatedNode = await this.updateNode(node.technicalHostName, {
+                    locationCode: node.locationCode,
+                    maxUsers: node.maxUsers,
+                    planCode: node.planCode,
+                    publicHostCode: node.publicHostCode,
+                    publicName: node.publicName,
+                    status: node.status,
+                    weight: node.weight,
+                });
+
+                if (updatedNode) {
+                    updated.push(updatedNode);
+                }
+            } else {
+                const createdNode = await this.createNode(node);
+
+                if (createdNode) {
+                    created.push(createdNode);
+                }
+            }
+        }
+
+        return { created, updated };
     }
 
     public async deleteNode(id: string): Promise<ToporBalancerNodeDeleteResult> {

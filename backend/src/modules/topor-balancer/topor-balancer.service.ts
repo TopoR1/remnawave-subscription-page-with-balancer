@@ -26,6 +26,8 @@ import type {
     ToporBalancerAssignmentMode,
     ToporBalancerConfig,
     ToporBalancerDbAssignment,
+    ToporBalancerDiscoveryImportInput,
+    ToporBalancerDiscoveryImportResult,
     ToporBalancerNodeStatus,
 } from './types';
 
@@ -336,6 +338,31 @@ export class ToporBalancerService implements OnModuleDestroy, OnModuleInit {
         return this.updateAdminNode(id, { status });
     }
 
+    public async importDiscoveredNodes(
+        input: ToporBalancerDiscoveryImportInput,
+    ): Promise<ToporBalancerDiscoveryImportResult> {
+        this.validateDiscoveryImport(input);
+
+        const normalizedNodes = input.nodes.map((node) => ({
+            technicalHostName: node.technicalHostName.trim(),
+            publicHostCode: input.publicHostCode.trim(),
+            publicName: input.publicName.trim(),
+            locationCode: this.normalizeOptionalString(input.locationCode),
+            planCode: input.planCode.trim(),
+            weight: node.weight,
+            maxUsers: node.maxUsers,
+            status: node.status,
+        }));
+
+        const result = await this.getAdminRepository().upsertImportedNodes(normalizedNodes);
+
+        return {
+            created: result.created,
+            updated: result.updated,
+            skipped: [],
+        };
+    }
+
     private async processWithDatabase(
         input: ToporBalancerProcessInput,
         bodyText: string,
@@ -572,6 +599,37 @@ export class ToporBalancerService implements OnModuleDestroy, OnModuleInit {
             status: input.status,
             weight: input.weight,
         });
+    }
+
+    private validateDiscoveryImport(input: ToporBalancerDiscoveryImportInput): void {
+        this.validateNonEmptyString(input.publicHostCode, 'publicHostCode');
+        this.validateNonEmptyString(input.publicName, 'publicName');
+        this.validateNonEmptyString(input.planCode, 'planCode');
+
+        if (!Array.isArray(input.nodes) || input.nodes.length === 0) {
+            throw new BadRequestException('TopoR balancer import nodes must be a non-empty array');
+        }
+
+        const seenTechnicalHostNames = new Set<string>();
+
+        for (const node of input.nodes) {
+            this.validateNonEmptyString(node.technicalHostName, 'technicalHostName');
+            this.validateNodeUpdate({
+                maxUsers: node.maxUsers,
+                status: node.status,
+                weight: node.weight,
+            });
+
+            const normalizedTechnicalHostName = node.technicalHostName.trim();
+
+            if (seenTechnicalHostNames.has(normalizedTechnicalHostName)) {
+                throw new BadRequestException(
+                    `TopoR balancer import duplicates technicalHostName: ${normalizedTechnicalHostName}`,
+                );
+            }
+
+            seenTechnicalHostNames.add(normalizedTechnicalHostName);
+        }
     }
 
     private async validateManualReassign(input: ToporBalancerManualReassignInput): Promise<void> {

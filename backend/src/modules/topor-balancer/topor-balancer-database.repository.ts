@@ -116,6 +116,9 @@ export interface ToporBalancerAssignmentRepository {
     listAssignments(filters: ToporBalancerAssignmentFilters): Promise<ToporBalancerDbAssignment[]>;
     reassign(input: ToporBalancerManualReassignInput): Promise<ToporBalancerDbAssignment | null>;
     listRequests(filters: ToporBalancerRequestFilters): Promise<ToporBalancerAdminRequest[]>;
+    upsertImportedNodes(
+        input: ToporBalancerNodeCreateInput[],
+    ): Promise<{ created: ToporBalancerAdminNode[]; updated: ToporBalancerAdminNode[] }>;
     close(): Promise<void>;
 }
 
@@ -550,6 +553,49 @@ export class ToporBalancerPostgresRepository implements ToporBalancerAssignmentR
         );
 
         return result.rows.map(mapRequestRow);
+    }
+
+    public async upsertImportedNodes(
+        input: ToporBalancerNodeCreateInput[],
+    ): Promise<{ created: ToporBalancerAdminNode[]; updated: ToporBalancerAdminNode[] }> {
+        const created: ToporBalancerAdminNode[] = [];
+        const updated: ToporBalancerAdminNode[] = [];
+
+        for (const node of input) {
+            const existing = await this.pool.query<DbNodeRow>(
+                'SELECT * FROM topor_balancer_nodes WHERE technical_host_name = $1 LIMIT 1',
+                [node.technicalHostName],
+            );
+            const existingNode = existing.rows[0];
+
+            if (existingNode) {
+                await this.updateNode(existingNode.id, {
+                    locationCode: node.locationCode,
+                    maxUsers: node.maxUsers,
+                    planCode: node.planCode,
+                    publicHostCode: node.publicHostCode,
+                    publicName: node.publicName,
+                    status: node.status,
+                    weight: node.weight,
+                });
+
+                const adminNode = (await this.listNodes()).find(
+                    (item) => item.technicalHostName === node.technicalHostName,
+                );
+
+                if (adminNode) {
+                    updated.push(adminNode);
+                }
+            } else {
+                const adminNode = await this.createNode(node);
+
+                if (adminNode) {
+                    created.push(adminNode);
+                }
+            }
+        }
+
+        return { created, updated };
     }
 
     public async close(): Promise<void> {

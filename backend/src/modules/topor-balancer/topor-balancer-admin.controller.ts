@@ -3,6 +3,7 @@ import { Body, Controller, Delete, Get, Param, Patch, Post, Query, UseGuards } f
 import type { ToporBalancerNodeStatus } from './types';
 
 import { ToporBalancerAdminGuard } from './topor-balancer-admin.guard';
+import { ToporBalancerDiscoveryService } from './topor-balancer-discovery.service';
 import { ToporBalancerService } from './topor-balancer.service';
 
 @Controller('api/topor-balancer')
@@ -18,11 +19,19 @@ export class ToporBalancerBootstrapController {
 @UseGuards(ToporBalancerAdminGuard)
 @Controller('api/topor-balancer')
 export class ToporBalancerAdminController {
-    constructor(private readonly toporBalancerService: ToporBalancerService) {}
+    constructor(
+        private readonly toporBalancerService: ToporBalancerService,
+        private readonly toporBalancerDiscoveryService: ToporBalancerDiscoveryService,
+    ) {}
 
     @Get('health')
     public async health() {
-        return this.toporBalancerService.getAdminHealth();
+        const health = await this.toporBalancerService.getAdminHealth();
+
+        return {
+            ...health,
+            remnawavePanelUrl: this.toporBalancerDiscoveryService.getPanelUrl(),
+        };
     }
 
     @Get('nodes')
@@ -127,5 +136,34 @@ export class ToporBalancerAdminController {
     @Post('nodes/:id/disable')
     public async disableNode(@Param('id') id: string) {
         return this.toporBalancerService.setAdminNodeStatus(id, 'disabled');
+    }
+
+    @Get('discovery/remnawave')
+    public async discoverFromRemnawaveApi() {
+        return this.toporBalancerDiscoveryService.discoverFromRemnawaveApi();
+    }
+
+    @Post('discovery/subscription')
+    public async discoverFromSubscription(@Body() body: { shortUuid: string }) {
+        return this.toporBalancerDiscoveryService.discoverFromSubscription(body.shortUuid);
+    }
+
+    @Post('discovery/import')
+    public async importDiscoveredNodes(
+        @Body()
+        body: {
+            publicHostCode: string;
+            publicName: string;
+            locationCode?: string;
+            planCode: string;
+            nodes: Array<{
+                technicalHostName: string;
+                weight: number;
+                maxUsers: number;
+                status: ToporBalancerNodeStatus;
+            }>;
+        },
+    ) {
+        return this.toporBalancerDiscoveryService.importDiscoveredNodes(body);
     }
 }

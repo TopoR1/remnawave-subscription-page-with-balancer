@@ -59,31 +59,56 @@ const FALLBACK_RUNTIME_CONFIG: TSubscriptionPageRawConfig = {
     platforms: {},
 };
 
+export interface RuntimeConfigHealth {
+    ok: true;
+    appConfigRoute: string;
+    fallbackConfigOk: boolean;
+    canSerializeFallback: boolean;
+    lastRuntimeConfigError: string | null;
+    lastConfigSource: string | null;
+    lastMissingSources: string[];
+}
+
 @Injectable()
 export class RuntimeConfigService {
     private readonly logger = new Logger(RuntimeConfigService.name);
+    private lastRuntimeConfigError: string | null = null;
+    private lastConfigSource: string | null = null;
+    private lastMissingSources: string[] = [];
 
     constructor(private readonly subpageConfigService: SubpageConfigService) {}
 
     public getRuntimeConfig(user: IJwtPayload | undefined, request: Request): TSubscriptionPageRawConfig {
         const missingSources = this.getMissingSources(user);
+        this.lastMissingSources = missingSources;
 
         try {
-            const config = this.subpageConfigService.getSubscriptionPageConfigByEncryptedUuid(user?.su);
-
-            if (!config) {
-                this.logDiagnostics('fallback', FALLBACK_RUNTIME_CONFIG, missingSources);
+            if (missingSources.length > 0) {
+                this.recordRuntimeConfigError(
+                    `Missing runtime config source(s): ${missingSources.join(', ')}`,
+                    request,
+                );
+                this.recordConfigSource('fallback', missingSources);
                 return FALLBACK_RUNTIME_CONFIG;
             }
 
-            this.logDiagnostics('remnawave-subpage-config', config, missingSources);
+            const config = this.subpageConfigService.getSubscriptionPageConfigByEncryptedUuid(user?.su);
+
+            if (!config) {
+                this.recordRuntimeConfigError(
+                    'Subpage config cannot be resolved from session.su',
+                    request,
+                );
+                this.recordConfigSource('fallback', missingSources);
+                return FALLBACK_RUNTIME_CONFIG;
+            }
+
+            this.lastRuntimeConfigError = null;
+            this.recordConfigSource('remnawave-subpage-config', missingSources);
             return config;
         } catch (error) {
-            this.logger.error(
-                `[ToporBalancerConfig] runtime config generation failed for ${request.path}`,
-                error,
-            );
-            this.logDiagnostics('fallback-after-error', FALLBACK_RUNTIME_CONFIG, missingSources);
+            this.recordRuntimeConfigError(error, request);
+            this.recordConfigSource('fallback-after-error', missingSources);
             return FALLBACK_RUNTIME_CONFIG;
         }
     }
@@ -92,9 +117,24 @@ export class RuntimeConfigService {
         try {
             return JSON.stringify(config);
         } catch (error) {
-            this.logger.error('[ToporBalancerConfig] runtime config serialization failed', error);
+            this.lastRuntimeConfigError = this.getErrorMessage(error);
+            this.logger.error('[RuntimeConfig] runtime config serialization failed', error);
             return JSON.stringify(FALLBACK_RUNTIME_CONFIG);
         }
+    }
+
+    public getHealth(): RuntimeConfigHealth {
+        const canSerializeFallback = this.canSerializeFallback();
+
+        return {
+            ok: true,
+            appConfigRoute: '/assets/.app-config-v2.json',
+            fallbackConfigOk: canSerializeFallback,
+            canSerializeFallback,
+            lastRuntimeConfigError: this.lastRuntimeConfigError,
+            lastConfigSource: this.lastConfigSource,
+            lastMissingSources: this.lastMissingSources,
+        };
     }
 
     private getMissingSources(user: IJwtPayload | undefined): string[] {
@@ -107,18 +147,34 @@ export class RuntimeConfigService {
         return missingSources;
     }
 
-    private logDiagnostics(
-        source: string,
-        config: TSubscriptionPageRawConfig,
-        missingSources: string[],
-    ): void {
+    private recordConfigSource(source: string, missingSources: string[]): void {
+        this.lastConfigSource = source;
         this.logger.log(
-            `[ToporBalancerConfig] ${JSON.stringify({
+            `[RuntimeConfig] ${JSON.stringify({
                 source,
                 missingSources,
-                schemaVersion: config.version,
-                locales: config.locales,
+                schemaVersion: FALLBACK_RUNTIME_CONFIG.version,
             })}`,
         );
+    }
+
+    private recordRuntimeConfigError(error: unknown, request: Request): void {
+        const errorMessage = this.getErrorMessage(error);
+        this.lastRuntimeConfigError = errorMessage;
+        this.logger.warn(`[RuntimeConfig] ${request.path}: ${errorMessage}`);
+    }
+
+    private canSerializeFallback(): boolean {
+        try {
+            JSON.stringify(FALLBACK_RUNTIME_CONFIG);
+            return true;
+        } catch (error) {
+            this.lastRuntimeConfigError = this.getErrorMessage(error);
+            return false;
+        }
+    }
+
+    private getErrorMessage(error: unknown): string {
+        return error instanceof Error ? error.message : String(error);
     }
 }

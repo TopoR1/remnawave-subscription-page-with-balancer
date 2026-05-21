@@ -1,7 +1,7 @@
 import { Request, Response } from 'express';
 import path from 'node:path';
 
-import { Get, Controller, Res, Req, Param, Logger } from '@nestjs/common';
+import { Get, Controller, Res, Req, Param, Logger, UseGuards } from '@nestjs/common';
 
 import {
     REQUEST_TEMPLATE_TYPE_VALUES,
@@ -16,6 +16,7 @@ import { isDevelopment } from '@common/utils/startup-app';
 
 import { RuntimeConfigService } from './runtime-config.service';
 import { RootService } from './root.service';
+import { ToporBalancerAdminGuard } from '@modules/topor-balancer';
 
 @Controller()
 export class RootController {
@@ -108,5 +109,16 @@ export class RootController {
                 clientType as TRequestTemplateTypeKeys,
             );
         }
+    }
+}
+
+@UseGuards(ToporBalancerAdminGuard)
+@Controller('api/topor-balancer')
+export class RuntimeConfigHealthController {
+    constructor(private readonly runtimeConfigService: RuntimeConfigService) {}
+
+    @Get('runtime-config-health')
+    public health() {
+        return this.runtimeConfigService.getHealth();
     }
 }

@@ -7,12 +7,12 @@ import { ToporBalancerModule } from '@modules/topor-balancer';
 
 import { SubpageConfigService } from './subpage-config.service';
 import { RuntimeConfigService } from './runtime-config.service';
-import { RootController } from './root.controller';
+import { RootController, RuntimeConfigHealthController } from './root.controller';
 import { RootService } from './root.service';
 
 @Module({
     imports: [JwtModule.registerAsync(getJWTConfig()), ToporBalancerModule],
-    controllers: [RootController],
+    controllers: [RootController, RuntimeConfigHealthController],
     providers: [RootService, SubpageConfigService, RuntimeConfigService],
 })
 export class RootModule {}

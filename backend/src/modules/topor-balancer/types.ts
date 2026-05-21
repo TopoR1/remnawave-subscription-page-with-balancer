@@ -149,3 +149,49 @@ export interface ToporBalancerBootstrap {
     }>;
     nodes: ToporBalancerAdminNode[];
 }
+
+export interface ToporBalancerDiscoveredHost {
+    technicalHostName: string;
+    protocol?: 'vless';
+    host?: string;
+    port?: number;
+    security?: string;
+    type?: string;
+    sni?: string;
+    flow?: string;
+    pbk?: string;
+    sid?: string;
+    rawRemark?: string;
+    remnawaveNodeName?: string;
+    remnawaveNodeUuid?: string;
+    alreadyImported: boolean;
+    matchedNodeId: string | null;
+}
+
+export interface ToporBalancerDiscoveryResponse {
+    source: 'remnawave-api' | 'subscription';
+    shortUuid?: string;
+    items: ToporBalancerDiscoveredHost[];
+}
+
+export interface ToporBalancerDiscoveryImportInput {
+    publicHostCode: string;
+    publicName: string;
+    locationCode?: string;
+    planCode: string;
+    nodes: Array<{
+        technicalHostName: string;
+        weight: number;
+        maxUsers: number;
+        status: ToporBalancerNodeStatus;
+    }>;
+}
+
+export interface ToporBalancerDiscoveryImportResult {
+    created: ToporBalancerAdminNode[];
+    updated: ToporBalancerAdminNode[];
+    skipped: Array<{
+        technicalHostName: string;
+        reason: string;
+    }>;
+}

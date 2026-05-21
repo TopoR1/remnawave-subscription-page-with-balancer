@@ -3,9 +3,12 @@ import * as jwt from 'jsonwebtoken';
 
 import { Logger } from '@nestjs/common';
 
+import { APP_CONFIG_ROUTE_WO_LEADING_PATH } from '@remnawave/subscription-page-types';
+
 import { IJwtPayload } from '@common/constants';
 
 const logger = new Logger('CheckAssetsCookieMiddleware');
+const appConfigRoute = `/${APP_CONFIG_ROUTE_WO_LEADING_PATH}`;
 
 export function checkAssetsCookieMiddleware(
     req: { user: IJwtPayload } & Request,
@@ -14,7 +17,11 @@ export function checkAssetsCookieMiddleware(
 ) {
     // Static frontend files are public assets for both the subscription UI and Admin UI.
     // Admin UI is protected by its own API token; blocking assets here breaks production SPA loading.
-    if (req.path.startsWith('/assets') || req.path.startsWith('/locales')) {
+    // The runtime app config is an asset-looking dynamic endpoint and still needs session cookie decoding.
+    if (
+        req.path !== appConfigRoute &&
+        (req.path.startsWith('/assets') || req.path.startsWith('/locales'))
+    ) {
         return next();
     }
 

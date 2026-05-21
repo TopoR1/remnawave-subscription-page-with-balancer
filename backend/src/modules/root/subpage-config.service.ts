@@ -11,8 +11,8 @@ import {
     SUBPAGE_DEFAULT_CONFIG_UUID,
 } from '@remnawave/subscription-page-types';
 
-import { decryptUuid, encryptUuid } from '@common/utils/crypt-utils';
-import { AxiosService } from '@common/axios';
+import { decryptUuid, encryptUuid } from '../../common/utils/crypt-utils';
+import { AxiosService } from '../../common/axios';
 
 @Injectable()
 export class SubpageConfigService implements OnApplicationBootstrap {
