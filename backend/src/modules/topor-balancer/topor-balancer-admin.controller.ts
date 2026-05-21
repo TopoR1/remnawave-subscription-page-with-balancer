@@ -1,6 +1,6 @@
 import { Body, Controller, Delete, Get, Param, Patch, Post, Query, UseGuards } from '@nestjs/common';
 
-import type { ToporBalancerNodeStatus } from './types';
+import type { ToporBalancerGroupStrategy, ToporBalancerNodeStatus } from './types';
 
 import { ToporBalancerAdminGuard } from './topor-balancer-admin.guard';
 import { ToporBalancerDiscoveryService } from './topor-balancer-discovery.service';
@@ -37,6 +37,98 @@ export class ToporBalancerAdminController {
     @Get('nodes')
     public async nodes() {
         return this.toporBalancerService.listAdminNodes();
+    }
+
+    @Get('groups')
+    public async groups() {
+        return this.toporBalancerService.listAdminGroups();
+    }
+
+    @Post('groups')
+    public async createGroup(
+        @Body()
+        body: {
+            publicHostCode: string;
+            publicName: string;
+            locationCode?: string;
+            planCode: string;
+            strategy?: ToporBalancerGroupStrategy;
+            enabled?: boolean;
+        },
+    ) {
+        return this.toporBalancerService.createAdminGroup({
+            enabled: body.enabled ?? true,
+            locationCode: body.locationCode,
+            planCode: body.planCode,
+            publicHostCode: body.publicHostCode,
+            publicName: body.publicName,
+            strategy: body.strategy ?? 'least_loaded',
+        });
+    }
+
+    @Patch('groups/:id')
+    public async updateGroup(
+        @Param('id') id: string,
+        @Body()
+        body: {
+            publicHostCode?: string;
+            publicName?: string;
+            locationCode?: string;
+            planCode?: string;
+            strategy?: ToporBalancerGroupStrategy;
+            enabled?: boolean;
+        },
+    ) {
+        return this.toporBalancerService.updateAdminGroup(id, body);
+    }
+
+    @Delete('groups/:id')
+    public async deleteGroup(@Param('id') id: string) {
+        return this.toporBalancerService.deleteAdminGroup(id);
+    }
+
+    @Get('groups/:id/nodes')
+    public async groupNodes(@Param('id') id: string) {
+        return this.toporBalancerService.listAdminGroupNodes(id);
+    }
+
+    @Post('groups/:id/nodes')
+    public async createGroupNode(
+        @Param('id') id: string,
+        @Body()
+        body: {
+            technicalHostName: string;
+            weight?: number;
+            maxUsers?: number;
+            status?: ToporBalancerNodeStatus;
+        },
+    ) {
+        return this.toporBalancerService.createAdminGroupNode(id, {
+            maxUsers: body.maxUsers ?? 300,
+            status: body.status ?? 'active',
+            technicalHostName: body.technicalHostName,
+            weight: body.weight ?? 1,
+        });
+    }
+
+    @Patch('groups/:id/nodes/:nodeId')
+    public async updateGroupNode(
+        @Param('id') id: string,
+        @Param('nodeId') nodeId: string,
+        @Body()
+        body: {
+            technicalHostName?: string;
+            weight?: number;
+            maxUsers?: number;
+            status?: ToporBalancerNodeStatus;
+        },
+    ) {
+        return this.toporBalancerService.updateAdminGroupNode(id, nodeId, body);
+    }
+
+    @Delete('groups/:id/nodes/:nodeId')
+    public async deleteGroupNode(@Param('id') id: string, @Param('nodeId') nodeId: string) {
+        return this.toporBalancerService.deleteAdminGroupNode(id, nodeId);
     }
 
     @Post('nodes')
@@ -152,10 +244,17 @@ export class ToporBalancerAdminController {
     public async importDiscoveredNodes(
         @Body()
         body: {
-            publicHostCode: string;
-            publicName: string;
+            groupId?: string;
+            group?: {
+                publicHostCode: string;
+                publicName: string;
+                locationCode?: string;
+                planCode: string;
+            };
+            publicHostCode?: string;
+            publicName?: string;
             locationCode?: string;
-            planCode: string;
+            planCode?: string;
             nodes: Array<{
                 technicalHostName: string;
                 weight: number;
@@ -165,5 +264,18 @@ export class ToporBalancerAdminController {
         },
     ) {
         return this.toporBalancerDiscoveryService.importDiscoveredNodes(body);
+    }
+
+    @Post('debug/process-subscription')
+    public async debugProcessSubscription(@Body() body: { shortUuid: string }) {
+        return this.toporBalancerService.debugProcessSubscription(body.shortUuid);
+    }
+
+    @Post('diagnostics/subscription')
+    public async diagnoseSubscription(@Body() body: { shortUuid: string; userAgent?: string }) {
+        return this.toporBalancerService.diagnoseSubscription({
+            shortUuid: body.shortUuid,
+            userAgent: body.userAgent,
+        });
     }
 }

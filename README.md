@@ -398,6 +398,23 @@ git pull
 docker compose -f examples/docker-compose.topor-balancer.yml up -d --build
 ```
 
+## Проверка после обновления
+
+После деплоя или обновления запустите smoke-check. Он проверяет, что контейнер запущен, NestJS дошел до успешного старта, порт приложения открыт, Caddy видит контейнер по Docker network, runtime config отвечает JSON, Admin UI и assets отдаются через домен, а Admin API `/api/topor-balancer/health` доступен с токеном.
+
+```bash
+chmod +x scripts/topor-balancer-smoke-check.sh
+./scripts/topor-balancer-smoke-check.sh subs.topornet.com "$TOPOR_BALANCER_ADMIN_TOKEN"
+```
+
+Если имена контейнеров отличаются:
+
+```bash
+./scripts/topor-balancer-smoke-check.sh subs.topornet.com "$TOPOR_BALANCER_ADMIN_TOKEN" caddy remnawave-subscription-page-with-balancer
+```
+
+Типовые причины в выводе разделены по зонам: `Docker network issue`, `backend crash`, `Caddy proxy issue`, `asset serving issue`, `runtime config issue`.
+
 ```bash
 docker compose -f examples/docker-compose.topor-balancer.yml down
 ```

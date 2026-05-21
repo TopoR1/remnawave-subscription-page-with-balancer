@@ -8,6 +8,7 @@ export const IGNORED_HEADERS = new Set([
     'cf-cache-status',
     'cf-ray',
     'connection',
+    'content-encoding',
     'content-length',
 
     'content-security-policy',

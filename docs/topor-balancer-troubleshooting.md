@@ -38,6 +38,37 @@ docker network connect <network_name> remnawave-subscription-page-with-balancer
 docker exec caddy sh -c "wget -S -O- --timeout=5 http://remnawave-subscription-page-with-balancer:3010/admin/topor-balancer 2>&1 | head -80"
 ```
 
+## Compare original and balanced subscriptions
+
+Use a real client user-agent when checking VLESS output:
+
+```bash
+curl -A "v2rayNG/1.9.0" "https://subs.example.com/<shortUuid>" -o balanced.txt
+```
+
+If the response is base64 encoded, decode it before comparing links:
+
+```bash
+cat balanced.txt | base64 -d > balanced.decoded.txt
+```
+
+Expected checks:
+
+- output VLESS links parse successfully;
+- selected links keep the same UUID, host, port, query params, Reality params, and transport params;
+- selected links may differ only by the visible `#remark`;
+- logs and debug responses do not expose full UUID, `pbk`, or `sid`;
+- response headers do not include stale `content-encoding`, `content-length`, or `transfer-encoding`.
+
+For a masked server-side comparison, use the protected admin endpoint:
+
+```bash
+curl -H "Authorization: Bearer <admin-token>" \
+  -H "Content-Type: application/json" \
+  -d '{"shortUuid":"<shortUuid>"}' \
+  "https://subs.example.com/api/topor-balancer/debug/process-subscription"
+```
+
 Вариант 2: указать сеть в `.env` и перезапустить compose:
 
 ```env

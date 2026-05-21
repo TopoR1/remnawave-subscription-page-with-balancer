@@ -1,17 +1,20 @@
 import {
     Alert,
+    ActionIcon,
     Badge,
     Button,
     Card,
     Checkbox,
     Container,
     Group,
+    Modal,
     NumberInput,
     PasswordInput,
     ScrollArea,
     Select,
     SimpleGrid,
     Stack,
+    Switch,
     Table,
     Tabs,
     Text,
@@ -19,36 +22,49 @@ import {
     Tooltip,
     Title
 } from '@mantine/core'
+import { notifications } from '@mantine/notifications'
 import {
     IconAlertTriangle,
     IconDatabase,
     IconDownload,
-    IconInfoCircle,
     IconLogout,
+    IconPlus,
     IconRefresh,
     IconSearch,
-    IconShieldLock
+    IconShieldLock,
+    IconTrash
 } from '@tabler/icons-react'
 import { FormEvent, useCallback, useEffect, useMemo, useState } from 'react'
-import { notifications } from '@mantine/notifications'
 
 import { Page } from '@shared/ui'
+import { defaultLocale, i18n } from '../../../i18n'
 
 import classes from './topor-balancer-admin.module.css'
 
 const ADMIN_TOKEN_STORAGE_KEY = 'toporBalancerAdminToken'
 const ADMIN_HEALTH_URL = '/api/topor-balancer/health'
+const ADMIN_GROUPS_URL = '/api/topor-balancer/groups'
 const ADMIN_NODES_URL = '/api/topor-balancer/nodes'
 const ADMIN_ASSIGNMENTS_URL = '/api/topor-balancer/assignments'
 const ADMIN_REQUESTS_URL = '/api/topor-balancer/requests'
 const DISCOVERY_API_URL = '/api/topor-balancer/discovery/remnawave'
 const DISCOVERY_SUBSCRIPTION_URL = '/api/topor-balancer/discovery/subscription'
 const DISCOVERY_IMPORT_URL = '/api/topor-balancer/discovery/import'
+const SUBSCRIPTION_DIAGNOSTICS_URL = '/api/topor-balancer/diagnostics/subscription'
 const RUNTIME_CONFIG_HEALTH_URL = '/api/topor-balancer/runtime-config-health'
 
 const NODE_STATUSES = ['active', 'draining', 'disabled', 'dead'] as const
+const texts = i18n[defaultLocale].toporBalancerAdmin
+const DIAGNOSTICS_USER_AGENTS = [
+    { label: 'v2rayNG', value: 'v2rayNG/1.9.0' },
+    { label: 'v2RayTun', value: 'v2RayTun/6.0' },
+    { label: 'Hiddify', value: 'Hiddify/2.0' },
+    { label: 'Happ', value: 'Happ/1.0' },
+    { label: texts.diagnostics.customUserAgent, value: 'custom' }
+] as const
 
 type ToporBalancerNodeStatus = (typeof NODE_STATUSES)[number]
+type ToporBalancerGroupStrategy = 'least_loaded'
 
 interface ToporBalancerHealth {
     assignmentCount: number
@@ -64,16 +80,28 @@ interface ToporBalancerHealth {
 
 interface RuntimeConfigHealth {
     appConfigRoute: string
-    canSerializeFallback: boolean
     fallbackConfigOk: boolean
     lastConfigSource: string | null
-    lastMissingSources: string[]
     lastRuntimeConfigError: string | null
-    ok: boolean
+}
+
+interface ToporBalancerGroup {
+    activeNodesCount: number
+    assignedUsers: number
+    enabled: boolean
+    id: string
+    locationCode?: string
+    nodesCount: number
+    planCode: string
+    publicHostCode: string
+    publicName: string
+    strategy: ToporBalancerGroupStrategy
+    updatedAt?: string
 }
 
 interface ToporBalancerNode {
     assignedUsers: number
+    groupId?: string
     id: string
     locationCode?: string
     maxUsers: number
@@ -87,7 +115,6 @@ interface ToporBalancerNode {
 }
 
 interface ToporBalancerAssignment {
-    createdAt?: string
     id: string
     nodeId: string
     planCode: string
@@ -106,13 +133,15 @@ interface ToporBalancerRequest {
     responseFormat?: string
     shortUuid: string
     status?: string
-    userAgent?: string
 }
 
 interface DiscoveredHost {
     alreadyImported: boolean
     flow?: string
     host?: string
+    matchedGroupId?: string
+    matchedGroupPlanCode?: string
+    matchedGroupPublicHostCode?: string
     matchedNodeId: string | null
     pbk?: string
     port?: number
@@ -134,39 +163,87 @@ interface DiscoveryResponse {
 }
 
 interface ImportResult {
+    conflicts: Array<{
+        existingGroupId?: string
+        existingPlanCode?: string
+        existingPublicHostCode?: string
+        existingPublicName?: string
+        reason: string
+        technicalHostName: string
+    }>
     created: ToporBalancerNode[]
+    errors?: Array<{ reason: string; technicalHostName?: string }>
     skipped: Array<{ reason: string; technicalHostName: string }>
     updated: ToporBalancerNode[]
 }
 
+type ImportMode = 'existing' | 'new'
+type DiscoveryImportStatus = 'conflict' | 'error' | 'imported' | 'skipped'
+
+interface DiscoveryImportStatusState {
+    message?: string
+    status: DiscoveryImportStatus
+}
+
+interface SubscriptionDiagnosticsResult {
+    ok: boolean
+    format: 'base64' | 'plain' | 'unknown'
+    inputLinksCount: number
+    outputLinksCount: number
+    groups: Array<{
+        publicHostCode: string
+        planCode: string
+        selectedTechnicalHostName?: string
+        status: 'fail-open' | 'no-active-node' | 'ok'
+    }>
+    vlessValidation: Array<{
+        remark?: string
+        valid: boolean
+        warnings: string[]
+        queryParamKeys: string[]
+    }>
+    warnings: string[]
+    errors: string[]
+}
+
 const statusLabels: Record<ToporBalancerNodeStatus, string> = {
-    active: 'Активна',
-    dead: 'Авария',
-    disabled: 'Отключена',
-    draining: 'Выводится'
+    active: texts.status.active,
+    dead: texts.status.dead,
+    disabled: texts.status.disabled,
+    draining: texts.status.draining
 }
 
 const statusTooltips: Record<ToporBalancerNodeStatus, string> = {
-    active: 'Нода используется для новых и текущих пользователей.',
-    dead: 'Аварийный статус. Пользователи будут переназначаться при возможности.',
-    disabled: 'Нода не используется.',
-    draining: 'Новые пользователи не назначаются, старые остаются.'
+    active: texts.tooltips.active,
+    dead: texts.tooltips.dead,
+    disabled: texts.tooltips.disabled,
+    draining: texts.tooltips.draining
 }
 
-const tooltips = {
-    maxUsers: 'Мягкий лимит назначенных пользователей для расчёта загрузки.',
-    planCode: 'Код тарифа, например standard или game.',
-    publicHostCode: 'Внутренний код группы балансировки.',
-    publicName: 'Название, которое увидит пользователь в приложении.',
-    technicalHostName: 'Должно точно совпадать с названием VLESS-ссылки после #.',
-    weight: 'Относительная доля нагрузки. Чем больше число, тем больше пользователей можно назначать на ноду.'
+const tooltips = texts.tooltips
+
+function formatText(template: string, values: Record<string, number | string>) {
+    return Object.entries(values).reduce((current, [key, value]) => current.replaceAll('{{' + key + '}}', String(value)), template)
 }
 
 function Help({ label }: { label: string }) {
     return (
         <Tooltip label={label} maw={360} multiline withArrow>
-            <IconInfoCircle size={16} />
+            <ActionIcon aria-label={label} className={classes.helpIcon} radius="xl" size="xs" tabIndex={0} variant="subtle">
+                ?
+            </ActionIcon>
         </Tooltip>
+    )
+}
+
+function FieldLabel({ help, label }: { help?: string; label: string }) {
+    return (
+        <Group gap={4} wrap="nowrap">
+            <Text component="span" fw={500} size="sm">
+                {label}
+            </Text>
+            {help && <Help label={help} />}
+        </Group>
     )
 }
 
@@ -200,25 +277,29 @@ function formatDate(value?: string) {
     return Number.isNaN(date.getTime()) ? value : date.toLocaleString('ru-RU')
 }
 
-function redactSensitiveText(value?: string) {
-    if (!value) {
-        return '-'
-    }
-
-    return value
-        .replace(/Bearer\s+[A-Za-z0-9._~+/-]+=*/gi, 'Bearer [скрыто]')
-        .replace(/(token|key|secret|password)=([^&\s]+)/gi, '$1=[скрыто]')
-        .replace(/vless:\/\/[^\s]+/gi, '[ссылка скрыта]')
-        .replace(/[a-f0-9]{8}-[a-f0-9-]{27,}/gi, '[uuid скрыт]')
-        .replace(/\b(?:\d{1,3}\.){3}\d{1,3}\b/g, '[ip скрыт]')
-}
-
 function maskShort(value: string) {
     if (value.length <= 8) {
         return `${value.slice(0, 2)}***`
     }
 
     return `${value.slice(0, 4)}...${value.slice(-4)}`
+}
+
+function redactSensitiveText(value?: string) {
+    if (!value) {
+        return '-'
+    }
+
+    return value
+        .replace(/Bearer\s+[A-Za-z0-9._~+/-]+=*/gi, `Bearer [${texts.common.hidden}]`)
+        .replace(/(token|key|secret|password)=([^&\s]+)/gi, `$1=[${texts.common.hidden}]`)
+        .replace(/vless:\/\/[^\s]+/gi, `[${texts.common.linkHidden}]`)
+        .replace(/[a-f0-9]{8}-[a-f0-9-]{27,}/gi, `[${texts.common.uuidHidden}]`)
+        .replace(/\b(?:\d{1,3}\.){3}\d{1,3}\b/g, `[${texts.common.ipHidden}]`)
+}
+
+function safeArray<T>(value: unknown): T[] {
+    return Array.isArray(value) ? (value as T[]) : []
 }
 
 function statusOptions() {
@@ -228,8 +309,28 @@ function statusOptions() {
     }))
 }
 
-function safeArray<T>(value: unknown): T[] {
-    return Array.isArray(value) ? (value as T[]) : []
+function normalizeTechnicalHostName(value: string) {
+    return value.trim()
+}
+
+function getDiagnosticsStatusColor(status: SubscriptionDiagnosticsResult['groups'][number]['status']) {
+    const colors: Record<SubscriptionDiagnosticsResult['groups'][number]['status'], string> = {
+        'fail-open': 'yellow',
+        'no-active-node': 'red',
+        ok: 'green'
+    }
+
+    return colors[status]
+}
+
+function getDiagnosticsStatusLabel(status: SubscriptionDiagnosticsResult['groups'][number]['status']) {
+    const labels: Record<SubscriptionDiagnosticsResult['groups'][number]['status'], string> = {
+        'fail-open': texts.diagnostics.statusFailOpen,
+        'no-active-node': texts.diagnostics.statusNoActiveNode,
+        ok: texts.diagnostics.statusOk
+    }
+
+    return labels[status]
 }
 
 export function ToporBalancerAdminPage() {
@@ -237,29 +338,71 @@ export function ToporBalancerAdminPage() {
     const [adminToken, setAdminToken] = useState(() => localStorage.getItem(ADMIN_TOKEN_STORAGE_KEY))
     const [health, setHealth] = useState<null | ToporBalancerHealth>(null)
     const [runtimeHealth, setRuntimeHealth] = useState<null | RuntimeConfigHealth>(null)
+    const [groups, setGroups] = useState<ToporBalancerGroup[]>([])
     const [nodes, setNodes] = useState<ToporBalancerNode[]>([])
     const [assignments, setAssignments] = useState<ToporBalancerAssignment[]>([])
     const [requests, setRequests] = useState<ToporBalancerRequest[]>([])
     const [discoveredHosts, setDiscoveredHosts] = useState<DiscoveredHost[]>([])
     const [selectedHosts, setSelectedHosts] = useState<string[]>([])
+    const [selectedGroupId, setSelectedGroupId] = useState<string | null>(null)
+    const [discoveryImportStatuses, setDiscoveryImportStatuses] = useState<Record<string, DiscoveryImportStatusState>>({})
     const [errorMessage, setErrorMessage] = useState('')
     const [isLoading, setIsLoading] = useState(false)
     const [isDiscoveryLoading, setIsDiscoveryLoading] = useState(false)
+    const [isDiagnosticsLoading, setIsDiagnosticsLoading] = useState(false)
+    const [isImportModalOpen, setIsImportModalOpen] = useState(false)
+    const [importMode, setImportMode] = useState<ImportMode>('existing')
+    const [importTargetGroupId, setImportTargetGroupId] = useState<string | null>(null)
+    const [lastImportResult, setLastImportResult] = useState<ImportResult | null>(null)
     const [shortUuid, setShortUuid] = useState('')
-    const [wizardStep, setWizardStep] = useState(1)
+    const [diagnosticsShortUuid, setDiagnosticsShortUuid] = useState('')
+    const [diagnosticsUserAgentPreset, setDiagnosticsUserAgentPreset] = useState('v2RayTun/6.0')
+    const [diagnosticsCustomUserAgent, setDiagnosticsCustomUserAgent] = useState('v2RayTun/6.0')
+    const [subscriptionDiagnostics, setSubscriptionDiagnostics] = useState<SubscriptionDiagnosticsResult | null>(null)
     const [groupForm, setGroupForm] = useState({
+        enabled: true,
         locationCode: 'FI',
-        maxUsers: 300,
         planCode: 'standard',
         publicHostCode: 'fi_standard',
         publicName: '🇫🇮 Finland',
+        strategy: 'least_loaded' as ToporBalancerGroupStrategy
+    })
+    const [nodeForm, setNodeForm] = useState({
+        maxUsers: 300,
+        status: 'active' as ToporBalancerNodeStatus,
+        technicalHostName: '',
+        weight: 1
+    })
+    const [importDefaults, setImportDefaults] = useState({
+        maxUsers: 300,
         status: 'active' as ToporBalancerNodeStatus,
         weight: 1
     })
+    const [importGroupForm, setImportGroupForm] = useState({
+        locationCode: 'FI',
+        planCode: 'standard',
+        publicHostCode: 'fi_standard',
+        publicName: '🇫🇮 Finland'
+    })
 
     const isLoggedIn = Boolean(adminToken)
+    const selectedGroup = groups.find((group) => group.id === selectedGroupId) ?? groups[0] ?? null
+    const selectedGroupNodes = useMemo(
+        () => nodes.filter((node) => selectedGroup && node.groupId === selectedGroup.id),
+        [nodes, selectedGroup]
+    )
+    const discoveredByTechnicalHostName = useMemo(
+        () =>
+            new Map(
+                discoveredHosts.map((host) => [
+                    normalizeTechnicalHostName(host.technicalHostName),
+                    host
+                ])
+            ),
+        [discoveredHosts]
+    )
     const importedByTechnicalHostName = useMemo(
-        () => new Map(nodes.map((node) => [node.technicalHostName, node])),
+        () => new Map(nodes.map((node) => [normalizeTechnicalHostName(node.technicalHostName), node])),
         [nodes]
     )
 
@@ -281,12 +424,13 @@ export function ToporBalancerAdminPage() {
             if (response.status === 401 || response.status === 403) {
                 localStorage.removeItem(ADMIN_TOKEN_STORAGE_KEY)
                 setAdminToken(null)
-                setErrorMessage('Неверный токен администратора')
+                setErrorMessage(texts.messages.invalidAdminToken)
                 return null
             }
 
             if (!response.ok) {
-                throw new Error(`Admin API вернул статус ${response.status}`)
+                const body = await response.text()
+                throw new Error(body || formatText(texts.messages.adminApiStatus, { status: response.status }))
             }
 
             return (await response.json()) as ResponseBody
@@ -303,10 +447,11 @@ export function ToporBalancerAdminPage() {
         setErrorMessage('')
 
         try {
-            const [healthResponse, runtimeResponse, nodesResponse, assignmentsResponse, requestsResponse] =
+            const [healthResponse, runtimeResponse, groupsResponse, nodesResponse, assignmentsResponse, requestsResponse] =
                 await Promise.all([
                     fetchAdminJson<ToporBalancerHealth>(ADMIN_HEALTH_URL),
                     fetchAdminJson<RuntimeConfigHealth>(RUNTIME_CONFIG_HEALTH_URL),
+                    fetchAdminJson<ToporBalancerGroup[]>(ADMIN_GROUPS_URL),
                     fetchAdminJson<ToporBalancerNode[]>(ADMIN_NODES_URL),
                     fetchAdminJson<ToporBalancerAssignment[]>(ADMIN_ASSIGNMENTS_URL),
                     fetchAdminJson<ToporBalancerRequest[]>(ADMIN_REQUESTS_URL)
@@ -320,19 +465,15 @@ export function ToporBalancerAdminPage() {
                 setRuntimeHealth(runtimeResponse)
             }
 
-            if (nodesResponse) {
-                setNodes(safeArray<ToporBalancerNode>(nodesResponse))
-            }
+            const nextGroups = safeArray<ToporBalancerGroup>(groupsResponse)
 
-            if (assignmentsResponse) {
-                setAssignments(safeArray<ToporBalancerAssignment>(assignmentsResponse).slice(0, 500))
-            }
-
-            if (requestsResponse) {
-                setRequests(safeArray<ToporBalancerRequest>(requestsResponse).slice(0, 500))
-            }
+            setGroups(nextGroups)
+            setNodes(safeArray<ToporBalancerNode>(nodesResponse))
+            setAssignments(safeArray<ToporBalancerAssignment>(assignmentsResponse).slice(0, 500))
+            setRequests(safeArray<ToporBalancerRequest>(requestsResponse).slice(0, 500))
+            setSelectedGroupId((current) => current ?? nextGroups[0]?.id ?? null)
         } catch (error) {
-            setErrorMessage(error instanceof Error ? error.message : 'Не удалось загрузить Admin API')
+            setErrorMessage(error instanceof Error ? error.message : texts.messages.adminApiLoadFailed)
         } finally {
             setIsLoading(false)
         }
@@ -363,11 +504,165 @@ export function ToporBalancerAdminPage() {
         setAdminToken(null)
         setHealth(null)
         setRuntimeHealth(null)
+        setGroups([])
         setNodes([])
         setAssignments([])
         setRequests([])
         setDiscoveredHosts([])
         setSelectedHosts([])
+        setSelectedGroupId(null)
+        setDiscoveryImportStatuses({})
+        setLastImportResult(null)
+        setSubscriptionDiagnostics(null)
+    }
+
+    const createGroup = async () => {
+        if (!groupForm.publicHostCode.trim() || !groupForm.publicName.trim() || !groupForm.planCode.trim()) {
+            notifications.show({
+                color: 'red',
+                message: texts.messages.requiredGroupFields,
+                title: texts.messages.missingData
+            })
+            return
+        }
+
+        setIsLoading(true)
+
+        try {
+            const group = await fetchAdminJson<ToporBalancerGroup>(ADMIN_GROUPS_URL, {
+                body: JSON.stringify({
+                    enabled: groupForm.enabled,
+                    locationCode: groupForm.locationCode.trim() || undefined,
+                    planCode: groupForm.planCode.trim(),
+                    publicHostCode: groupForm.publicHostCode.trim(),
+                    publicName: groupForm.publicName.trim(),
+                    strategy: groupForm.strategy
+                }),
+                method: 'POST'
+            })
+
+            await refreshAdminData()
+            setSelectedGroupId(group?.id ?? null)
+            notifications.show({ color: 'green', message: texts.messages.groupCreated, title: texts.common.ready })
+        } catch (error) {
+            setErrorMessage(error instanceof Error ? error.message : texts.messages.groupCreateFailed)
+        } finally {
+            setIsLoading(false)
+        }
+    }
+
+    const patchGroup = async (group: ToporBalancerGroup, patch: Partial<ToporBalancerGroup>) => {
+        setIsLoading(true)
+
+        try {
+            await fetchAdminJson<ToporBalancerGroup>(`${ADMIN_GROUPS_URL}/${group.id}`, {
+                body: JSON.stringify(patch),
+                method: 'PATCH'
+            })
+            await refreshAdminData()
+        } catch (error) {
+            setErrorMessage(error instanceof Error ? error.message : texts.messages.groupUpdateFailed)
+        } finally {
+            setIsLoading(false)
+        }
+    }
+
+    const deleteGroup = async (group: ToporBalancerGroup) => {
+        setIsLoading(true)
+
+        try {
+            await fetchAdminJson<{ deleted: true }>(`${ADMIN_GROUPS_URL}/${group.id}`, {
+                method: 'DELETE'
+            })
+            await refreshAdminData()
+            setSelectedGroupId(null)
+            notifications.show({ color: 'green', message: texts.messages.groupDeleted, title: texts.common.ready })
+        } catch (error) {
+            setErrorMessage(
+                error instanceof Error
+                    ? error.message
+                    : texts.messages.groupDeleteFailed
+            )
+        } finally {
+            setIsLoading(false)
+        }
+    }
+
+    const createNode = async () => {
+        if (!selectedGroup) {
+            notifications.show({ color: 'red', message: texts.messages.selectGroupFirst, title: texts.common.noGroup })
+            return
+        }
+
+        if (!nodeForm.technicalHostName.trim()) {
+            notifications.show({ color: 'red', message: texts.messages.technicalHostRequired, title: texts.messages.missingData })
+            return
+        }
+
+        setIsLoading(true)
+
+        try {
+            await fetchAdminJson<ToporBalancerNode>(`${ADMIN_GROUPS_URL}/${selectedGroup.id}/nodes`, {
+                body: JSON.stringify({
+                    maxUsers: nodeForm.maxUsers,
+                    status: nodeForm.status,
+                    technicalHostName: nodeForm.technicalHostName.trim(),
+                    weight: nodeForm.weight
+                }),
+                method: 'POST'
+            })
+            setNodeForm((current) => ({ ...current, technicalHostName: '' }))
+            await refreshAdminData()
+            notifications.show({ color: 'green', message: texts.messages.nodeAdded, title: texts.common.ready })
+        } catch (error) {
+            setErrorMessage(error instanceof Error ? error.message : texts.messages.nodeAddFailed)
+        } finally {
+            setIsLoading(false)
+        }
+    }
+
+    const patchNode = async (node: ToporBalancerNode, patch: Partial<ToporBalancerNode>) => {
+        if (!node.groupId) {
+            return
+        }
+
+        setIsLoading(true)
+
+        try {
+            await fetchAdminJson<ToporBalancerNode>(`${ADMIN_GROUPS_URL}/${node.groupId}/nodes/${node.id}`, {
+                body: JSON.stringify(patch),
+                method: 'PATCH'
+            })
+            await refreshAdminData()
+        } catch (error) {
+            setErrorMessage(error instanceof Error ? error.message : texts.messages.nodeUpdateFailed)
+        } finally {
+            setIsLoading(false)
+        }
+    }
+
+    const deleteNode = async (node: ToporBalancerNode) => {
+        if (!node.groupId) {
+            return
+        }
+
+        setIsLoading(true)
+
+        try {
+            await fetchAdminJson<{ deleted: true }>(`${ADMIN_GROUPS_URL}/${node.groupId}/nodes/${node.id}`, {
+                method: 'DELETE'
+            })
+            await refreshAdminData()
+            notifications.show({ color: 'green', message: texts.messages.nodeDeleted, title: texts.common.ready })
+        } catch (error) {
+            setErrorMessage(
+                error instanceof Error
+                    ? error.message
+                    : texts.messages.nodeDeleteFailed
+            )
+        } finally {
+            setIsLoading(false)
+        }
     }
 
     const runApiDiscovery = async () => {
@@ -378,10 +673,15 @@ export function ToporBalancerAdminPage() {
             const response = await fetchAdminJson<DiscoveryResponse>(DISCOVERY_API_URL)
             const items = response?.items ?? []
             setDiscoveredHosts(items)
-            setSelectedHosts(items.filter((item) => !item.alreadyImported).map((item) => item.technicalHostName))
-            setWizardStep(3)
+            setDiscoveryImportStatuses({})
+            setLastImportResult(null)
+            setSelectedHosts(
+                items
+                    .filter((item) => !item.alreadyImported)
+                    .map((item) => normalizeTechnicalHostName(item.technicalHostName))
+            )
         } catch (error) {
-            setErrorMessage(error instanceof Error ? error.message : 'Не удалось получить ноды из Remnawave API')
+            setErrorMessage(error instanceof Error ? error.message : texts.messages.searchFailed)
         } finally {
             setIsDiscoveryLoading(false)
         }
@@ -393,8 +693,8 @@ export function ToporBalancerAdminPage() {
         if (!normalizedShortUuid) {
             notifications.show({
                 color: 'red',
-                message: 'Введите shortUuid тестовой подписки',
-                title: 'Не хватает данных'
+                message: texts.messages.tokenRequired,
+                title: texts.messages.missingData
             })
             return
         }
@@ -409,40 +709,72 @@ export function ToporBalancerAdminPage() {
             })
             const items = response?.items ?? []
             setDiscoveredHosts(items)
-            setSelectedHosts(items.filter((item) => !item.alreadyImported).map((item) => item.technicalHostName))
-            setWizardStep(3)
+            setDiscoveryImportStatuses({})
+            setLastImportResult(null)
+            setSelectedHosts(
+                items
+                    .filter((item) => !item.alreadyImported)
+                    .map((item) => normalizeTechnicalHostName(item.technicalHostName))
+            )
         } catch (error) {
-            setErrorMessage(error instanceof Error ? error.message : 'Не удалось просканировать подписку')
+            setErrorMessage(error instanceof Error ? error.message : texts.messages.scanFailed)
         } finally {
             setIsDiscoveryLoading(false)
         }
     }
 
     const toggleSelectedHost = (technicalHostName: string) => {
+        const normalizedTechnicalHostName = normalizeTechnicalHostName(technicalHostName)
+
         setSelectedHosts((current) =>
-            current.includes(technicalHostName)
-                ? current.filter((item) => item !== technicalHostName)
-                : [...current, technicalHostName]
+            current.includes(normalizedTechnicalHostName)
+                ? current.filter((item) => item !== normalizedTechnicalHostName)
+                : [...current, normalizedTechnicalHostName]
         )
     }
 
     const importSelectedHosts = async () => {
-        const selected = discoveredHosts.filter((host) => selectedHosts.includes(host.technicalHostName))
-
-        if (selected.length === 0) {
+        if (selectedHosts.length === 0) {
             notifications.show({
                 color: 'red',
-                message: 'Выберите хотя бы одну техническую ноду',
-                title: 'Импорт не запущен'
+                message: texts.discovery.selectAtLeastOne,
+                title: texts.messages.missingData
             })
             return
         }
 
-        if (!groupForm.publicHostCode.trim() || !groupForm.publicName.trim() || !groupForm.planCode.trim()) {
+        setImportMode(groups.length > 0 ? 'existing' : 'new')
+        setImportTargetGroupId(selectedGroup?.id ?? groups[0]?.id ?? null)
+        setLastImportResult(null)
+        setIsImportModalOpen(true)
+    }
+
+    const performDiscoveryImport = async () => {
+        const selected = discoveredHosts.filter((host) =>
+            selectedHosts.includes(normalizeTechnicalHostName(host.technicalHostName))
+        )
+
+        if (selected.length === 0) {
+            return
+        }
+
+        const targetGroup = groups.find((group) => group.id === importTargetGroupId) ?? null
+
+        if (importMode === 'existing' && !targetGroup) {
+            notifications.show({ color: 'red', message: texts.discovery.targetGroupMissing, title: texts.common.noGroup })
+            return
+        }
+
+        if (
+            importMode === 'new' &&
+            (!importGroupForm.publicHostCode.trim() ||
+                !importGroupForm.publicName.trim() ||
+                !importGroupForm.planCode.trim())
+        ) {
             notifications.show({
                 color: 'red',
-                message: 'Заполните publicName, publicHostCode и planCode',
-                title: 'Не хватает данных'
+                message: texts.messages.requiredGroupFields,
+                title: texts.messages.missingData
             })
             return
         }
@@ -452,84 +784,296 @@ export function ToporBalancerAdminPage() {
         try {
             const result = await fetchAdminJson<ImportResult>(DISCOVERY_IMPORT_URL, {
                 body: JSON.stringify({
-                    locationCode: groupForm.locationCode.trim() || undefined,
+                    ...(importMode === 'existing'
+                        ? {
+                              groupId: targetGroup?.id
+                          }
+                        : {
+                              group: {
+                                  locationCode: importGroupForm.locationCode.trim() || undefined,
+                                  planCode: importGroupForm.planCode.trim(),
+                                  publicHostCode: importGroupForm.publicHostCode.trim(),
+                                  publicName: importGroupForm.publicName.trim()
+                              }
+                          }),
                     nodes: selected.map((host) => ({
-                        maxUsers: groupForm.maxUsers,
-                        status: groupForm.status,
-                        technicalHostName: host.technicalHostName,
-                        weight: groupForm.weight
-                    })),
-                    planCode: groupForm.planCode.trim(),
-                    publicHostCode: groupForm.publicHostCode.trim(),
-                    publicName: groupForm.publicName.trim()
+                        maxUsers: importDefaults.maxUsers,
+                        status: importDefaults.status,
+                        technicalHostName: normalizeTechnicalHostName(host.technicalHostName),
+                        weight: importDefaults.weight
+                    }))
                 }),
                 method: 'POST'
             })
 
+            const importedNodes = [
+                ...safeArray<ToporBalancerNode>(result?.created),
+                ...safeArray<ToporBalancerNode>(result?.updated)
+            ]
+            const importedByName = new Map(
+                importedNodes.map((node) => [normalizeTechnicalHostName(node.technicalHostName), node])
+            )
+            const skippedNames = new Set(
+                safeArray<{ technicalHostName: string }>(result?.skipped).map((item) =>
+                    normalizeTechnicalHostName(item.technicalHostName)
+                )
+            )
+            const conflictNames = new Set(
+                safeArray<{ technicalHostName: string }>(result?.conflicts).map((item) =>
+                    normalizeTechnicalHostName(item.technicalHostName)
+                )
+            )
+            const errorNames = new Set(
+                safeArray<{ technicalHostName?: string }>(result?.errors)
+                    .map((item) => normalizeTechnicalHostName(item.technicalHostName ?? ''))
+                    .filter(Boolean)
+            )
+
+            setDiscoveredHosts((current) =>
+                current.map((host) => {
+                    const importedNode = importedByName.get(normalizeTechnicalHostName(host.technicalHostName))
+
+                    return importedNode
+                        ? {
+                              ...host,
+                              alreadyImported: true,
+                              matchedNodeId: importedNode.id,
+                              technicalHostName: normalizeTechnicalHostName(host.technicalHostName)
+                          }
+                        : host
+                })
+            )
+            setDiscoveryImportStatuses((current) => {
+                const next = { ...current }
+
+                importedNodes.forEach((node) => {
+                    next[normalizeTechnicalHostName(node.technicalHostName)] = {
+                        status: 'imported'
+                    }
+                })
+                skippedNames.forEach((technicalHostName) => {
+                    next[technicalHostName] = {
+                        status: 'skipped',
+                        message: texts.discovery.alreadyInGroup
+                    }
+                })
+                safeArray<ImportResult['conflicts'][number]>(result?.conflicts).forEach((conflict) => {
+                    next[normalizeTechnicalHostName(conflict.technicalHostName)] = {
+                        status: 'conflict',
+                        message: `${conflict.existingPublicHostCode ?? '-'}:${conflict.existingPlanCode ?? '-'}`
+                    }
+                })
+                safeArray<{ reason: string; technicalHostName?: string }>(result?.errors).forEach((error) => {
+                    if (error.technicalHostName) {
+                        next[normalizeTechnicalHostName(error.technicalHostName)] = {
+                            status: 'error',
+                            message: error.reason
+                        }
+                    }
+                })
+
+                return next
+            })
+            setSelectedHosts((current) =>
+                current.filter((technicalHostName) => {
+                    const normalizedTechnicalHostName = normalizeTechnicalHostName(technicalHostName)
+
+                    return (
+                        !importedByName.has(normalizedTechnicalHostName) &&
+                        !skippedNames.has(normalizedTechnicalHostName)
+                    )
+                })
+            )
+
             await refreshAdminData()
-            setWizardStep(5)
+            setLastImportResult(result)
             notifications.show({
-                color: 'green',
-                message: `Создано: ${result?.created.length ?? 0}, обновлено: ${result?.updated.length ?? 0}`,
-                title: 'Импорт завершён'
+                color: conflictNames.size > 0 || errorNames.size > 0 ? 'yellow' : 'green',
+                message: formatText(texts.discovery.importSummaryToast, { created: result?.created.length ?? 0, skipped: result?.skipped.length ?? 0, conflicts: result?.conflicts.length ?? 0 }),
+                title: texts.discovery.importFinished
             })
         } catch (error) {
-            setErrorMessage(error instanceof Error ? error.message : 'Не удалось импортировать ноды')
+            setErrorMessage(error instanceof Error ? error.message : texts.messages.importFailed)
         } finally {
             setIsDiscoveryLoading(false)
         }
     }
 
-    const setNodeStatus = async (node: ToporBalancerNode, action: 'disable' | 'drain' | 'enable') => {
-        setIsLoading(true)
+    const runSubscriptionDiagnostics = async () => {
+        const normalizedShortUuid = diagnosticsShortUuid.trim()
+
+        if (!normalizedShortUuid) {
+            notifications.show({
+                color: 'red',
+                message: texts.messages.tokenRequired,
+                title: texts.messages.missingData
+            })
+            return
+        }
+
+        const userAgent =
+            diagnosticsUserAgentPreset === 'custom'
+                ? diagnosticsCustomUserAgent.trim()
+                : diagnosticsUserAgentPreset
+
+        setIsDiagnosticsLoading(true)
+        setErrorMessage('')
 
         try {
-            await fetchAdminJson<ToporBalancerNode>(`${ADMIN_NODES_URL}/${node.id}/${action}`, {
+            const result = await fetchAdminJson<SubscriptionDiagnosticsResult>(SUBSCRIPTION_DIAGNOSTICS_URL, {
+                body: JSON.stringify({
+                    shortUuid: normalizedShortUuid,
+                    userAgent
+                }),
                 method: 'POST'
             })
-            await refreshAdminData()
-            notifications.show({
-                color: 'green',
-                message: `${node.technicalHostName}: статус обновлён`,
-                title: 'Готово'
-            })
+
+            setSubscriptionDiagnostics(result)
         } catch (error) {
-            setErrorMessage(error instanceof Error ? error.message : 'Не удалось обновить статус ноды')
+            setErrorMessage(error instanceof Error ? error.message : texts.messages.subscriptionDiagnosticsFailed)
         } finally {
-            setIsLoading(false)
+            setIsDiagnosticsLoading(false)
         }
     }
 
-    const createManualNode = async () => {
-        if (!groupForm.publicHostCode.trim() || !groupForm.publicName.trim() || !groupForm.planCode.trim()) {
-            notifications.show({
-                color: 'red',
-                message: 'Для ручного добавления используйте discovery/import или заполните группу через wizard',
-                title: 'Не хватает данных'
-            })
+    const downloadSubscriptionDiagnostics = () => {
+        if (!subscriptionDiagnostics) {
+            return
         }
+
+        const blob = new Blob([JSON.stringify(subscriptionDiagnostics, null, 2)], {
+            type: 'application/json'
+        })
+        const url = URL.createObjectURL(blob)
+        const link = document.createElement('a')
+
+        link.href = url
+        link.download = `topor-subscription-diagnostics-${Date.now()}.json`
+        link.click()
+        URL.revokeObjectURL(url)
     }
 
     const statusCards = [
-        { color: health?.enabled ? 'green' : 'gray', label: 'Balancer', value: health?.enabled ? 'Включён' : 'Отключён' },
-        { color: health?.databaseConnected ? 'green' : 'red', label: 'База данных', value: health?.databaseConnected ? 'Подключена' : 'Нет связи' },
-        { color: 'cyan', label: 'Режим', value: health?.assignmentMode ?? '-' },
-        { color: 'blue', label: 'Нод в Balancer', value: String(nodes.length) },
-        { color: runtimeHealth?.fallbackConfigOk ? 'green' : 'red', label: 'Runtime config', value: runtimeHealth?.fallbackConfigOk ? 'OK' : 'Проблема' },
-        { color: 'violet', label: 'Запросов', value: String(health?.requestCount ?? requests.length) }
+        { color: health?.enabled ? 'green' : 'gray', label: 'Balancer', value: health?.enabled ? texts.common.enabled : texts.common.disabled },
+        { color: health?.databaseConnected ? 'green' : 'red', label: texts.common.database, value: health?.databaseConnected ? texts.common.connected : texts.common.disconnected },
+        { color: 'cyan', label: texts.common.mode, value: health?.assignmentMode ?? '-' },
+        { color: 'blue', label: texts.groups.title, value: String(groups.length) },
+        { color: 'violet', label: texts.nodes.title, value: String(nodes.length) },
+        { color: runtimeHealth?.fallbackConfigOk ? 'green' : 'red', label: texts.common.runtimeConfig, value: runtimeHealth?.fallbackConfigOk ? texts.common.ok : texts.common.problem }
     ]
 
     return (
         <Page>
-            <Container maw={1400} px={{ base: 'md', sm: 'lg', md: 'xl' }} py="xl">
+            <Modal
+                opened={isImportModalOpen}
+                onClose={() => setIsImportModalOpen(false)}
+                size="lg"
+                title={texts.discovery.addModalTitle}
+            >
+                <Stack gap="md">
+                    <Text c="dimmed" size="sm">
+                        {formatText(texts.discovery.nodesSelected, { count: selectedHosts.length })}
+                    </Text>
+                    <Tabs onChange={(value) => setImportMode((value as ImportMode | null) ?? 'existing')} value={importMode}>
+                        <Tabs.List>
+                            <Tabs.Tab disabled={groups.length === 0} value="existing">
+                                {texts.discovery.importTargetExisting}
+                            </Tabs.Tab>
+                            <Tabs.Tab value="new">{texts.discovery.importTargetNew}</Tabs.Tab>
+                        </Tabs.List>
+
+                        <Tabs.Panel pt="md" value="existing">
+                            <Stack gap="md">
+                                <Select
+                                    data={groups.map((group) => ({
+                                        label: `${group.publicName} · ${group.publicHostCode}:${group.planCode}`,
+                                        value: group.id
+                                    }))}
+                                    label={texts.fields.group}
+                                    onChange={setImportTargetGroupId}
+                                    placeholder={texts.discovery.selectGroup}
+                                    value={importTargetGroupId}
+                                />
+                            </Stack>
+                        </Tabs.Panel>
+
+                        <Tabs.Panel pt="md" value="new">
+                            <Stack gap="md">
+                                <Group grow>
+                                    <TextInput
+                                        label={<FieldLabel help={tooltips.publicName} label={texts.fields.publicName} />}
+                                        onChange={(event) => setImportGroupForm((current) => ({ ...current, publicName: event.currentTarget.value }))}
+                                        value={importGroupForm.publicName}
+                                    />
+                                    <TextInput
+                                        label={<FieldLabel help={tooltips.publicHostCode} label={texts.fields.publicHostCode} />}
+                                        onChange={(event) => setImportGroupForm((current) => ({ ...current, publicHostCode: event.currentTarget.value }))}
+                                        value={importGroupForm.publicHostCode}
+                                    />
+                                </Group>
+                                <Group grow>
+                                    <TextInput
+                                        label={<FieldLabel help={tooltips.locationCode} label={texts.fields.locationCode} />}
+                                        onChange={(event) => setImportGroupForm((current) => ({ ...current, locationCode: event.currentTarget.value }))}
+                                        value={importGroupForm.locationCode}
+                                    />
+                                    <TextInput
+                                        label={<FieldLabel help={tooltips.planCode} label={texts.fields.planCode} />}
+                                        onChange={(event) => setImportGroupForm((current) => ({ ...current, planCode: event.currentTarget.value }))}
+                                        value={importGroupForm.planCode}
+                                    />
+                                </Group>
+                            </Stack>
+                        </Tabs.Panel>
+                    </Tabs>
+
+                    <Group grow>
+                        <NumberInput
+                            label={<FieldLabel help={tooltips.weight} label={texts.fields.weight} />}
+                            min={0.0001}
+                            onChange={(value) => setImportDefaults((current) => ({ ...current, weight: Number(value) || 1 }))}
+                            value={importDefaults.weight}
+                        />
+                        <NumberInput
+                            label={<FieldLabel help={tooltips.maxUsers} label={texts.fields.maxUsers} />}
+                            min={1}
+                            onChange={(value) => setImportDefaults((current) => ({ ...current, maxUsers: Number(value) || 300 }))}
+                            value={importDefaults.maxUsers}
+                        />
+                        <Select
+                            data={statusOptions()}
+                            label={<FieldLabel help={tooltips.status} label={texts.fields.status} />}
+                            onChange={(value) =>
+                                setImportDefaults((current) => ({
+                                    ...current,
+                                    status: (value as ToporBalancerNodeStatus | null) ?? 'active'
+                                }))
+                            }
+                            value={importDefaults.status}
+                        />
+                    </Group>
+
+                    {lastImportResult && <ImportResultSummary result={lastImportResult} />}
+
+                    <Group justify="flex-end">
+                        <Button onClick={() => setIsImportModalOpen(false)} variant="subtle">
+                            {texts.actions.close}
+                        </Button>
+                        <Button leftSection={<IconDownload size={16} />} loading={isDiscoveryLoading} onClick={performDiscoveryImport}>
+                            {texts.actions.import}
+                        </Button>
+                    </Group>
+                </Stack>
+            </Modal>
+            <Container maw={1440} px={{ base: 'md', sm: 'lg', md: 'xl' }} py="xl">
                 <Stack gap="lg">
                     <Group justify="space-between">
                         <Group gap="sm">
                             <IconDatabase className={classes.titleIcon} size={28} />
                             <div>
-                                <Title order={2}>Remnawave Balancer by TopoR</Title>
+                                <Title order={2}>{texts.title}</Title>
                                 <Text c="dimmed" size="sm">
-                                    Панель настройки и диагностики балансировщика
+                                    {texts.subtitle}
                                 </Text>
                             </div>
                         </Group>
@@ -537,10 +1081,10 @@ export function ToporBalancerAdminPage() {
                         {isLoggedIn && (
                             <Group gap="sm">
                                 <Button leftSection={<IconRefresh size={16} />} loading={isLoading} onClick={refreshAdminData} variant="light">
-                                    Обновить
+                                    {texts.actions.refresh}
                                 </Button>
                                 <Button color="red" leftSection={<IconLogout size={16} />} onClick={logout} variant="subtle">
-                                    Выйти
+                                    {texts.actions.logout}
                                 </Button>
                             </Group>
                         )}
@@ -558,17 +1102,17 @@ export function ToporBalancerAdminPage() {
                                 <Stack gap="md">
                                     <Group gap="sm">
                                         <IconShieldLock size={22} />
-                                        <Title order={4}>Токен администратора</Title>
+                                        <Title order={4}>{texts.forms.tokenTitle}</Title>
                                     </Group>
                                     <PasswordInput
                                         autoComplete="current-password"
-                                        label="Токен"
+                                        label={i18n[defaultLocale].admin.tokenLabel}
                                         onChange={(event) => setTokenInput(event.currentTarget.value)}
-                                        placeholder="Вставьте TOPOR_BALANCER_ADMIN_TOKEN"
+                                        placeholder={texts.forms.tokenPlaceholder}
                                         value={tokenInput}
                                     />
                                     <Button loading={isLoading} type="submit">
-                                        Войти
+                                        {i18n[defaultLocale].admin.signIn}
                                     </Button>
                                 </Stack>
                             </form>
@@ -592,259 +1136,231 @@ export function ToporBalancerAdminPage() {
                                 ))}
                             </SimpleGrid>
 
-                            {nodes.length === 0 && (
-                                <Card className={classes.tableCard} p="lg" radius="md">
+                            <Tabs defaultValue="groups">
+                                <Tabs.List>
+                                    <Tabs.Tab value="groups">{texts.tabs.groups}</Tabs.Tab>
+                                    <Tabs.Tab value="discovery">{texts.tabs.discovery}</Tabs.Tab>
+                                    <Tabs.Tab value="diagnostics">{texts.tabs.diagnostics}</Tabs.Tab>
+                                </Tabs.List>
+
+                                <Tabs.Panel pt="md" value="groups">
                                     <Stack gap="md">
-                                        <Group justify="space-between">
-                                            <div>
-                                                <Title order={3}>Первичная настройка</Title>
-                                                <Text c="dimmed" size="sm">
-                                                    Найдите технические ноды Remnawave и импортируйте их в Balancer.
-                                                </Text>
-                                            </div>
-                                            <Badge color="yellow" variant="light">
-                                                Шаг {wizardStep} из 5
-                                            </Badge>
+                                        <Group align="flex-start" grow>
+                                            <Card className={classes.tableCard} p="lg" radius="md">
+                                                <Stack gap="md">
+                                                    <Group gap="xs">
+                                                        <Title order={3}>{texts.forms.groupCreateTitle}</Title>
+                                                        <Help label={tooltips.group} />
+                                                    </Group>
+                                                    <Group grow>
+                                                        <TextInput
+                                                            label={<FieldLabel help={tooltips.publicName} label={texts.fields.publicName} />}
+                                                            onChange={(event) => setGroupForm((current) => ({ ...current, publicName: event.currentTarget.value }))}
+                                                            value={groupForm.publicName}
+                                                        />
+                                                        <TextInput
+                                                            label={<FieldLabel help={tooltips.publicHostCode} label={texts.fields.publicHostCode} />}
+                                                            onChange={(event) => setGroupForm((current) => ({ ...current, publicHostCode: event.currentTarget.value }))}
+                                                            value={groupForm.publicHostCode}
+                                                        />
+                                                    </Group>
+                                                    <Group grow>
+                                                        <TextInput
+                                                            label={<FieldLabel help={tooltips.locationCode} label={texts.fields.locationCode} />}
+                                                            onChange={(event) => setGroupForm((current) => ({ ...current, locationCode: event.currentTarget.value }))}
+                                                            value={groupForm.locationCode}
+                                                        />
+                                                        <TextInput
+                                                            label={<FieldLabel help={tooltips.planCode} label={texts.fields.planCode} />}
+                                                            onChange={(event) => setGroupForm((current) => ({ ...current, planCode: event.currentTarget.value }))}
+                                                            value={groupForm.planCode}
+                                                        />
+                                                        <Switch
+                                                            checked={groupForm.enabled}
+                                                            label={texts.common.enabled}
+                                                            onChange={(event) => setGroupForm((current) => ({ ...current, enabled: event.currentTarget.checked }))}
+                                                        />
+                                                    </Group>
+                                                    <Button leftSection={<IconPlus size={16} />} loading={isLoading} onClick={createGroup}>
+                                                        {texts.forms.groupCreateTitle}
+                                                    </Button>
+                                                </Stack>
+                                            </Card>
+
+                                            <Card className={classes.tableCard} p="lg" radius="md">
+                                                <Stack gap="md">
+                                                    <Title order={3}>{texts.forms.nodeCreateTitle}</Title>
+                                                    <Text c="dimmed" size="sm">
+                                                        {texts.forms.nodeCreateTarget} {selectedGroup?.publicName ?? '-'}
+                                                    </Text>
+                                                    <TextInput
+                                                        label={<FieldLabel help={tooltips.technicalHostName} label={texts.fields.technicalHostName} />}
+                                                        onChange={(event) => setNodeForm((current) => ({ ...current, technicalHostName: event.currentTarget.value }))}
+                                                        placeholder="FI-STD-01"
+                                                        value={nodeForm.technicalHostName}
+                                                    />
+                                                    <Group grow>
+                                                        <NumberInput
+                                                            label={<FieldLabel help={tooltips.weight} label={texts.fields.weight} />}
+                                                            min={0.0001}
+                                                            onChange={(value) => setNodeForm((current) => ({ ...current, weight: Number(value) || 1 }))}
+                                                            value={nodeForm.weight}
+                                                        />
+                                                        <NumberInput
+                                                            label={<FieldLabel help={tooltips.maxUsers} label={texts.fields.maxUsers} />}
+                                                            min={1}
+                                                            onChange={(value) => setNodeForm((current) => ({ ...current, maxUsers: Number(value) || 300 }))}
+                                                            value={nodeForm.maxUsers}
+                                                        />
+                                                        <Select
+                                                            data={statusOptions()}
+                                                            label={<FieldLabel help={tooltips.status} label={texts.fields.status} />}
+                                                            onChange={(value) =>
+                                                                setNodeForm((current) => ({
+                                                                    ...current,
+                                                                    status: (value as ToporBalancerNodeStatus | null) ?? 'active'
+                                                                }))
+                                                            }
+                                                            value={nodeForm.status}
+                                                        />
+                                                    </Group>
+                                                    <Button leftSection={<IconPlus size={16} />} loading={isLoading} onClick={createNode} variant="light">
+                                                        {texts.actions.addNode}
+                                                    </Button>
+                                                </Stack>
+                                            </Card>
                                         </Group>
 
-                                        {wizardStep === 1 && (
-                                            <Stack gap="md">
-                                                <Title order={4}>Проверка подключения к Remnawave</Title>
-                                                <Text>Панель: {health?.remnawavePanelUrl || '-'}</Text>
-                                                <Badge color={health ? 'green' : 'red'} w="fit-content">
-                                                    {health ? 'Подключено' : 'Нет данных'}
-                                                </Badge>
-                                                <Button onClick={() => setWizardStep(2)}>Продолжить</Button>
-                                            </Stack>
-                                        )}
+                                        <GroupsTable
+                                            deleteGroup={deleteGroup}
+                                            groups={groups}
+                                            patchGroup={patchGroup}
+                                            selectedGroupId={selectedGroup?.id ?? null}
+                                            setSelectedGroupId={setSelectedGroupId}
+                                        />
 
-                                        {wizardStep === 2 && (
-                                            <Stack gap="md">
-                                                <Title order={4}>Найти технические ноды</Title>
-                                                <Group align="end">
-                                                    <Button leftSection={<IconSearch size={16} />} loading={isDiscoveryLoading} onClick={runApiDiscovery}>
-                                                        Получить из Remnawave API
-                                                    </Button>
-                                                    <TextInput
-                                                        label="shortUuid тестовой подписки"
-                                                        onChange={(event) => setShortUuid(event.currentTarget.value)}
-                                                        placeholder="shortUuid"
-                                                        value={shortUuid}
-                                                    />
-                                                    <Button leftSection={<IconSearch size={16} />} loading={isDiscoveryLoading} onClick={runSubscriptionDiscovery} variant="light">
-                                                        Сканировать подписку
-                                                    </Button>
-                                                </Group>
-                                            </Stack>
-                                        )}
-
-                                        {wizardStep === 3 && (
-                                            <Stack gap="md">
-                                                <Title order={4}>Сгруппировать ноды</Title>
-                                                <DiscoveredHostsTable
-                                                    hosts={discoveredHosts}
-                                                    importedByTechnicalHostName={importedByTechnicalHostName}
-                                                    selectedHosts={selectedHosts}
-                                                    toggleSelectedHost={toggleSelectedHost}
-                                                />
-                                                <Group grow>
-                                                    <TextInput
-                                                        description={tooltips.publicName}
-                                                        label="publicName"
-                                                        onChange={(event) => setGroupForm((current) => ({ ...current, publicName: event.currentTarget.value }))}
-                                                        value={groupForm.publicName}
-                                                    />
-                                                    <TextInput
-                                                        description={tooltips.publicHostCode}
-                                                        label="publicHostCode"
-                                                        onChange={(event) => setGroupForm((current) => ({ ...current, publicHostCode: event.currentTarget.value }))}
-                                                        value={groupForm.publicHostCode}
-                                                    />
-                                                    <TextInput
-                                                        label="locationCode"
-                                                        onChange={(event) => setGroupForm((current) => ({ ...current, locationCode: event.currentTarget.value }))}
-                                                        value={groupForm.locationCode}
-                                                    />
-                                                    <TextInput
-                                                        description={tooltips.planCode}
-                                                        label="planCode"
-                                                        onChange={(event) => setGroupForm((current) => ({ ...current, planCode: event.currentTarget.value }))}
-                                                        value={groupForm.planCode}
-                                                    />
-                                                </Group>
-                                                <Button onClick={() => setWizardStep(4)}>Продолжить к импорту</Button>
-                                            </Stack>
-                                        )}
-
-                                        {wizardStep === 4 && (
-                                            <Stack gap="md">
-                                                <Title order={4}>Импортировать</Title>
-                                                <Text>
-                                                    Будет импортировано: {selectedHosts.length}. Уже импортированные ноды будут обновлены без создания дублей.
-                                                </Text>
-                                                <Group>
-                                                    <NumberInput
-                                                        description={tooltips.weight}
-                                                        label="weight"
-                                                        min={0.0001}
-                                                        onChange={(value) => setGroupForm((current) => ({ ...current, weight: Number(value) || 1 }))}
-                                                        value={groupForm.weight}
-                                                    />
-                                                    <NumberInput
-                                                        description={tooltips.maxUsers}
-                                                        label="maxUsers"
-                                                        min={1}
-                                                        onChange={(value) => setGroupForm((current) => ({ ...current, maxUsers: Number(value) || 300 }))}
-                                                        value={groupForm.maxUsers}
-                                                    />
-                                                    <Select
-                                                        data={statusOptions()}
-                                                        description={statusTooltips[groupForm.status]}
-                                                        label="status"
-                                                        onChange={(value) =>
-                                                            setGroupForm((current) => ({
-                                                                ...current,
-                                                                status: (value as ToporBalancerNodeStatus | null) || 'active'
-                                                            }))
-                                                        }
-                                                        value={groupForm.status}
-                                                    />
-                                                </Group>
-                                                <Button leftSection={<IconDownload size={16} />} loading={isDiscoveryLoading} onClick={importSelectedHosts}>
-                                                    Импортировать
-                                                </Button>
-                                            </Stack>
-                                        )}
-
-                                        {wizardStep === 5 && (
-                                            <Stack gap="md">
-                                                <Title order={4}>Проверить</Title>
-                                                <Text>Импортированные ноды появились в категории “Управляется Balancer”. Следующий шаг: открыть реальную ссылку подписки.</Text>
-                                                <Button onClick={refreshAdminData}>Обновить состояние</Button>
-                                            </Stack>
-                                        )}
+                                        <TechnicalNodesTable
+                                            deleteNode={deleteNode}
+                                            discoveredByTechnicalHostName={discoveredByTechnicalHostName}
+                                            nodes={selectedGroupNodes}
+                                            patchNode={patchNode}
+                                        />
                                     </Stack>
-                                </Card>
-                            )}
-
-                            <Tabs defaultValue="discovery">
-                                <Tabs.List>
-                                    <Tabs.Tab value="discovery">Найдено в Remnawave</Tabs.Tab>
-                                    <Tabs.Tab value="nodes">Управляется Balancer</Tabs.Tab>
-                                    <Tabs.Tab value="diagnostics">Диагностика</Tabs.Tab>
-                                </Tabs.List>
+                                </Tabs.Panel>
 
                                 <Tabs.Panel pt="md" value="discovery">
                                     <Stack gap="md">
-                                        <Group align="end">
-                                            <Button leftSection={<IconSearch size={16} />} loading={isDiscoveryLoading} onClick={runApiDiscovery}>
-                                                Получить из Remnawave API
-                                            </Button>
-                                            <TextInput
-                                                label="shortUuid тестовой подписки"
-                                                onChange={(event) => setShortUuid(event.currentTarget.value)}
-                                                placeholder="shortUuid"
-                                                value={shortUuid}
-                                            />
-                                            <Button leftSection={<IconSearch size={16} />} loading={isDiscoveryLoading} onClick={runSubscriptionDiscovery} variant="light">
-                                                Сканировать подписку
-                                            </Button>
-                                        </Group>
+                                        <Card className={classes.tableCard} p="lg" radius="md">
+                                            <Stack gap="md">
+                                                <Group justify="space-between">
+                                                    <div>
+                                                        <Title order={3}>{texts.discovery.scanTitle}</Title>
+                                                        <Text c="dimmed" size="sm">
+                                                            {texts.discovery.importTarget} {selectedGroup?.publicName ?? '-'}
+                                                        </Text>
+                                                    </div>
+                                                    <Badge color={selectedGroup ? 'green' : 'red'} variant="light">
+                                                        {selectedGroup ? selectedGroup.publicHostCode : texts.common.noGroup}
+                                                    </Badge>
+                                                </Group>
+                                                <Group align="end">
+                                                    <Button leftSection={<IconSearch size={16} />} loading={isDiscoveryLoading} onClick={runApiDiscovery}>
+                                                        {texts.actions.searchRemnawave}
+                                                    </Button>
+                                                    <TextInput
+                                                        label={texts.forms.shortUuidLabel}
+                                                        onChange={(event) => setShortUuid(event.currentTarget.value)}
+                                                        placeholder={texts.forms.shortUuidPlaceholder}
+                                                        value={shortUuid}
+                                                    />
+                                                    <Button leftSection={<IconSearch size={16} />} loading={isDiscoveryLoading} onClick={runSubscriptionDiscovery} variant="light">
+                                                        {texts.actions.scanSubscription}
+                                                    </Button>
+                                                </Group>
+                                            </Stack>
+                                        </Card>
 
                                         <DiscoveredHostsTable
                                             hosts={discoveredHosts}
                                             importedByTechnicalHostName={importedByTechnicalHostName}
+                                            importStatuses={discoveryImportStatuses}
+                                            selectedGroup={selectedGroup}
                                             selectedHosts={selectedHosts}
                                             toggleSelectedHost={toggleSelectedHost}
                                         />
 
-                                        <Card className={classes.tableCard} p="md" radius="md">
-                                            <Stack gap="md">
-                                                <Title order={4}>Группа балансировки</Title>
-                                                <Group grow>
-                                                    <TextInput
-                                                        description={tooltips.publicName}
-                                                        label="publicName"
-                                                        onChange={(event) => setGroupForm((current) => ({ ...current, publicName: event.currentTarget.value }))}
-                                                        value={groupForm.publicName}
-                                                    />
-                                                    <TextInput
-                                                        description={tooltips.publicHostCode}
-                                                        label="publicHostCode"
-                                                        onChange={(event) => setGroupForm((current) => ({ ...current, publicHostCode: event.currentTarget.value }))}
-                                                        value={groupForm.publicHostCode}
-                                                    />
-                                                    <TextInput
-                                                        label="locationCode"
-                                                        onChange={(event) => setGroupForm((current) => ({ ...current, locationCode: event.currentTarget.value }))}
-                                                        value={groupForm.locationCode}
-                                                    />
-                                                    <TextInput
-                                                        description={tooltips.planCode}
-                                                        label="planCode"
-                                                        onChange={(event) => setGroupForm((current) => ({ ...current, planCode: event.currentTarget.value }))}
-                                                        value={groupForm.planCode}
-                                                    />
-                                                </Group>
-                                                <Group>
-                                                    <NumberInput
-                                                        description={tooltips.weight}
-                                                        label="weight"
-                                                        min={0.0001}
-                                                        onChange={(value) => setGroupForm((current) => ({ ...current, weight: Number(value) || 1 }))}
-                                                        value={groupForm.weight}
-                                                    />
-                                                    <NumberInput
-                                                        description={tooltips.maxUsers}
-                                                        label="maxUsers"
-                                                        min={1}
-                                                        onChange={(value) => setGroupForm((current) => ({ ...current, maxUsers: Number(value) || 300 }))}
-                                                        value={groupForm.maxUsers}
-                                                    />
-                                                    <Select
-                                                        data={statusOptions()}
-                                                        description={statusTooltips[groupForm.status]}
-                                                        label="status"
-                                                        onChange={(value) =>
-                                                            setGroupForm((current) => ({
-                                                                ...current,
-                                                                status: (value as ToporBalancerNodeStatus | null) || 'active'
-                                                            }))
-                                                        }
-                                                        value={groupForm.status}
-                                                    />
-                                                </Group>
-                                                <Button leftSection={<IconDownload size={16} />} loading={isDiscoveryLoading} onClick={importSelectedHosts}>
-                                                    Импортировать выбранные
-                                                </Button>
-                                            </Stack>
-                                        </Card>
-                                    </Stack>
-                                </Tabs.Panel>
-
-                                <Tabs.Panel pt="md" value="nodes">
-                                    <Stack gap="md">
-                                        <Group justify="space-between">
-                                            <div>
-                                                <Title order={3}>Управляется Balancer</Title>
-                                                <Text c="dimmed" size="sm">
-                                                    {nodes.length} локальных нод участвуют в балансировке.
-                                                </Text>
-                                            </div>
-                                            <Button onClick={createManualNode} variant="light">
-                                                Ручное добавление
+                                        <Group justify="flex-end">
+                                            <Button disabled={selectedHosts.length === 0} leftSection={<IconDownload size={16} />} loading={isDiscoveryLoading} onClick={importSelectedHosts}>
+                                                {texts.actions.addToGroup}
                                             </Button>
                                         </Group>
-                                        <ManagedNodesTable nodes={nodes} setNodeStatus={setNodeStatus} />
                                     </Stack>
                                 </Tabs.Panel>
 
                                 <Tabs.Panel pt="md" value="diagnostics">
                                     <Stack gap="md">
+                                        <Card className={classes.tableCard} p="lg" radius="md">
+                                            <Stack gap="md">
+                                                <Group justify="space-between">
+                                                    <Title order={3}>{texts.diagnostics.subscriptionTitle}</Title>
+                                                    {subscriptionDiagnostics && (
+                                                        <Badge color={subscriptionDiagnostics.ok ? 'green' : subscriptionDiagnostics.errors.length > 0 ? 'red' : 'yellow'} variant="light">
+                                                            {subscriptionDiagnostics.ok ? texts.diagnostics.resultOk : texts.diagnostics.resultProblem}
+                                                        </Badge>
+                                                    )}
+                                                </Group>
+                                                <Group align="end" grow>
+                                                    <TextInput
+                                                        label={texts.fields.shortUuid}
+                                                        onChange={(event) => setDiagnosticsShortUuid(event.currentTarget.value)}
+                                                        placeholder={texts.forms.shortUuidPlaceholder}
+                                                        value={diagnosticsShortUuid}
+                                                    />
+                                                    <Select
+                                                        data={DIAGNOSTICS_USER_AGENTS}
+                                                        label={texts.diagnostics.userAgent}
+                                                        onChange={(value) => setDiagnosticsUserAgentPreset(value ?? 'v2RayTun/6.0')}
+                                                        value={diagnosticsUserAgentPreset}
+                                                    />
+                                                    {diagnosticsUserAgentPreset === 'custom' && (
+                                                        <TextInput
+                                                            label={texts.diagnostics.customUserAgent}
+                                                            onChange={(event) => setDiagnosticsCustomUserAgent(event.currentTarget.value)}
+                                                            value={diagnosticsCustomUserAgent}
+                                                        />
+                                                    )}
+                                                    <Button leftSection={<IconSearch size={16} />} loading={isDiagnosticsLoading} onClick={runSubscriptionDiagnostics}>
+                                                        {texts.diagnostics.checkSubscription}
+                                                    </Button>
+                                                </Group>
+                                                {subscriptionDiagnostics && (
+                                                    <Stack gap="md">
+                                                        <SimpleGrid cols={{ base: 1, sm: 3 }} spacing="md">
+                                                            <Card className={classes.statusCard} p="md" radius="md">
+                                                                <Text c="dimmed" size="sm">{texts.diagnostics.format}</Text>
+                                                                <Text fw={700}>{subscriptionDiagnostics.format}</Text>
+                                                            </Card>
+                                                            <Card className={classes.statusCard} p="md" radius="md">
+                                                                <Text c="dimmed" size="sm">{texts.diagnostics.inputLinks}</Text>
+                                                                <Text fw={700}>{subscriptionDiagnostics.inputLinksCount}</Text>
+                                                            </Card>
+                                                            <Card className={classes.statusCard} p="md" radius="md">
+                                                                <Text c="dimmed" size="sm">{texts.diagnostics.outputLinks}</Text>
+                                                                <Text fw={700}>{subscriptionDiagnostics.outputLinksCount}</Text>
+                                                            </Card>
+                                                        </SimpleGrid>
+                                                        <DiagnosticsSummary result={subscriptionDiagnostics} />
+                                                        <Group justify="flex-end">
+                                                            <Button leftSection={<IconDownload size={16} />} onClick={downloadSubscriptionDiagnostics} variant="light">
+                                                                {texts.diagnostics.downloadReport}
+                                                            </Button>
+                                                        </Group>
+                                                    </Stack>
+                                                )}
+                                            </Stack>
+                                        </Card>
                                         <Alert color={runtimeHealth?.fallbackConfigOk ? 'green' : 'red'} variant="light">
-                                            Runtime config: {runtimeHealth?.appConfigRoute ?? '/assets/.app-config-v2.json'}; source:{' '}
-                                            {runtimeHealth?.lastConfigSource ?? '-'}; error:{' '}
-                                            {runtimeHealth?.lastRuntimeConfigError ?? '-'}
+                                            {texts.diagnostics.runtimeConfig}: {runtimeHealth?.appConfigRoute ?? '/assets/.app-config-v2.json'}; {texts.diagnostics.source}: {runtimeHealth?.lastConfigSource ?? '-'}; {texts.diagnostics.error}: {runtimeHealth?.lastRuntimeConfigError ?? '-'}
                                         </Alert>
                                         <AssignmentsTable assignments={assignments} nodes={nodes} />
                                         <RequestsTable requests={requests} />
@@ -859,14 +1375,380 @@ export function ToporBalancerAdminPage() {
     )
 }
 
+function ImportResultSummary({ result }: { result: ImportResult }) {
+    const hasDetails = result.conflicts.length > 0 || (result.errors?.length ?? 0) > 0
+
+    return (
+        <Alert color={hasDetails ? 'yellow' : 'green'} variant="light">
+            <Stack gap={6}>
+                <Text fw={700}>{formatText(texts.discovery.importSummary, { created: result.created.length, skipped: result.skipped.length, conflicts: result.conflicts.length, errors: result.errors?.length ?? 0 })}</Text>
+                {result.conflicts.map((conflict) => (
+                    <Text key={`conflict-${conflict.technicalHostName}`} size="sm">
+                        {conflict.technicalHostName}: {texts.discovery.alreadyInGroup} {conflict.existingPublicHostCode ?? '-'}:
+                        {conflict.existingPlanCode ?? '-'}
+                    </Text>
+                ))}
+                {result.errors?.map((error, index) => (
+                    <Text key={`error-${error.technicalHostName ?? index}`} size="sm">
+                        {error.technicalHostName ?? 'import'}: {error.reason}
+                    </Text>
+                ))}
+            </Stack>
+        </Alert>
+    )
+}
+
+function DiagnosticsSummary({ result }: { result: SubscriptionDiagnosticsResult }) {
+    return (
+        <Stack gap="md">
+            {(result.warnings.length > 0 || result.errors.length > 0) && (
+                <Alert color={result.errors.length > 0 ? 'red' : 'yellow'} variant="light">
+                    <Stack gap={4}>
+                        {result.errors.map((error) => (
+                            <Text key={`error-${error}`} size="sm">
+                                {error}
+                            </Text>
+                        ))}
+                        {result.warnings.map((warning) => (
+                            <Text key={`warning-${warning}`} size="sm">
+                                {warning}
+                            </Text>
+                        ))}
+                    </Stack>
+                </Alert>
+            )}
+            <Card className={classes.tableCard} p={0} radius="md">
+                <ScrollArea>
+                    <Table highlightOnHover>
+                        <Table.Thead>
+                            <Table.Tr>
+                                <Table.Th>{texts.fields.publicHostCode}</Table.Th>
+                                <Table.Th>{texts.fields.planCode}</Table.Th>
+                                <Table.Th>{texts.diagnostics.selectedNode}</Table.Th>
+                                <Table.Th>{texts.fields.status}</Table.Th>
+                            </Table.Tr>
+                        </Table.Thead>
+                        <Table.Tbody>
+                            {result.groups.map((group) => (
+                                <Table.Tr key={`${group.publicHostCode}:${group.planCode}`}>
+                                    <Table.Td>{group.publicHostCode}</Table.Td>
+                                    <Table.Td>{group.planCode}</Table.Td>
+                                    <Table.Td>{group.selectedTechnicalHostName ?? '-'}</Table.Td>
+                                    <Table.Td>
+                                        <Badge color={getDiagnosticsStatusColor(group.status)} variant="light">
+                                            {getDiagnosticsStatusLabel(group.status)}
+                                        </Badge>
+                                    </Table.Td>
+                                </Table.Tr>
+                            ))}
+                        </Table.Tbody>
+                    </Table>
+                </ScrollArea>
+            </Card>
+            <Card className={classes.tableCard} p={0} radius="md">
+                <ScrollArea>
+                    <Table highlightOnHover>
+                        <Table.Thead>
+                            <Table.Tr>
+                                <Table.Th>{texts.fields.technicalHostName}</Table.Th>
+                                <Table.Th>{texts.fields.status}</Table.Th>
+                                <Table.Th>{texts.diagnostics.queryParams}</Table.Th>
+                                <Table.Th>{texts.diagnostics.warnings}</Table.Th>
+                            </Table.Tr>
+                        </Table.Thead>
+                        <Table.Tbody>
+                            {result.vlessValidation.map((validation, index) => (
+                                <Table.Tr key={`${validation.remark ?? 'link'}-${index}`}>
+                                    <Table.Td>{validation.remark ?? '-'}</Table.Td>
+                                    <Table.Td>
+                                        <Badge color={validation.valid ? 'green' : 'red'} variant="light">
+                                            {validation.valid ? texts.diagnostics.valid : texts.diagnostics.invalid}
+                                        </Badge>
+                                    </Table.Td>
+                                    <Table.Td className={classes.wrapCell}>{validation.queryParamKeys.join(', ') || '-'}</Table.Td>
+                                    <Table.Td className={classes.wrapCell}>{validation.warnings.join('; ') || '-'}</Table.Td>
+                                </Table.Tr>
+                            ))}
+                        </Table.Tbody>
+                    </Table>
+                </ScrollArea>
+            </Card>
+        </Stack>
+    )
+}
+
+function GroupsTable({
+    deleteGroup,
+    groups,
+    patchGroup,
+    selectedGroupId,
+    setSelectedGroupId
+}: {
+    deleteGroup: (group: ToporBalancerGroup) => void
+    groups: ToporBalancerGroup[]
+    patchGroup: (group: ToporBalancerGroup, patch: Partial<ToporBalancerGroup>) => void
+    selectedGroupId: null | string
+    setSelectedGroupId: (id: string) => void
+}) {
+    if (groups.length === 0) {
+        return (
+            <Card className={classes.tableCard} p="lg" radius="md">
+                <Stack align="center" className={classes.emptyState} gap={6}>
+                    <Text fw={700}>{texts.groups.emptyTitle}</Text>
+                    <Text c="dimmed" size="sm">
+                        {texts.groups.emptyText}
+                    </Text>
+                </Stack>
+            </Card>
+        )
+    }
+
+    return (
+        <Card className={classes.tableCard} p={0} radius="md">
+            <ScrollArea>
+                <Table className={classes.groupsTable} highlightOnHover stickyHeader>
+                    <Table.Thead>
+                        <Table.Tr>
+                            <Table.Th>
+                                <HeaderWithHelp help={tooltips.publicName}>{texts.fields.publicName}</HeaderWithHelp>
+                            </Table.Th>
+                            <Table.Th>
+                                <HeaderWithHelp help={tooltips.publicHostCode}>{texts.fields.publicHostCode}</HeaderWithHelp>
+                            </Table.Th>
+                            <Table.Th>
+                                <HeaderWithHelp help={tooltips.locationCode}>{texts.fields.locationCode}</HeaderWithHelp>
+                            </Table.Th>
+                            <Table.Th>
+                                <HeaderWithHelp help={tooltips.planCode}>{texts.fields.planCode}</HeaderWithHelp>
+                            </Table.Th>
+                            <Table.Th>{texts.fields.strategy}</Table.Th>
+                            <Table.Th>{texts.groups.activeNodes}</Table.Th>
+                            <Table.Th>{texts.fields.assignedUsers}</Table.Th>
+                            <Table.Th>{texts.fields.status}</Table.Th>
+                            <Table.Th>{texts.common.actions}</Table.Th>
+                        </Table.Tr>
+                    </Table.Thead>
+                    <Table.Tbody>
+                        {groups.map((group) => (
+                            <Table.Tr key={group.id}>
+                                <Table.Td>{group.publicName}</Table.Td>
+                                <Table.Td>{group.publicHostCode}</Table.Td>
+                                <Table.Td>{group.locationCode || '-'}</Table.Td>
+                                <Table.Td>{group.planCode}</Table.Td>
+                                <Table.Td>{group.strategy}</Table.Td>
+                                <Table.Td>
+                                    {group.activeNodesCount}/{group.nodesCount}
+                                </Table.Td>
+                                <Table.Td>{group.assignedUsers}</Table.Td>
+                                <Table.Td>
+                                    <Badge color={group.enabled ? 'green' : 'gray'} variant="light">
+                                        {group.enabled ? texts.status.groupEnabled : texts.status.groupDisabled}
+                                    </Badge>
+                                </Table.Td>
+                                <Table.Td>
+                                    <Group gap={6} wrap="nowrap">
+                                        <Button
+                                            disabled={selectedGroupId === group.id}
+                                            onClick={() => setSelectedGroupId(group.id)}
+                                            size="xs"
+                                            variant="light"
+                                        >
+                                            {texts.actions.open}
+                                        </Button>
+                                        <Button
+                                            onClick={() => patchGroup(group, { enabled: !group.enabled })}
+                                            size="xs"
+                                            variant="subtle"
+                                        >
+                                            {group.enabled ? texts.actions.disable : texts.actions.enable}
+                                        </Button>
+                                        <Button
+                                            color="red"
+                                            disabled={group.nodesCount > 0}
+                                            leftSection={<IconTrash size={14} />}
+                                            onClick={() => deleteGroup(group)}
+                                            size="xs"
+                                            variant="subtle"
+                                        >
+                                            {texts.actions.delete}
+                                        </Button>
+                                    </Group>
+                                </Table.Td>
+                            </Table.Tr>
+                        ))}
+                    </Table.Tbody>
+                </Table>
+            </ScrollArea>
+        </Card>
+    )
+}
+
+function TechnicalNodesTable({
+    deleteNode,
+    discoveredByTechnicalHostName,
+    nodes,
+    patchNode
+}: {
+    deleteNode: (node: ToporBalancerNode) => void
+    discoveredByTechnicalHostName: Map<string, DiscoveredHost>
+    nodes: ToporBalancerNode[]
+    patchNode: (node: ToporBalancerNode, patch: Partial<ToporBalancerNode>) => void
+}) {
+    if (nodes.length === 0) {
+        return (
+            <Card className={classes.tableCard} p="lg" radius="md">
+                <Stack align="center" className={classes.emptyState} gap={6}>
+                    <Text fw={700}>{texts.nodes.emptyTitle}</Text>
+                    <Text c="dimmed" size="sm">
+                        {texts.nodes.emptyText}
+                    </Text>
+                </Stack>
+            </Card>
+        )
+    }
+
+    return (
+        <Card className={classes.tableCard} p={0} radius="md">
+            <ScrollArea>
+                <Table className={classes.nodesTable} highlightOnHover stickyHeader>
+                    <Table.Thead>
+                        <Table.Tr>
+                            <Table.Th>
+                                <HeaderWithHelp help={tooltips.technicalHostName}>{texts.fields.technicalHostName}</HeaderWithHelp>
+                            </Table.Th>
+                            <Table.Th>
+                                <HeaderWithHelp help={tooltips.status}>{texts.fields.status}</HeaderWithHelp>
+                            </Table.Th>
+                            <Table.Th>
+                                <HeaderWithHelp help={tooltips.weight}>{texts.fields.weight}</HeaderWithHelp>
+                            </Table.Th>
+                            <Table.Th>
+                                <HeaderWithHelp help={tooltips.maxUsers}>{texts.fields.maxUsers}</HeaderWithHelp>
+                            </Table.Th>
+                            <Table.Th>{texts.fields.assignedUsers}</Table.Th>
+                            <Table.Th>{texts.fields.importStatus}</Table.Th>
+                            <Table.Th>{texts.common.actions}</Table.Th>
+                        </Table.Tr>
+                    </Table.Thead>
+                    <Table.Tbody>
+                        {nodes.map((node) => {
+                            const discoveredHost = discoveredByTechnicalHostName.get(normalizeTechnicalHostName(node.technicalHostName))
+
+                            return (
+                                <Table.Tr className={classes[`row-${node.status}`]} key={node.id}>
+                                    <Table.Td>{node.technicalHostName}</Table.Td>
+                                    <Table.Td>
+                                        <Select
+                                            data={statusOptions()}
+                                            onChange={(value) =>
+                                                patchNode(node, {
+                                                    status: (value as ToporBalancerNodeStatus | null) ?? node.status
+                                                })
+                                            }
+                                            size="xs"
+                                            value={node.status}
+                                        />
+                                    </Table.Td>
+                                    <Table.Td>
+                                        <NumberInput
+                                            min={0.0001}
+                                            onBlur={(event) => patchNode(node, { weight: Number(event.currentTarget.value) || 1 })}
+                                            size="xs"
+                                            value={node.weight}
+                                        />
+                                    </Table.Td>
+                                    <Table.Td>
+                                        <NumberInput
+                                            min={1}
+                                            onBlur={(event) => patchNode(node, { maxUsers: Number(event.currentTarget.value) || 300 })}
+                                            size="xs"
+                                            value={node.maxUsers}
+                                        />
+                                    </Table.Td>
+                                    <Table.Td>{node.assignedUsers}</Table.Td>
+                                    <Table.Td>
+                                        <Badge color={discoveredHost ? 'green' : 'gray'} variant="light">
+                                            {discoveredHost ? texts.discovery.discovered : texts.discovery.importedLocal}
+                                        </Badge>
+                                    </Table.Td>
+                                    <Table.Td>
+                                        <Group gap={6} wrap="nowrap">
+                                            <Button disabled={node.status === 'active'} onClick={() => patchNode(node, { status: 'active' })} size="xs" variant="light">
+                                                {texts.actions.enable}
+                                            </Button>
+                                            <Button disabled={node.status === 'draining'} onClick={() => patchNode(node, { status: 'draining' })} size="xs" variant="light">
+                                                {texts.actions.startDraining}
+                                            </Button>
+                                            <Button color="red" disabled={node.status === 'disabled'} onClick={() => patchNode(node, { status: 'disabled' })} size="xs" variant="subtle">
+                                                {texts.actions.disable}
+                                            </Button>
+                                            <Button color="red" disabled={node.assignedUsers > 0} onClick={() => deleteNode(node)} size="xs" variant="subtle">
+                                                {texts.actions.delete}
+                                            </Button>
+                                        </Group>
+                                    </Table.Td>
+                                </Table.Tr>
+                            )
+                        })}
+                    </Table.Tbody>
+                </Table>
+            </ScrollArea>
+        </Card>
+    )
+}
+
+function getDiscoveredHostStatusBadge({
+    importedNode,
+    importStatus,
+    isImportedIntoSelectedGroup
+}: {
+    importedNode?: ToporBalancerNode
+    importStatus?: DiscoveryImportStatusState
+    isImportedIntoSelectedGroup: boolean
+}) {
+    if (importStatus?.status === 'imported') {
+        return { color: 'green', label: texts.discovery.imported, tooltip: texts.tooltips.imported }
+    }
+
+    if (importStatus?.status === 'skipped') {
+        return { color: 'blue', label: texts.discovery.alreadyInGroup, tooltip: importStatus.message }
+    }
+
+    if (importStatus?.status === 'conflict') {
+        return { color: 'red', label: texts.discovery.conflict, tooltip: importStatus.message }
+    }
+
+    if (importStatus?.status === 'error') {
+        return { color: 'red', label: texts.discovery.error, tooltip: importStatus.message }
+    }
+
+    if (isImportedIntoSelectedGroup) {
+        return { color: 'green', label: texts.discovery.imported, tooltip: texts.tooltips.imported }
+    }
+
+    if (importedNode) {
+        return {
+            color: 'yellow',
+            label: texts.discovery.conflict,
+            tooltip: `${importedNode.publicHostCode}:${importedNode.planCode}`
+        }
+    }
+
+    return { color: 'gray', label: texts.discovery.canImport, tooltip: texts.tooltips.discovered }
+}
+
 function DiscoveredHostsTable({
     hosts,
     importedByTechnicalHostName,
+    importStatuses,
+    selectedGroup,
     selectedHosts,
     toggleSelectedHost
 }: {
     hosts: DiscoveredHost[]
     importedByTechnicalHostName: Map<string, ToporBalancerNode>
+    importStatuses: Record<string, DiscoveryImportStatusState>
+    selectedGroup: null | ToporBalancerGroup
     selectedHosts: string[]
     toggleSelectedHost: (technicalHostName: string) => void
 }) {
@@ -874,9 +1756,9 @@ function DiscoveredHostsTable({
         return (
             <Card className={classes.tableCard} p="lg" radius="md">
                 <Stack align="center" className={classes.emptyState} gap={6}>
-                    <Text fw={700}>Ноды ещё не найдены</Text>
+                    <Text fw={700}>{texts.discovery.emptyTitle}</Text>
                     <Text c="dimmed" size="sm">
-                        Запустите поиск через Remnawave API или тестовую подписку.
+                        {texts.discovery.emptyText}
                     </Text>
                 </Stack>
             </Card>
@@ -891,39 +1773,55 @@ function DiscoveredHostsTable({
                         <Table.Tr>
                             <Table.Th />
                             <Table.Th>
-                                <HeaderWithHelp help={tooltips.technicalHostName}>technicalHostName</HeaderWithHelp>
+                                <HeaderWithHelp help={tooltips.technicalHostName}>{texts.fields.technicalHostName}</HeaderWithHelp>
                             </Table.Th>
-                            <Table.Th>Статус</Table.Th>
-                            <Table.Th>host</Table.Th>
-                            <Table.Th>port</Table.Th>
-                            <Table.Th>security</Table.Th>
-                            <Table.Th>type</Table.Th>
-                            <Table.Th>sni</Table.Th>
-                            <Table.Th>flow</Table.Th>
-                            <Table.Th>pbk/sid</Table.Th>
+                            <Table.Th>{texts.fields.importStatus}</Table.Th>
+                            <Table.Th>{texts.fields.host}</Table.Th>
+                            <Table.Th>{texts.fields.port}</Table.Th>
+                            <Table.Th>{texts.fields.protocol}</Table.Th>
+                            <Table.Th>{texts.fields.security}</Table.Th>
+                            <Table.Th>{texts.fields.type}</Table.Th>
+                            <Table.Th>{texts.fields.sni}</Table.Th>
+                            <Table.Th>{texts.fields.flow}</Table.Th>
+                            <Table.Th>{texts.fields.keys}</Table.Th>
                         </Table.Tr>
                     </Table.Thead>
                     <Table.Tbody>
                         {hosts.map((host) => {
-                            const importedNode = importedByTechnicalHostName.get(host.technicalHostName)
-                            const isImported = host.alreadyImported || Boolean(importedNode)
+                            const technicalHostName = normalizeTechnicalHostName(host.technicalHostName)
+                            const importedNode = importedByTechnicalHostName.get(technicalHostName)
+                            const importStatus = importStatuses[technicalHostName]
+                            const isImportedIntoSelectedGroup = Boolean(
+                                selectedGroup &&
+                                    importedNode &&
+                                    importedNode.groupId === selectedGroup.id
+                            )
+                            const statusBadge = getDiscoveredHostStatusBadge({
+                                importStatus,
+                                importedNode,
+                                isImportedIntoSelectedGroup
+                            })
 
                             return (
-                                <Table.Tr key={host.technicalHostName}>
+                                <Table.Tr key={technicalHostName}>
                                     <Table.Td>
                                         <Checkbox
-                                            checked={selectedHosts.includes(host.technicalHostName)}
-                                            onChange={() => toggleSelectedHost(host.technicalHostName)}
+                                            checked={selectedHosts.includes(technicalHostName)}
+                                            disabled={isImportedIntoSelectedGroup}
+                                            onChange={() => toggleSelectedHost(technicalHostName)}
                                         />
                                     </Table.Td>
-                                    <Table.Td>{host.technicalHostName}</Table.Td>
+                                    <Table.Td>{technicalHostName}</Table.Td>
                                     <Table.Td>
-                                        <Badge color={isImported ? 'green' : 'yellow'} variant="light">
-                                            {isImported ? 'Импортировано' : 'Не импортировано'}
-                                        </Badge>
+                                        <Tooltip disabled={!statusBadge.tooltip} label={statusBadge.tooltip} withArrow>
+                                            <Badge color={statusBadge.color} variant="light">
+                                                {statusBadge.label}
+                                            </Badge>
+                                        </Tooltip>
                                     </Table.Td>
                                     <Table.Td>{redactSensitiveText(host.host)}</Table.Td>
                                     <Table.Td>{host.port ?? '-'}</Table.Td>
+                                    <Table.Td>{host.protocol ?? '-'}</Table.Td>
                                     <Table.Td>{host.security ?? '-'}</Table.Td>
                                     <Table.Td>{host.type ?? '-'}</Table.Td>
                                     <Table.Td>{redactSensitiveText(host.sni)}</Table.Td>
@@ -932,96 +1830,6 @@ function DiscoveredHostsTable({
                                 </Table.Tr>
                             )
                         })}
-                    </Table.Tbody>
-                </Table>
-            </ScrollArea>
-        </Card>
-    )
-}
-
-function ManagedNodesTable({
-    nodes,
-    setNodeStatus
-}: {
-    nodes: ToporBalancerNode[]
-    setNodeStatus: (node: ToporBalancerNode, action: 'disable' | 'drain' | 'enable') => void
-}) {
-    if (nodes.length === 0) {
-        return (
-            <Card className={classes.tableCard} p="lg" radius="md">
-                <Stack align="center" className={classes.emptyState} gap={6}>
-                    <Text fw={700}>В Balancer пока нет нод</Text>
-                    <Text c="dimmed" size="sm">
-                        Используйте wizard или вкладку “Найдено в Remnawave”.
-                    </Text>
-                </Stack>
-            </Card>
-        )
-    }
-
-    return (
-        <Card className={classes.tableCard} p={0} radius="md">
-            <ScrollArea>
-                <Table className={classes.nodesTable} highlightOnHover stickyHeader>
-                    <Table.Thead>
-                        <Table.Tr>
-                            <Table.Th>
-                                <HeaderWithHelp help={tooltips.publicHostCode}>publicHostCode</HeaderWithHelp>
-                            </Table.Th>
-                            <Table.Th>
-                                <HeaderWithHelp help={tooltips.publicName}>publicName</HeaderWithHelp>
-                            </Table.Th>
-                            <Table.Th>
-                                <HeaderWithHelp help={tooltips.technicalHostName}>technicalHostName</HeaderWithHelp>
-                            </Table.Th>
-                            <Table.Th>
-                                <HeaderWithHelp help={tooltips.planCode}>planCode</HeaderWithHelp>
-                            </Table.Th>
-                            <Table.Th>locationCode</Table.Th>
-                            <Table.Th>status</Table.Th>
-                            <Table.Th>
-                                <HeaderWithHelp help={tooltips.weight}>weight</HeaderWithHelp>
-                            </Table.Th>
-                            <Table.Th>
-                                <HeaderWithHelp help={tooltips.maxUsers}>maxUsers</HeaderWithHelp>
-                            </Table.Th>
-                            <Table.Th>assignedUsers</Table.Th>
-                            <Table.Th>Действия</Table.Th>
-                        </Table.Tr>
-                    </Table.Thead>
-                    <Table.Tbody>
-                        {nodes.map((node) => (
-                            <Table.Tr className={classes[`row-${node.status}`]} key={node.id}>
-                                <Table.Td>{node.publicHostCode}</Table.Td>
-                                <Table.Td>{node.publicName}</Table.Td>
-                                <Table.Td>{node.technicalHostName}</Table.Td>
-                                <Table.Td>{node.planCode}</Table.Td>
-                                <Table.Td>{node.locationCode || '-'}</Table.Td>
-                                <Table.Td>
-                                    <Tooltip label={statusTooltips[node.status]} withArrow>
-                                        <Badge color={getStatusColor(node.status)} variant="light">
-                                            {statusLabels[node.status]}
-                                        </Badge>
-                                    </Tooltip>
-                                </Table.Td>
-                                <Table.Td>{node.weight}</Table.Td>
-                                <Table.Td>{node.maxUsers}</Table.Td>
-                                <Table.Td>{node.assignedUsers}</Table.Td>
-                                <Table.Td>
-                                    <Group gap={6} wrap="nowrap">
-                                        <Button disabled={node.status === 'active'} onClick={() => setNodeStatus(node, 'enable')} size="xs" variant="light">
-                                            Включить
-                                        </Button>
-                                        <Button disabled={node.status === 'draining'} onClick={() => setNodeStatus(node, 'drain')} size="xs" variant="light">
-                                            Выводить
-                                        </Button>
-                                        <Button color="red" disabled={node.status === 'disabled'} onClick={() => setNodeStatus(node, 'disable')} size="xs" variant="subtle">
-                                            Отключить
-                                        </Button>
-                                    </Group>
-                                </Table.Td>
-                            </Table.Tr>
-                        ))}
                     </Table.Tbody>
                 </Table>
             </ScrollArea>
@@ -1038,11 +1846,11 @@ function AssignmentsTable({ assignments, nodes }: { assignments: ToporBalancerAs
                 <Table className={classes.assignmentsTable} highlightOnHover stickyHeader>
                     <Table.Thead>
                         <Table.Tr>
-                            <Table.Th>shortUuid</Table.Th>
-                            <Table.Th>publicHostCode</Table.Th>
-                            <Table.Th>planCode</Table.Th>
-                            <Table.Th>technicalHostName</Table.Th>
-                            <Table.Th>updatedAt</Table.Th>
+                            <Table.Th>{texts.fields.shortUuid}</Table.Th>
+                            <Table.Th>{texts.fields.publicHostCode}</Table.Th>
+                            <Table.Th>{texts.fields.planCode}</Table.Th>
+                            <Table.Th>{texts.fields.technicalHostName}</Table.Th>
+                            <Table.Th>{texts.fields.updatedAt}</Table.Th>
                         </Table.Tr>
                     </Table.Thead>
                     <Table.Tbody>
@@ -1069,13 +1877,13 @@ function RequestsTable({ requests }: { requests: ToporBalancerRequest[] }) {
                 <Table className={classes.requestsTable} highlightOnHover stickyHeader>
                     <Table.Thead>
                         <Table.Tr>
-                            <Table.Th>createdAt</Table.Th>
-                            <Table.Th>shortUuid</Table.Th>
-                            <Table.Th>responseFormat</Table.Th>
-                            <Table.Th>inputLinksCount</Table.Th>
-                            <Table.Th>outputLinksCount</Table.Th>
-                            <Table.Th>status</Table.Th>
-                            <Table.Th>errorMessage</Table.Th>
+                            <Table.Th>{texts.fields.createdAt}</Table.Th>
+                            <Table.Th>{texts.fields.shortUuid}</Table.Th>
+                            <Table.Th>{texts.fields.responseFormat}</Table.Th>
+                            <Table.Th>{texts.fields.inputLinksCount}</Table.Th>
+                            <Table.Th>{texts.fields.outputLinksCount}</Table.Th>
+                            <Table.Th>{texts.fields.status}</Table.Th>
+                            <Table.Th>{texts.fields.errorMessage}</Table.Th>
                         </Table.Tr>
                     </Table.Thead>
                     <Table.Tbody>

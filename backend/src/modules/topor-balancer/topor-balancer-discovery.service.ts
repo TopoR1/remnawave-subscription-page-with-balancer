@@ -47,14 +47,18 @@ export class ToporBalancerDiscoveryService {
         }
 
         const items = hostsResponse.response.response
-            .filter((host) => host.remark.trim().length > 0)
+            .filter((host) => this.normalizeTechnicalHostName(host.remark).length > 0)
             .map((host): ToporBalancerDiscoveredHost => {
-                const matchedNode = importedNodes.get(host.remark);
+                const technicalHostName = this.normalizeTechnicalHostName(host.remark);
+                const matchedNode = importedNodes.get(technicalHostName);
                 const firstRemnawaveNodeUuid = host.nodes[0];
 
                 return {
                     alreadyImported: Boolean(matchedNode),
                     host: host.address,
+                    matchedGroupId: matchedNode?.groupId,
+                    matchedGroupPlanCode: matchedNode?.planCode,
+                    matchedGroupPublicHostCode: matchedNode?.publicHostCode,
                     matchedNodeId: matchedNode?.id ?? null,
                     port: host.port,
                     protocol: 'vless',
@@ -67,7 +71,7 @@ export class ToporBalancerDiscoveryService {
                         : undefined,
                     security: host.securityLayer.toLowerCase(),
                     sni: host.sni ?? undefined,
-                    technicalHostName: host.remark,
+                    technicalHostName,
                 };
             });
 
@@ -105,18 +109,21 @@ export class ToporBalancerDiscoveryService {
         const items = parsedSubscription.links
             .filter((link) => Boolean(link.remark))
             .map((link): ToporBalancerDiscoveredHost => {
-                const technicalHostName = link.remark ?? '';
+                const technicalHostName = this.normalizeTechnicalHostName(link.remark ?? '');
                 const matchedNode = importedNodes.get(technicalHostName);
 
                 return {
                     alreadyImported: Boolean(matchedNode),
                     flow: link.flow,
                     host: link.host,
+                    matchedGroupId: matchedNode?.groupId,
+                    matchedGroupPlanCode: matchedNode?.planCode,
+                    matchedGroupPublicHostCode: matchedNode?.publicHostCode,
                     matchedNodeId: matchedNode?.id ?? null,
                     pbk: this.maskSecret(link.pbk),
                     port: link.port,
                     protocol: 'vless',
-                    rawRemark: technicalHostName,
+                    rawRemark: link.remark,
                     security: link.security,
                     sid: this.maskSecret(link.sid),
                     sni: link.sni,
@@ -146,7 +153,9 @@ export class ToporBalancerDiscoveryService {
         try {
             const nodes = await this.toporBalancerService.listAdminNodes();
 
-            return new Map(nodes.map((node) => [node.technicalHostName, node]));
+            return new Map(
+                nodes.map((node) => [this.normalizeTechnicalHostName(node.technicalHostName), node]),
+            );
         } catch (error) {
             this.logger.warn(`[ToporBalancerDiscovery] local node lookup failed: ${error}`);
 
@@ -157,7 +166,21 @@ export class ToporBalancerDiscoveryService {
     private deduplicateByTechnicalHostName(
         items: ToporBalancerDiscoveredHost[],
     ): ToporBalancerDiscoveredHost[] {
-        return Array.from(new Map(items.map((item) => [item.technicalHostName, item])).values());
+        return Array.from(
+            new Map(
+                items.map((item) => [
+                    this.normalizeTechnicalHostName(item.technicalHostName),
+                    {
+                        ...item,
+                        technicalHostName: this.normalizeTechnicalHostName(item.technicalHostName),
+                    },
+                ]),
+            ).values(),
+        );
+    }
+
+    private normalizeTechnicalHostName(value: string): string {
+        return value.trim();
     }
 
     private stringifySubscriptionBody(body: unknown): string | null {

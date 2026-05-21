@@ -7,6 +7,7 @@ export * from './topor-balancer-database.repository';
 export * from './topor-balancer-discovery.service';
 export * from './topor-balancer-hash.processor';
 export * from './topor-balancer-subscription.parser';
+export * from './topor-balancer-subscription.diagnostics';
 export * from './topor-balancer.module';
 export * from './topor-balancer.service';
 export * from './types';

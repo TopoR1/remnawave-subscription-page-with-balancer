@@ -2,6 +2,8 @@ export type ToporBalancerNodeStatus = 'active' | 'draining' | 'disabled' | 'dead
 
 export type ToporBalancerAssignmentMode = 'hash' | 'database';
 
+export type ToporBalancerGroupStrategy = 'least_loaded';
+
 export interface ToporBalancerNode {
     technicalHostName: string;
     weight: number;
@@ -47,6 +49,10 @@ export interface ParsedVlessLink {
     flow?: string;
     pbk?: string;
     sid?: string;
+    fp?: string;
+    path?: string;
+    serviceName?: string;
+    alpn?: string;
 }
 
 export type SubscriptionFormat = 'plain_links' | 'base64_links' | 'json' | 'html' | 'unknown';
@@ -75,8 +81,72 @@ export interface ToporBalancerProcessResult {
     debugInfo: ToporBalancerDebugInfo;
 }
 
+export interface ToporBalancerMaskedLinkDiff {
+    index: number;
+    selected: boolean;
+    input?: {
+        protocol?: string;
+        host?: string;
+        port?: number;
+        remark?: string;
+        uuid?: string;
+        pbk?: string;
+        sid?: string;
+        queryParamKeys: string[];
+    };
+    output?: {
+        protocol?: string;
+        host?: string;
+        port?: number;
+        remark?: string;
+        uuid?: string;
+        pbk?: string;
+        sid?: string;
+        queryParamKeys: string[];
+    };
+    changedFields: string[];
+    warning?: string;
+}
+
+export interface ToporBalancerDebugProcessSubscriptionResult {
+    inputLinksCount: number;
+    outputLinksCount: number;
+    selectedNodes: Record<string, string>;
+    warnings: string[];
+    maskedDiff: ToporBalancerMaskedLinkDiff[];
+}
+
+export type ToporBalancerSubscriptionDiagnosticsFormat = 'base64' | 'plain' | 'unknown';
+
+export type ToporBalancerSubscriptionDiagnosticsGroupStatus =
+    | 'fail-open'
+    | 'no-active-node'
+    | 'ok';
+
+export interface ToporBalancerSubscriptionDiagnosticsResult {
+    ok: boolean;
+    format: ToporBalancerSubscriptionDiagnosticsFormat;
+    inputLinksCount: number;
+    outputLinksCount: number;
+    groups: Array<{
+        publicHostCode: string;
+        planCode: string;
+        selectedTechnicalHostName?: string;
+        status: ToporBalancerSubscriptionDiagnosticsGroupStatus;
+    }>;
+    vlessValidation: Array<{
+        remark?: string;
+        valid: boolean;
+        warnings: string[];
+        queryParamKeys: string[];
+    }>;
+    warnings: string[];
+    errors: string[];
+}
+
 export interface ToporBalancerDbNode {
     id: string;
+    groupId?: string;
     technicalHostName: string;
     publicHostCode: string;
     publicName: string;
@@ -85,6 +155,18 @@ export interface ToporBalancerDbNode {
     weight: number;
     maxUsers: number;
     status: ToporBalancerNodeStatus;
+    createdAt?: string;
+    updatedAt?: string;
+}
+
+export interface ToporBalancerDbGroup {
+    id: string;
+    publicHostCode: string;
+    publicName: string;
+    locationCode?: string;
+    planCode: string;
+    strategy: ToporBalancerGroupStrategy;
+    enabled: boolean;
     createdAt?: string;
     updatedAt?: string;
 }
@@ -102,6 +184,12 @@ export interface ToporBalancerDbAssignment {
 
 export interface ToporBalancerAdminNode extends ToporBalancerDbNode {
     assignedUsers: number;
+}
+
+export interface ToporBalancerAdminGroup extends ToporBalancerDbGroup {
+    activeNodesCount: number;
+    assignedUsers: number;
+    nodesCount: number;
 }
 
 export interface ToporBalancerAdminHealth {
@@ -165,6 +253,9 @@ export interface ToporBalancerDiscoveredHost {
     remnawaveNodeName?: string;
     remnawaveNodeUuid?: string;
     alreadyImported: boolean;
+    matchedGroupId?: string;
+    matchedGroupPublicHostCode?: string;
+    matchedGroupPlanCode?: string;
     matchedNodeId: string | null;
 }
 
@@ -175,10 +266,17 @@ export interface ToporBalancerDiscoveryResponse {
 }
 
 export interface ToporBalancerDiscoveryImportInput {
-    publicHostCode: string;
-    publicName: string;
+    groupId?: string;
+    group?: {
+        publicHostCode: string;
+        publicName: string;
+        locationCode?: string;
+        planCode: string;
+    };
+    publicHostCode?: string;
+    publicName?: string;
     locationCode?: string;
-    planCode: string;
+    planCode?: string;
     nodes: Array<{
         technicalHostName: string;
         weight: number;
@@ -193,5 +291,17 @@ export interface ToporBalancerDiscoveryImportResult {
     skipped: Array<{
         technicalHostName: string;
         reason: string;
+    }>;
+    errors: Array<{
+        technicalHostName?: string;
+        reason: string;
+    }>;
+    conflicts: Array<{
+        technicalHostName: string;
+        reason: string;
+        existingGroupId?: string;
+        existingPublicHostCode?: string;
+        existingPlanCode?: string;
+        existingPublicName?: string;
     }>;
 }

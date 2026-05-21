@@ -8,6 +8,10 @@ import type {
     ToporBalancerAssignmentFilters,
     ToporBalancerAssignmentRepository,
     ToporBalancerAssignmentSelectionInput,
+    ToporBalancerGroupCreateInput,
+    ToporBalancerGroupDeleteResult,
+    ToporBalancerGroupNodeCreateInput,
+    ToporBalancerGroupUpdateInput,
     ToporBalancerManualReassignInput,
     ToporBalancerNodeCreateInput,
     ToporBalancerNodeDeleteResult,
@@ -17,6 +21,7 @@ import type {
 } from './topor-balancer-database.repository';
 import type {
     ToporBalancerAdminNode,
+    ToporBalancerAdminGroup,
     ToporBalancerAdminRequest,
     ToporBalancerConfig,
     ToporBalancerDbAssignment,
@@ -33,6 +38,7 @@ import {
     parseVlessLink,
     replaceVlessRemark,
 } from './topor-balancer-subscription.parser';
+import { buildMaskedVlessDiff } from './topor-balancer-subscription.diagnostics';
 import {
     ToporBalancerConfigValidationError,
     validateToporBalancerConfig,
@@ -46,9 +52,13 @@ import { ToporBalancerService } from './topor-balancer.service';
 import { AxiosService } from '../../common/axios';
 import { checkAssetsCookieMiddleware } from '../../common/middlewares/check-assets-cookie.middleware';
 import { RuntimeConfigService } from '../root/runtime-config.service';
+import { IGNORED_HEADERS } from '../../common/constants';
 
 const realityLink =
     'vless://11111111-1111-4111-8111-111111111111@example.com:443?type=tcp&security=reality&sni=www.microsoft.com&flow=xtls-rprx-vision&pbk=publicKeyValue&sid=abcd&fp=chrome#Finland';
+
+const complexRealityLink =
+    'vless://99999999-9999-4999-8999-999999999999@reality.example.com:443?type=tcp&security=reality&sni=www.cloudflare.com&fp=chrome&pbk=veryPublicRealityKeyValue&sid=1234abcd&flow=xtls-rprx-vision&path=%2Fgrpc&serviceName=grpc-service&alpn=h2%2Chttp%2F1.1#FI-STD-01';
 
 const balancerConfig: ToporBalancerConfig = {
     enabled: true,
@@ -161,6 +171,46 @@ test('parses VLESS link with encoded remark and replaces remark conservatively',
     );
 });
 
+test('round-trips VLESS REALITY link and preserves all fields except remark', () => {
+    const replacedLink = replaceVlessRemark(complexRealityLink, '\u{1F1EB}\u{1F1EE} Finland');
+    const originalBeforeRemark = complexRealityLink.slice(0, complexRealityLink.indexOf('#'));
+    const replacedBeforeRemark = replacedLink.slice(0, replacedLink.indexOf('#'));
+    const parsedOriginal = parseVlessLink(complexRealityLink);
+    const parsedReplaced = parseVlessLink(replacedLink);
+
+    assert.ok(parsedOriginal);
+    assert.ok(parsedReplaced);
+    assert.equal(replacedBeforeRemark, originalBeforeRemark);
+    assert.equal(parsedReplaced.uuid, parsedOriginal.uuid);
+    assert.equal(parsedReplaced.host, parsedOriginal.host);
+    assert.equal(parsedReplaced.port, parsedOriginal.port);
+    assert.equal(parsedReplaced.rawQuery, parsedOriginal.rawQuery);
+    assert.equal(parsedReplaced.remark, '\u{1F1EB}\u{1F1EE} Finland');
+});
+
+test('preserves VLESS REALITY and transport parameters during remark replacement', () => {
+    const replacedLink = replaceVlessRemark(complexRealityLink, 'Finland Public');
+    const parsedLink = parseVlessLink(replacedLink);
+
+    assert.ok(parsedLink);
+    assert.equal(parsedLink.security, 'reality');
+    assert.equal(parsedLink.sni, 'www.cloudflare.com');
+    assert.equal(parsedLink.fp, 'chrome');
+    assert.equal(parsedLink.pbk, 'veryPublicRealityKeyValue');
+    assert.equal(parsedLink.sid, '1234abcd');
+    assert.equal(parsedLink.flow, 'xtls-rprx-vision');
+    assert.equal(parsedLink.type, 'tcp');
+    assert.equal(parsedLink.path, '/grpc');
+    assert.equal(parsedLink.serviceName, 'grpc-service');
+    assert.equal(parsedLink.alpn, 'h2,http/1.1');
+});
+
+test('unsafe remark replacement fails open to the original VLESS link', () => {
+    const invalidUnicodeRemark = '\uD800';
+
+    assert.equal(replaceVlessRemark(complexRealityLink, invalidUnicodeRemark), complexRealityLink);
+});
+
 test('extracts multiple links with empty lines', () => {
     const secondLink =
         'vless://33333333-3333-4333-8333-333333333333@example.net:443?security=tls&type=tcp#Second';
@@ -183,6 +233,14 @@ test('detects, decodes, and encodes base64 subscription', () => {
     assert.equal(detectSubscriptionFormat(base64Body), 'base64_links');
     assert.equal(decodeSubscriptionBody(base64Body, 'base64_links'), plainBody);
     assert.equal(encodeSubscriptionBody(plainBody, 'base64_links'), base64Body);
+});
+
+test('detects unpadded base64 subscription and decodes valid VLESS links', () => {
+    const plainBody = `${complexRealityLink}\n`;
+    const base64Body = Buffer.from(plainBody, 'utf8').toString('base64').replace(/=+$/, '');
+
+    assert.equal(detectSubscriptionFormat(base64Body), 'base64_links');
+    assert.equal(decodeSubscriptionBody(base64Body, 'base64_links'), plainBody);
 });
 
 test('safely ignores invalid or malformed VLESS link', () => {
@@ -421,6 +479,88 @@ test('hash balancer supports base64 subscriptions', () => {
     assert.equal(parsedOutput.links[0].remark, '\u{1F1EB}\u{1F1EE} Finland');
 });
 
+test('hash balancer supports unpadded base64 subscriptions with valid VLESS output', () => {
+    const plainBody = [complexRealityLink, buildVlessLink('FI-STD-02')].join('\n');
+    const base64Body = Buffer.from(plainBody, 'utf8').toString('base64').replace(/=+$/, '');
+    const result = processSubscriptionWithHashBalancer({
+        shortUuid: 'abc123',
+        body: base64Body,
+        config: balancerConfig,
+    });
+    const decodedOutput = decodeSubscriptionBody(result.body, 'base64_links');
+    const parsedOutput = parseSubscription(decodedOutput);
+
+    assert.equal(detectSubscriptionFormat(result.body), 'base64_links');
+    assert.equal(parsedOutput.links.length, 1);
+    assert.ok(parseVlessLink(parsedOutput.links[0].raw));
+});
+
+test('hash balancer creates URL-safe emoji publicName remarks', () => {
+    const result = processSubscriptionWithHashBalancer({
+        shortUuid: 'abc123',
+        body: [complexRealityLink, buildVlessLink('FI-STD-02')].join('\n'),
+        config: balancerConfig,
+    });
+    const parsedOutput = parseSubscription(result.body);
+
+    assert.equal(parsedOutput.links.length, 1);
+    assert.equal(parsedOutput.links[0].remark, '\u{1F1EB}\u{1F1EE} Finland');
+    assert.ok(new URL(parsedOutput.links[0].raw));
+});
+
+test('hash balancer preserves unknown and non-VLESS lines around valid output', () => {
+    const body = ['# comment', 'trojan://example', complexRealityLink, 'metadata=keep'].join('\n');
+    const result = processSubscriptionWithHashBalancer({
+        shortUuid: 'abc123',
+        body,
+        config: balancerConfig,
+    });
+
+    assert.ok(result.body.includes('# comment'));
+    assert.ok(result.body.includes('trojan://example'));
+    assert.ok(result.body.includes('metadata=keep'));
+    assert.equal(parseSubscription(result.body).links.length, 1);
+});
+
+test('hash balancer selected VLESS link differs only by public remark', () => {
+    const singleNodeConfig: ToporBalancerConfig = {
+        enabled: true,
+        locations: [
+            {
+                publicHostCode: 'fi_standard',
+                publicName: '\u{1F1EB}\u{1F1EE} Finland',
+                locationCode: 'FI',
+                planCode: 'standard',
+                nodes: [
+                    {
+                        technicalHostName: 'FI-STD-01',
+                        weight: 1,
+                        maxUsers: 300,
+                        status: 'active',
+                    },
+                ],
+            },
+        ],
+    };
+    const result = processSubscriptionWithHashBalancer({
+        shortUuid: 'abc123',
+        body: complexRealityLink,
+        config: singleNodeConfig,
+    });
+    const diff = buildMaskedVlessDiff(complexRealityLink, result.body);
+
+    assert.equal(diff.length, 1);
+    assert.deepEqual(diff[0].changedFields, ['remark']);
+    assert.equal(parseSubscription(result.body).links[0].pbk, 'veryPublicRealityKeyValue');
+    assert.equal(parseSubscription(result.body).links[0].sid, '1234abcd');
+});
+
+test('subscription response headers do not forward stale content-encoding', () => {
+    assert.equal(IGNORED_HEADERS.has('content-encoding'), true);
+    assert.equal(IGNORED_HEADERS.has('content-length'), true);
+    assert.equal(IGNORED_HEADERS.has('transfer-encoding'), true);
+});
+
 test('hash balancer leaves HTML and JSON bodies unchanged', () => {
     const htmlBody = '<!doctype html><html><body>subscription page</body></html>';
     const jsonBody = '{"links":[]}';
@@ -652,6 +792,78 @@ test('ToporBalancerService fails open when enabled processing throws', async () 
     });
 
     assert.equal(result, originalBody);
+});
+
+test('subscription diagnostics validates generated VLESS links without exposing secrets', async () => {
+    const repository = InMemoryToporBalancerRepository.fromConfig(balancerConfig);
+    const diagnosticBody = [
+        'vless://44444444-4444-4444-8444-444444444444@fi.example.com:443?security=reality&type=tcp&sni=example.com&fp=chrome&pbk=secret-public-key&sid=abcd#FI-STD-01',
+        'vless://55555555-5555-4555-8555-555555555555@de.example.com:443?security=reality&type=tcp&sni=example.com&fp=chrome&pbk=secret-public-key&sid=abcd#DE-STD-01',
+    ].join('\n');
+    const service = new ToporBalancerService(
+        createConfigServiceStub({
+            TOPOR_BALANCER_ASSIGNMENT_MODE: 'database',
+            TOPOR_BALANCER_DATABASE_URL: 'postgres://unit-test',
+            TOPOR_BALANCER_DEBUG: false,
+        }),
+        ({
+            getSubscription: async () => ({
+                response: Buffer.from(diagnosticBody, 'utf8').toString('base64'),
+                headers: {
+                    'content-type': 'text/plain',
+                },
+            }),
+        } as unknown) as AxiosService,
+    );
+
+    setServiceRepository(service, repository);
+
+    const result = await service.diagnoseSubscription({
+        shortUuid: 'diagnostic-user',
+        userAgent: 'v2RayTun/6.0',
+    });
+    const serializedResult = JSON.stringify(result);
+
+    assert.equal(result.ok, true);
+    assert.equal(result.format, 'base64');
+    assert.equal(result.inputLinksCount, 2);
+    assert.equal(result.outputLinksCount, 2);
+    assert.equal(result.groups.find((group) => group.publicHostCode === 'fi_standard')?.status, 'ok');
+    assert.equal(result.vlessValidation.every((item) => item.valid), true);
+    assert.ok(!serializedResult.includes('44444444-4444-4444-8444-444444444444'));
+    assert.ok(!serializedResult.includes('secret-public-key'));
+    assert.ok(!serializedResult.includes('sid=abcd'));
+});
+
+test('subscription diagnostics reports invalid generated VLESS links', async () => {
+    const repository = InMemoryToporBalancerRepository.fromConfig(balancerConfig);
+    const service = new ToporBalancerService(
+        createConfigServiceStub({
+            TOPOR_BALANCER_ASSIGNMENT_MODE: 'database',
+            TOPOR_BALANCER_DATABASE_URL: 'postgres://unit-test',
+            TOPOR_BALANCER_DEBUG: false,
+        }),
+        ({
+            getSubscription: async () => ({
+                response: buildVlessLink('FI-STD-01'),
+                headers: {
+                    'content-type': 'text/plain',
+                },
+            }),
+        } as unknown) as AxiosService,
+    );
+
+    setServiceRepository(service, repository);
+
+    const result = await service.diagnoseSubscription({
+        shortUuid: 'diagnostic-user',
+        userAgent: 'v2rayNG/1.9.0',
+    });
+
+    assert.equal(result.ok, false);
+    assert.equal(result.vlessValidation[0].valid, false);
+    assert.ok(result.vlessValidation[0].warnings.some((warning) => warning.includes('fp')));
+    assert.ok(result.errors.some((error) => error.includes('Некорректная VLESS-ссылка')));
 });
 
 test('database balancer creates a new assignment', async () => {
@@ -1037,7 +1249,124 @@ test('subscription discovery parses plain and base64 VLESS subscriptions without
     assert.equal(base64Response.items.length, 2);
 });
 
-test('discovery import creates and updates nodes without duplicates', async () => {
+test('subscription discovery normalizes technicalHostName before matching imported nodes', async () => {
+    const plainBody = [
+        replaceVlessRemark(buildVlessLink('FI-STD-01'), ' FI-STD-01 '),
+    ].join('\n');
+    const repository = new InMemoryToporBalancerRepository();
+    await repository.createNode({
+        technicalHostName: 'FI-STD-01',
+        publicHostCode: 'fi_standard',
+        publicName: 'Finland',
+        planCode: 'standard',
+        weight: 1,
+        maxUsers: 300,
+        status: 'active',
+    });
+    const service = new ToporBalancerDiscoveryService(
+        {
+            getSubscription: async () => ({
+                headers: {
+                    'content-type': 'text/plain',
+                },
+                response: plainBody,
+            }),
+        } as never,
+        createConfigServiceStub({
+            REMNAWAVE_PANEL_URL: 'https://panel.example.com',
+        }) as never,
+        {
+            listAdminNodes: () => repository.listNodes(),
+        } as never,
+    );
+
+    const response = await service.discoverFromSubscription('short-uuid');
+
+    assert.equal(response.items.length, 1);
+    assert.equal(response.items[0].technicalHostName, 'FI-STD-01');
+    assert.equal(response.items[0].rawRemark, ' FI-STD-01 ');
+    assert.equal(response.items[0].alreadyImported, true);
+    assert.equal(response.items[0].matchedNodeId, 'FI-STD-01');
+});
+
+test('discovery import into existing group creates selected nodes', async () => {
+    const repository = new InMemoryToporBalancerRepository();
+    const service = new ToporBalancerService(
+        createConfigServiceStub({
+            TOPOR_BALANCER_DATABASE_URL: 'postgres://unit-test',
+        }),
+    );
+
+    setServiceRepository(service, repository);
+    const group = await service.createAdminGroup({
+        enabled: true,
+        locationCode: 'FI',
+        planCode: 'standard',
+        publicHostCode: 'fi_standard',
+        publicName: 'Finland',
+        strategy: 'least_loaded',
+    });
+
+    const result = await service.importDiscoveredNodes({
+        groupId: group.id,
+        nodes: [
+            {
+                technicalHostName: 'FI-STD-01',
+                weight: 1,
+                maxUsers: 300,
+                status: 'active',
+            },
+        ],
+    });
+    const nodes = await repository.listNodes();
+
+    assert.equal(result.created.length, 1);
+    assert.equal(result.created[0].groupId, group.id);
+    assert.equal(nodes.length, 1);
+    assert.deepEqual(result.skipped, []);
+    assert.deepEqual(result.conflicts, []);
+    assert.deepEqual(result.errors, []);
+});
+
+test('discovery import creates a new group from group payload', async () => {
+    const repository = new InMemoryToporBalancerRepository();
+    const service = new ToporBalancerService(
+        createConfigServiceStub({
+            TOPOR_BALANCER_DATABASE_URL: 'postgres://unit-test',
+        }),
+    );
+
+    setServiceRepository(service, repository);
+
+    const result = await service.importDiscoveredNodes({
+        group: {
+            locationCode: 'FI',
+            planCode: 'standard',
+            publicHostCode: 'fi_standard',
+            publicName: 'Finland',
+        },
+        nodes: [
+            {
+                technicalHostName: 'FI-STD-01',
+                weight: 1,
+                maxUsers: 300,
+                status: 'active',
+            },
+        ],
+    });
+    const groups = await service.listAdminGroups();
+    const nodes = await repository.listNodes();
+
+    assert.equal(groups.length, 1);
+    assert.equal(groups[0].publicHostCode, 'fi_standard');
+    assert.equal(result.created.length, 1);
+    assert.equal(nodes.length, 1);
+    assert.equal(nodes[0].groupId, groups[0].id);
+    assert.deepEqual(result.conflicts, []);
+    assert.deepEqual(result.errors, []);
+});
+
+test('discovery import trims technicalHostName and imports multiple nodes idempotently', async () => {
     const repository = new InMemoryToporBalancerRepository();
     const service = new ToporBalancerService(
         createConfigServiceStub({
@@ -1054,7 +1383,13 @@ test('discovery import creates and updates nodes without duplicates', async () =
         planCode: 'standard',
         nodes: [
             {
-                technicalHostName: 'FI-STD-01',
+                technicalHostName: ' FI-STD-01 ',
+                weight: 1,
+                maxUsers: 300,
+                status: 'active',
+            },
+            {
+                technicalHostName: 'FI-STD-02',
                 weight: 1,
                 maxUsers: 300,
                 status: 'active',
@@ -1071,18 +1406,110 @@ test('discovery import creates and updates nodes without duplicates', async () =
                 technicalHostName: 'FI-STD-01',
                 weight: 2,
                 maxUsers: 500,
-                status: 'draining',
+                status: 'active',
+            },
+            {
+                technicalHostName: 'FI-STD-02',
+                weight: 2,
+                maxUsers: 500,
+                status: 'active',
             },
         ],
     });
     const nodes = await repository.listNodes();
 
-    assert.equal(firstResult.created.length, 1);
-    assert.equal(secondResult.updated.length, 1);
-    assert.equal(nodes.length, 1);
-    assert.equal(nodes[0].weight, 2);
-    assert.equal(nodes[0].maxUsers, 500);
-    assert.equal(nodes[0].status, 'draining');
+    assert.equal(firstResult.created.length, 2);
+    assert.equal(secondResult.created.length, 0);
+    assert.equal(secondResult.updated.length, 0);
+    assert.equal(secondResult.skipped.length, 2);
+    assert.equal(nodes.length, 2);
+    assert.deepEqual(
+        nodes.map((node) => node.technicalHostName).sort(),
+        ['FI-STD-01', 'FI-STD-02'],
+    );
+});
+
+test('discovery import reports cross-group technicalHostName conflicts', async () => {
+    const repository = InMemoryToporBalancerRepository.fromConfig(balancerConfig);
+    const service = new ToporBalancerService(
+        createConfigServiceStub({
+            TOPOR_BALANCER_DATABASE_URL: 'postgres://unit-test',
+        }),
+    );
+
+    setServiceRepository(service, repository);
+
+    const targetGroup = await service.createAdminGroup({
+        enabled: true,
+        locationCode: 'FI',
+        planCode: 'premium',
+        publicHostCode: 'fi_premium',
+        publicName: 'Finland Premium',
+        strategy: 'least_loaded',
+    });
+    const result = await service.importDiscoveredNodes({
+        groupId: targetGroup.id,
+        nodes: [
+            {
+                technicalHostName: 'FI-STD-01',
+                weight: 1,
+                maxUsers: 300,
+                status: 'active',
+            },
+        ],
+    });
+
+    assert.equal(result.created.length, 0);
+    assert.equal(result.conflicts.length, 1);
+    assert.equal(result.conflicts[0].technicalHostName, 'FI-STD-01');
+    assert.equal(result.conflicts[0].existingPublicHostCode, 'fi_standard');
+    assert.equal(result.conflicts[0].existingPlanCode, 'standard');
+});
+
+test('discovery import rejects missing required group and node fields', async () => {
+    const repository = new InMemoryToporBalancerRepository();
+    const service = new ToporBalancerService(
+        createConfigServiceStub({
+            TOPOR_BALANCER_DATABASE_URL: 'postgres://unit-test',
+        }),
+    );
+
+    setServiceRepository(service, repository);
+
+    await assert.rejects(
+        () =>
+            service.importDiscoveredNodes({
+                publicHostCode: '',
+                publicName: 'Finland',
+                planCode: 'standard',
+                nodes: [
+                    {
+                        technicalHostName: 'FI-STD-01',
+                        weight: 1,
+                        maxUsers: 300,
+                        status: 'active',
+                    },
+                ],
+            }),
+        /publicHostCode must be a non-empty string/,
+    );
+    await assert.rejects(
+        () =>
+            service.importDiscoveredNodes({
+                publicHostCode: 'fi_standard',
+                publicName: 'Finland',
+                planCode: 'standard',
+                nodes: [
+                    {
+                        technicalHostName: '   ',
+                        weight: 1,
+                        maxUsers: 300,
+                        status: 'active',
+                    },
+                ],
+            }),
+        /technicalHostName must be a non-empty string/,
+    );
 });
 
 test('admin service lists, updates, and manually reassigns nodes', async () => {
@@ -1173,6 +1600,96 @@ test('admin service creates nodes from UI payloads', async () => {
     assert.equal(node.technicalHostName, 'FI-STD-01');
     assert.equal(node.publicHostCode, 'fi_standard');
     assert.equal((await service.listAdminNodes()).length, 1);
+});
+
+test('admin service exposes migrated node rows as balancer groups', async () => {
+    const repository = InMemoryToporBalancerRepository.fromConfig(balancerConfig);
+    const service = new ToporBalancerService(
+        createConfigServiceStub({
+            TOPOR_BALANCER_DATABASE_URL: 'postgres://unit-test',
+        }),
+    );
+
+    setServiceRepository(service, repository);
+
+    const groups = await service.listAdminGroups();
+    const fiGroup = groups.find((group) => group.publicHostCode === 'fi_standard');
+
+    assert.ok(fiGroup);
+    assert.equal(fiGroup.planCode, 'standard');
+    assert.equal(fiGroup.nodesCount, 3);
+    assert.equal(fiGroup.activeNodesCount, 3);
+});
+
+test('admin service rejects duplicate balancer group creation', async () => {
+    const repository = InMemoryToporBalancerRepository.fromConfig(balancerConfig);
+    const service = new ToporBalancerService(
+        createConfigServiceStub({
+            TOPOR_BALANCER_DATABASE_URL: 'postgres://unit-test',
+        }),
+    );
+
+    setServiceRepository(service, repository);
+
+    await assert.rejects(
+        () =>
+            service.createAdminGroup({
+                enabled: true,
+                planCode: 'standard',
+                publicHostCode: 'fi_standard',
+                publicName: 'Finland',
+                strategy: 'least_loaded',
+            }),
+        /publicHostCode and planCode already exists/,
+    );
+});
+
+test('admin service creates technical nodes inside a group', async () => {
+    const repository = new InMemoryToporBalancerRepository();
+    const service = new ToporBalancerService(
+        createConfigServiceStub({
+            TOPOR_BALANCER_DATABASE_URL: 'postgres://unit-test',
+        }),
+    );
+
+    setServiceRepository(service, repository);
+
+    const group = await service.createAdminGroup({
+        enabled: true,
+        locationCode: 'FI',
+        planCode: 'standard',
+        publicHostCode: 'fi_standard',
+        publicName: 'Finland',
+        strategy: 'least_loaded',
+    });
+    const node = await service.createAdminGroupNode(group.id, {
+        maxUsers: 300,
+        status: 'active',
+        technicalHostName: 'FI-STD-01',
+        weight: 1,
+    });
+
+    assert.equal(node.groupId, group.id);
+    assert.equal(node.publicHostCode, 'fi_standard');
+    assert.equal(node.publicName, 'Finland');
+    assert.equal(node.locationCode, 'FI');
+    assert.equal(node.planCode, 'standard');
+});
+
+test('admin service rejects deleting a group with nodes', async () => {
+    const repository = InMemoryToporBalancerRepository.fromConfig(balancerConfig);
+    const service = new ToporBalancerService(
+        createConfigServiceStub({
+            TOPOR_BALANCER_DATABASE_URL: 'postgres://unit-test',
+        }),
+    );
+
+    setServiceRepository(service, repository);
+
+    await assert.rejects(
+        () => service.deleteAdminGroup('fi_standard:standard'),
+        /group has nodes and cannot be deleted/,
+    );
 });
 
 test('admin service rejects invalid node creation', async () => {
@@ -1380,15 +1897,31 @@ function setServiceRepository(
 class InMemoryToporBalancerRepository implements ToporBalancerAssignmentRepository {
     public readonly assignments = new Map<string, string>();
     public readonly requests: ToporBalancerRequestLogInput[] = [];
+    private readonly groups = new Map<string, ToporBalancerAdminGroup>();
     private readonly nodes = new Map<string, ToporBalancerDbNode>();
 
     public static fromConfig(config: ToporBalancerConfig): InMemoryToporBalancerRepository {
         const repository = new InMemoryToporBalancerRepository();
 
         for (const location of config.locations) {
+            const groupId = groupKey(location.publicHostCode, location.planCode);
+            repository.groups.set(groupId, {
+                id: groupId,
+                activeNodesCount: location.nodes.filter((node) => node.status === 'active').length,
+                assignedUsers: 0,
+                enabled: true,
+                locationCode: location.locationCode,
+                nodesCount: location.nodes.length,
+                planCode: location.planCode,
+                publicHostCode: location.publicHostCode,
+                publicName: location.publicName,
+                strategy: 'least_loaded',
+            });
+
             for (const node of location.nodes) {
                 repository.nodes.set(node.technicalHostName, {
                     id: node.technicalHostName,
+                    groupId,
                     technicalHostName: node.technicalHostName,
                     publicHostCode: location.publicHostCode,
                     publicName: location.publicName,
@@ -1432,6 +1965,172 @@ class InMemoryToporBalancerRepository implements ToporBalancerAssignmentReposito
         return this.requests.length;
     }
 
+    public async listGroups(): Promise<ToporBalancerAdminGroup[]> {
+        return Array.from(this.groups.values()).map((group) => {
+            const groupNodes = Array.from(this.nodes.values()).filter(
+                (node) => node.groupId === group.id,
+            );
+
+            return {
+                ...group,
+                activeNodesCount: groupNodes.filter((node) => node.status === 'active').length,
+                assignedUsers: groupNodes.reduce(
+                    (total, node) => total + this.countAssignmentsForNode(node.id),
+                    0,
+                ),
+                nodesCount: groupNodes.length,
+            };
+        });
+    }
+
+    public async createGroup(
+        input: ToporBalancerGroupCreateInput,
+    ): Promise<ToporBalancerAdminGroup | null> {
+        const id = groupKey(input.publicHostCode, input.planCode);
+
+        if (this.groups.has(id)) {
+            return null;
+        }
+
+        const group: ToporBalancerAdminGroup = {
+            id,
+            activeNodesCount: 0,
+            assignedUsers: 0,
+            enabled: input.enabled,
+            locationCode: input.locationCode,
+            nodesCount: 0,
+            planCode: input.planCode,
+            publicHostCode: input.publicHostCode,
+            publicName: input.publicName,
+            strategy: input.strategy,
+        };
+
+        this.groups.set(id, group);
+
+        return group;
+    }
+
+    public async updateGroup(
+        id: string,
+        input: ToporBalancerGroupUpdateInput,
+    ): Promise<ToporBalancerAdminGroup | null> {
+        const group = this.groups.get(id);
+
+        if (!group) {
+            return null;
+        }
+
+        Object.assign(group, {
+            enabled: input.enabled ?? group.enabled,
+            locationCode: input.locationCode ?? group.locationCode,
+            planCode: input.planCode ?? group.planCode,
+            publicHostCode: input.publicHostCode ?? group.publicHostCode,
+            publicName: input.publicName ?? group.publicName,
+            strategy: input.strategy ?? group.strategy,
+        });
+
+        for (const node of this.nodes.values()) {
+            if (node.groupId === id) {
+                node.locationCode = group.locationCode;
+                node.planCode = group.planCode;
+                node.publicHostCode = group.publicHostCode;
+                node.publicName = group.publicName;
+            }
+        }
+
+        return (await this.listGroups()).find((item) => item.id === id) ?? null;
+    }
+
+    public async deleteGroup(id: string): Promise<ToporBalancerGroupDeleteResult> {
+        if (!this.groups.has(id)) {
+            return 'not_found';
+        }
+
+        if (Array.from(this.nodes.values()).some((node) => node.groupId === id)) {
+            return 'has_nodes';
+        }
+
+        this.groups.delete(id);
+
+        return 'deleted';
+    }
+
+    public async listGroupNodes(groupId: string): Promise<ToporBalancerAdminNode[] | null> {
+        if (!this.groups.has(groupId)) {
+            return null;
+        }
+
+        return (await this.listNodes()).filter((node) => node.groupId === groupId);
+    }
+
+    public async createGroupNode(
+        groupId: string,
+        input: ToporBalancerGroupNodeCreateInput,
+    ): Promise<ToporBalancerAdminNode | null> {
+        const group = this.groups.get(groupId);
+
+        if (!group) {
+            return null;
+        }
+
+        if (
+            Array.from(this.nodes.values()).some(
+                (node) =>
+                    node.groupId === groupId &&
+                    node.technicalHostName === input.technicalHostName,
+            )
+        ) {
+            return null;
+        }
+
+        const node: ToporBalancerDbNode = {
+            id: input.technicalHostName,
+            groupId,
+            locationCode: group.locationCode,
+            maxUsers: input.maxUsers,
+            planCode: group.planCode,
+            publicHostCode: group.publicHostCode,
+            publicName: group.publicName,
+            status: input.status,
+            technicalHostName: input.technicalHostName,
+            weight: input.weight,
+        };
+
+        this.nodes.set(node.id, node);
+
+        return {
+            ...node,
+            assignedUsers: 0,
+        };
+    }
+
+    public async updateGroupNode(
+        groupId: string,
+        nodeId: string,
+        input: ToporBalancerNodeUpdateInput,
+    ): Promise<ToporBalancerAdminNode | null> {
+        const node = this.nodes.get(nodeId);
+
+        if (!node || node.groupId !== groupId) {
+            return null;
+        }
+
+        return this.updateNode(nodeId, input);
+    }
+
+    public async deleteGroupNode(
+        groupId: string,
+        nodeId: string,
+    ): Promise<ToporBalancerNodeDeleteResult> {
+        const node = this.nodes.get(nodeId);
+
+        if (!node || node.groupId !== groupId) {
+            return 'not_found';
+        }
+
+        return this.deleteNode(nodeId);
+    }
+
     public async listNodes(): Promise<ToporBalancerAdminNode[]> {
         return Array.from(this.nodes.values()).map((node) => ({
             ...node,
@@ -1442,12 +2141,32 @@ class InMemoryToporBalancerRepository implements ToporBalancerAssignmentReposito
     public async createNode(
         input: ToporBalancerNodeCreateInput,
     ): Promise<ToporBalancerAdminNode | null> {
-        if (this.nodes.has(input.technicalHostName)) {
+        const groupId = input.groupId ?? groupKey(input.publicHostCode, input.planCode);
+
+        if (!this.groups.has(groupId)) {
+            await this.createGroup({
+                enabled: true,
+                locationCode: input.locationCode,
+                planCode: input.planCode,
+                publicHostCode: input.publicHostCode,
+                publicName: input.publicName,
+                strategy: 'least_loaded',
+            });
+        }
+
+        if (
+            Array.from(this.nodes.values()).some(
+                (node) =>
+                    node.groupId === groupId &&
+                    node.technicalHostName === input.technicalHostName,
+            )
+        ) {
             return null;
         }
 
         const node: ToporBalancerDbNode = {
             id: input.technicalHostName,
+            groupId,
             technicalHostName: input.technicalHostName,
             publicHostCode: input.publicHostCode,
             publicName: input.publicName,
@@ -1722,4 +2441,8 @@ class InMemoryToporBalancerRepository implements ToporBalancerAssignmentReposito
 
 function assignmentKey(shortUuid: string, publicHostCode: string, planCode: string): string {
     return `${shortUuid}:${publicHostCode}:${planCode}`;
+}
+
+function groupKey(publicHostCode: string, planCode: string): string {
+    return `${publicHostCode}:${planCode}`;
 }

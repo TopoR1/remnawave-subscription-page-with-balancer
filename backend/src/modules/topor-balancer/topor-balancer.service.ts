@@ -10,9 +10,14 @@ import {
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 
+import { AxiosService } from '../../common/axios';
+
 import type {
     ToporBalancerAssignmentFilters,
     ToporBalancerAssignmentRepository,
+    ToporBalancerGroupCreateInput,
+    ToporBalancerGroupNodeCreateInput,
+    ToporBalancerGroupUpdateInput,
     ToporBalancerManualReassignInput,
     ToporBalancerNodeCreateInput,
     ToporBalancerNodeUpdateInput,
@@ -20,6 +25,7 @@ import type {
 } from './topor-balancer-database.repository';
 import type {
     ToporBalancerAdminHealth,
+    ToporBalancerAdminGroup,
     ToporBalancerAdminNode,
     ToporBalancerAdminRequest,
     ToporBalancerBootstrap,
@@ -28,13 +34,25 @@ import type {
     ToporBalancerDbAssignment,
     ToporBalancerDiscoveryImportInput,
     ToporBalancerDiscoveryImportResult,
+    ToporBalancerDebugProcessSubscriptionResult,
+    ToporBalancerGroupStrategy,
     ToporBalancerNodeStatus,
+    ToporBalancerProcessResult,
+    ToporBalancerSubscriptionDiagnosticsFormat,
+    ToporBalancerSubscriptionDiagnosticsResult,
 } from './types';
 
 import { processSubscriptionWithDatabaseBalancer } from './topor-balancer-database.processor';
 import { ToporBalancerPostgresRepository } from './topor-balancer-database.repository';
 import { processSubscriptionWithHashBalancer } from './topor-balancer-hash.processor';
 import { loadToporBalancerConfigFromFile } from './topor-balancer-config.loader';
+import {
+    decodeSubscriptionBody,
+    detectSubscriptionFormat,
+    extractVlessLinks,
+    parseVlessLink,
+} from './topor-balancer-subscription.parser';
+import { buildMaskedVlessDiff } from './topor-balancer-subscription.diagnostics';
 
 interface ToporBalancerProcessInput {
     shortUuid: string;
@@ -51,13 +69,18 @@ const ADMIN_NODE_STATUSES = new Set<ToporBalancerNodeStatus>([
     'draining',
 ]);
 
+const ADMIN_GROUP_STRATEGIES = new Set<ToporBalancerGroupStrategy>(['least_loaded']);
+
 @Injectable()
 export class ToporBalancerService implements OnModuleDestroy, OnModuleInit {
     private readonly logger = new Logger(ToporBalancerService.name);
     private repository: ToporBalancerAssignmentRepository | null = null;
     private startupConfig: ToporBalancerConfig | null = null;
 
-    constructor(private readonly configService: ConfigService) {}
+    constructor(
+        private readonly configService: ConfigService,
+        private readonly axiosService?: AxiosService,
+    ) {}
 
     public async onModuleInit(): Promise<void> {
         if (!this.isEnabled() || this.getAssignmentMode() !== 'database') {
@@ -239,6 +262,144 @@ export class ToporBalancerService implements OnModuleDestroy, OnModuleInit {
         };
     }
 
+    public async listAdminGroups(): Promise<ToporBalancerAdminGroup[]> {
+        return this.getAdminRepository().listGroups();
+    }
+
+    public async createAdminGroup(
+        input: ToporBalancerGroupCreateInput,
+    ): Promise<ToporBalancerAdminGroup> {
+        this.validateGroupCreate(input);
+
+        const group = await this.getAdminRepository().createGroup({
+            enabled: input.enabled ?? true,
+            locationCode: this.normalizeOptionalString(input.locationCode),
+            planCode: input.planCode.trim(),
+            publicHostCode: input.publicHostCode.trim(),
+            publicName: input.publicName.trim(),
+            strategy: input.strategy ?? 'least_loaded',
+        });
+
+        if (!group) {
+            throw new ConflictException(
+                'TopoR balancer group publicHostCode and planCode already exists',
+            );
+        }
+
+        return group;
+    }
+
+    public async updateAdminGroup(
+        id: string,
+        input: ToporBalancerGroupUpdateInput,
+    ): Promise<ToporBalancerAdminGroup> {
+        this.validateGroupUpdate(input);
+
+        const group = await this.getAdminRepository().updateGroup(id, {
+            enabled: input.enabled,
+            locationCode:
+                input.locationCode === undefined
+                    ? undefined
+                    : this.normalizeOptionalString(input.locationCode),
+            planCode: this.normalizeOptionalString(input.planCode),
+            publicHostCode: this.normalizeOptionalString(input.publicHostCode),
+            publicName: this.normalizeOptionalString(input.publicName),
+            strategy: input.strategy,
+        });
+
+        if (!group) {
+            throw new NotFoundException('TopoR balancer group not found');
+        }
+
+        return group;
+    }
+
+    public async deleteAdminGroup(id: string): Promise<{ deleted: true }> {
+        const result = await this.getAdminRepository().deleteGroup(id);
+
+        if (result === 'has_nodes') {
+            throw new ConflictException('TopoR balancer group has nodes and cannot be deleted');
+        }
+
+        if (result === 'not_found') {
+            throw new NotFoundException('TopoR balancer group not found');
+        }
+
+        return { deleted: true };
+    }
+
+    public async listAdminGroupNodes(groupId: string): Promise<ToporBalancerAdminNode[]> {
+        const nodes = await this.getAdminRepository().listGroupNodes(groupId);
+
+        if (!nodes) {
+            throw new NotFoundException('TopoR balancer group not found');
+        }
+
+        return nodes;
+    }
+
+    public async createAdminGroupNode(
+        groupId: string,
+        input: ToporBalancerGroupNodeCreateInput,
+    ): Promise<ToporBalancerAdminNode> {
+        this.validateGroupNodeCreate(input);
+
+        const node = await this.getAdminRepository().createGroupNode(groupId, {
+            maxUsers: input.maxUsers ?? 300,
+            status: input.status ?? 'active',
+            technicalHostName: input.technicalHostName.trim(),
+            weight: input.weight ?? 1,
+        });
+
+        if (!node) {
+            throw new ConflictException(
+                'TopoR balancer group node already exists or group was not found',
+            );
+        }
+
+        return node;
+    }
+
+    public async updateAdminGroupNode(
+        groupId: string,
+        nodeId: string,
+        input: ToporBalancerNodeUpdateInput,
+    ): Promise<ToporBalancerAdminNode> {
+        this.validateNodeUpdate({
+            maxUsers: input.maxUsers,
+            status: input.status,
+            technicalHostName: input.technicalHostName,
+            weight: input.weight,
+        });
+
+        const node = await this.getAdminRepository().updateGroupNode(groupId, nodeId, input);
+
+        if (!node) {
+            throw new NotFoundException('TopoR balancer group node not found');
+        }
+
+        return node;
+    }
+
+    public async deleteAdminGroupNode(
+        groupId: string,
+        nodeId: string,
+    ): Promise<{ deleted: true }> {
+        const result = await this.getAdminRepository().deleteGroupNode(groupId, nodeId);
+
+        if (result === 'has_assignments') {
+            throw new ConflictException(
+                'TopoR balancer node has assignments and cannot be deleted',
+            );
+        }
+
+        if (result === 'not_found') {
+            throw new NotFoundException('TopoR balancer group node not found');
+        }
+
+        return { deleted: true };
+    }
+
     public async listAdminNodes(): Promise<ToporBalancerAdminNode[]> {
         return this.getAdminRepository().listNodes();
     }
@@ -343,24 +504,426 @@ export class ToporBalancerService implements OnModuleDestroy, OnModuleInit {
     ): Promise<ToporBalancerDiscoveryImportResult> {
         this.validateDiscoveryImport(input);
 
+        const repository = this.getAdminRepository();
+        const targetGroup = await this.resolveDiscoveryImportGroup(input);
+        const existingNodes = await repository.listNodes();
+        const created: ToporBalancerAdminNode[] = [];
+        const skipped: ToporBalancerDiscoveryImportResult['skipped'] = [];
+        const errors: ToporBalancerDiscoveryImportResult['errors'] = [];
+        const conflicts: ToporBalancerDiscoveryImportResult['conflicts'] = [];
         const normalizedNodes = input.nodes.map((node) => ({
             technicalHostName: node.technicalHostName.trim(),
-            publicHostCode: input.publicHostCode.trim(),
-            publicName: input.publicName.trim(),
-            locationCode: this.normalizeOptionalString(input.locationCode),
-            planCode: input.planCode.trim(),
             weight: node.weight,
             maxUsers: node.maxUsers,
             status: node.status,
         }));
 
-        const result = await this.getAdminRepository().upsertImportedNodes(normalizedNodes);
+        for (const node of normalizedNodes) {
+            const existingNode = existingNodes.find(
+                (item) => item.technicalHostName === node.technicalHostName,
+            );
+
+            if (existingNode?.groupId === targetGroup.id) {
+                skipped.push({
+                    technicalHostName: node.technicalHostName,
+                    reason: 'Technical node already exists in target group',
+                });
+                continue;
+            }
+
+            if (existingNode) {
+                conflicts.push({
+                    technicalHostName: node.technicalHostName,
+                    reason: 'Technical node already exists in another group',
+                    existingGroupId: existingNode.groupId,
+                    existingPublicHostCode: existingNode.publicHostCode,
+                    existingPlanCode: existingNode.planCode,
+                    existingPublicName: existingNode.publicName,
+                });
+                continue;
+            }
+
+            const createdNode = await repository.createGroupNode(targetGroup.id, node);
+
+            if (createdNode) {
+                created.push(createdNode);
+                existingNodes.push(createdNode);
+            } else {
+                errors.push({
+                    technicalHostName: node.technicalHostName,
+                    reason: 'Technical node could not be imported',
+                });
+            }
+        }
 
         return {
-            created: result.created,
-            updated: result.updated,
-            skipped: [],
+            created,
+            updated: [],
+            skipped,
+            errors,
+            conflicts,
         };
+    }
+
+    public async debugProcessSubscription(
+        shortUuid: string,
+    ): Promise<ToporBalancerDebugProcessSubscriptionResult> {
+        this.validateNonEmptyString(shortUuid, 'shortUuid');
+
+        if (!this.axiosService) {
+            throw new ServiceUnavailableException('Remnawave API service is not available');
+        }
+
+        const subscriptionDataResponse = await this.axiosService.getSubscription(
+            '127.0.0.1',
+            shortUuid.trim(),
+            {
+                'user-agent': 'v2rayNG/1.9.0 TopoR-Debug/1.0',
+            },
+        );
+
+        if (!subscriptionDataResponse) {
+            throw new NotFoundException('Subscription was not found in Remnawave');
+        }
+
+        const inputBody = this.stringifySupportedBody(subscriptionDataResponse.response);
+
+        if (inputBody === null) {
+            return {
+                inputLinksCount: 0,
+                outputLinksCount: 0,
+                selectedNodes: {},
+                warnings: ['Subscription body is not a string or Buffer.'],
+                maskedDiff: [],
+            };
+        }
+
+        const contentType = this.extractHeader(subscriptionDataResponse.headers, 'content-type');
+        const warnings: string[] = [];
+        let result: ToporBalancerProcessResult;
+
+        try {
+            result =
+                this.getAssignmentMode() === 'database'
+                    ? ((await this.processWithDatabase(
+                          {
+                              shortUuid: shortUuid.trim(),
+                              body: inputBody,
+                              contentType,
+                              requestPath: `/api/topor-balancer/debug/process-subscription`,
+                              userAgent: 'v2rayNG/1.9.0 TopoR-Debug/1.0',
+                          },
+                          inputBody,
+                      )) as ToporBalancerProcessResult)
+                    : processSubscriptionWithHashBalancer({
+                          shortUuid: shortUuid.trim(),
+                          body: inputBody,
+                          contentType,
+                          requestPath: `/api/topor-balancer/debug/process-subscription`,
+                          userAgent: 'v2rayNG/1.9.0 TopoR-Debug/1.0',
+                          config: await this.loadConfig(),
+                          debug: this.configService.getOrThrow<boolean>('TOPOR_BALANCER_DEBUG'),
+                          logger: (message) => this.logger.log(message),
+                      });
+        } catch (error) {
+            this.logger.error(
+                'TopoR balancer debug processing failed; comparing original response',
+                error,
+            );
+            warnings.push('Processing failed; original subscription was used for diagnostics.');
+            result = {
+                body: inputBody,
+                debugInfo: {
+                    shortUuid: shortUuid.trim(),
+                    detectedFormat: detectSubscriptionFormat(inputBody, contentType),
+                    totalVlessLinks: extractVlessLinks(
+                        decodeSubscriptionBody(
+                            inputBody,
+                            detectSubscriptionFormat(inputBody, contentType),
+                        ),
+                    ).length,
+                    matchedTechnicalLinks: 0,
+                    selectedNodes: {},
+                    outputLinkCount: 0,
+                },
+            };
+        }
+
+        const outputBody = result.body;
+        const inputFormat = detectSubscriptionFormat(inputBody, contentType);
+        const outputFormat = detectSubscriptionFormat(outputBody, contentType);
+        const inputPlainBody = decodeSubscriptionBody(inputBody, inputFormat);
+        const outputPlainBody = decodeSubscriptionBody(outputBody, outputFormat);
+        const inputLinksCount = extractVlessLinks(inputPlainBody).length;
+        const outputLinksCount = extractVlessLinks(outputPlainBody).length;
+        warnings.push(...(result.debugInfo.warnings ?? []));
+
+        if (inputFormat !== outputFormat) {
+            warnings.push(`Subscription format changed from ${inputFormat} to ${outputFormat}.`);
+        }
+
+        if (inputLinksCount > 0 && outputLinksCount === 0) {
+            warnings.push('Processed subscription contains no valid VLESS links.');
+        }
+
+        return {
+            inputLinksCount,
+            outputLinksCount,
+            selectedNodes: result.debugInfo.selectedNodes,
+            warnings,
+            maskedDiff: buildMaskedVlessDiff(inputPlainBody, outputPlainBody),
+        };
+    }
+
+    public async diagnoseSubscription(input: {
+        shortUuid: string;
+        userAgent?: string;
+    }): Promise<ToporBalancerSubscriptionDiagnosticsResult> {
+        this.validateNonEmptyString(input.shortUuid, 'shortUuid');
+
+        if (!this.axiosService) {
+            throw new ServiceUnavailableException('Remnawave API service is not available');
+        }
+
+        const normalizedShortUuid = input.shortUuid.trim();
+        const userAgent = input.userAgent?.trim() || 'v2rayNG/1.9.0 TopoR-Diagnostics/1.0';
+        const subscriptionDataResponse = await this.axiosService.getSubscription(
+            '127.0.0.1',
+            normalizedShortUuid,
+            {
+                'user-agent': userAgent,
+            },
+        );
+
+        if (!subscriptionDataResponse) {
+            throw new NotFoundException('Subscription was not found in Remnawave');
+        }
+
+        const inputBody = this.stringifySupportedBody(subscriptionDataResponse.response);
+
+        if (inputBody === null) {
+            return {
+                ok: false,
+                format: 'unknown',
+                inputLinksCount: 0,
+                outputLinksCount: 0,
+                groups: [],
+                vlessValidation: [],
+                warnings: [],
+                errors: ['Тело подписки не является строкой или Buffer.'],
+            };
+        }
+
+        const contentType = this.extractHeader(subscriptionDataResponse.headers, 'content-type');
+        const warnings: string[] = [];
+        const errors: string[] = [];
+        let result: ToporBalancerProcessResult;
+        let config: ToporBalancerConfig;
+
+        try {
+            if (this.getAssignmentMode() === 'database') {
+                const repository = this.getOrCreateRepository();
+
+                await repository.initializeSchema();
+                config = await this.getDatabaseProcessingConfig(repository);
+            } else {
+                config = await this.loadConfig();
+            }
+
+            result =
+                this.getAssignmentMode() === 'database'
+                    ? ((await this.processWithDatabase(
+                          {
+                              shortUuid: normalizedShortUuid,
+                              body: inputBody,
+                              contentType,
+                              requestPath: '/api/topor-balancer/diagnostics/subscription',
+                              userAgent,
+                          },
+                          inputBody,
+                      )) as ToporBalancerProcessResult)
+                    : processSubscriptionWithHashBalancer({
+                          shortUuid: normalizedShortUuid,
+                          body: inputBody,
+                          contentType,
+                          requestPath: '/api/topor-balancer/diagnostics/subscription',
+                          userAgent,
+                          config,
+                          debug: this.configService.getOrThrow<boolean>('TOPOR_BALANCER_DEBUG'),
+                          logger: (message) => this.logger.log(message),
+                      });
+        } catch (error) {
+            this.logger.error('TopoR balancer subscription diagnostics failed', error);
+            config = await this.loadConfig();
+            result = {
+                body: inputBody,
+                debugInfo: {
+                    shortUuid: normalizedShortUuid,
+                    detectedFormat: detectSubscriptionFormat(inputBody, contentType),
+                    totalVlessLinks: 0,
+                    matchedTechnicalLinks: 0,
+                    selectedNodes: {},
+                    outputLinkCount: 0,
+                    warnings: [
+                        'Обработка не удалась; для диагностики использована исходная подписка.',
+                    ],
+                },
+            };
+            warnings.push('Обработка не удалась; для диагностики использована исходная подписка.');
+        }
+
+        const inputFormat = detectSubscriptionFormat(inputBody, contentType);
+        const outputFormat = detectSubscriptionFormat(result.body, contentType);
+        const inputPlainBody = decodeSubscriptionBody(inputBody, inputFormat);
+        const outputPlainBody = decodeSubscriptionBody(result.body, outputFormat);
+        const inputLinksCount = extractVlessLinks(inputPlainBody).length;
+        const outputLinksCount = extractVlessLinks(outputPlainBody).length;
+        const vlessValidation = this.validateGeneratedVlessLinks(outputPlainBody);
+        const maskedDiff = buildMaskedVlessDiff(inputPlainBody, outputPlainBody);
+
+        warnings.push(...(result.debugInfo.warnings ?? []));
+
+        if (inputFormat === 'base64_links' && outputFormat !== 'base64_links') {
+            errors.push('Base64-ответ подписки не удалось корректно декодировать.');
+        }
+
+        if (inputLinksCount > 0 && outputLinksCount === 0) {
+            errors.push('В обработанной подписке нет валидных VLESS-ссылок.');
+        }
+
+        for (const validation of vlessValidation) {
+            if (!validation.valid) {
+                errors.push(`Некорректная VLESS-ссылка: ${validation.remark ?? 'без названия'}`);
+            }
+        }
+
+        if (maskedDiff.some((diff) => diff.changedFields.includes('queryParamKeys'))) {
+            errors.push('Набор query-параметров VLESS изменился после сериализации.');
+        }
+
+        return {
+            ok: errors.length === 0,
+            format: this.mapDiagnosticsFormat(outputFormat),
+            inputLinksCount,
+            outputLinksCount,
+            groups: this.buildDiagnosticsGroups(config, result.debugInfo.selectedNodes, inputPlainBody),
+            vlessValidation,
+            warnings: Array.from(new Set(warnings.map((warning) => this.translateDiagnosticsMessage(warning)))),
+            errors: Array.from(new Set(errors)),
+        };
+    }
+
+    private mapDiagnosticsFormat(
+        format: ReturnType<typeof detectSubscriptionFormat>,
+    ): ToporBalancerSubscriptionDiagnosticsFormat {
+        if (format === 'base64_links') {
+            return 'base64';
+        }
+
+        if (format === 'plain_links') {
+            return 'plain';
+        }
+
+        return 'unknown';
+    }
+
+    private buildDiagnosticsGroups(
+        config: ToporBalancerConfig,
+        selectedNodes: Record<string, string>,
+        inputPlainBody: string,
+    ): ToporBalancerSubscriptionDiagnosticsResult['groups'] {
+        const inputRemarks = new Set(
+            extractVlessLinks(inputPlainBody)
+                .map((link) => link.remark)
+                .filter((remark): remark is string => Boolean(remark)),
+        );
+
+        return config.locations.map((location) => {
+            const groupKey = `${location.publicHostCode}:${location.planCode}`;
+            const selectedTechnicalHostName = selectedNodes[groupKey];
+            const hasMatchingInputNode = location.nodes.some((node) =>
+                inputRemarks.has(node.technicalHostName),
+            );
+            const hasActiveNode = location.nodes.some((node) => node.status === 'active');
+
+            return {
+                publicHostCode: location.publicHostCode,
+                planCode: location.planCode,
+                ...(selectedTechnicalHostName ? { selectedTechnicalHostName } : {}),
+                status: selectedTechnicalHostName
+                    ? 'ok'
+                    : !hasActiveNode
+                      ? 'no-active-node'
+                      : hasMatchingInputNode
+                        ? 'fail-open'
+                        : 'fail-open',
+            };
+        });
+    }
+
+    private validateGeneratedVlessLinks(
+        outputPlainBody: string,
+    ): ToporBalancerSubscriptionDiagnosticsResult['vlessValidation'] {
+        return outputPlainBody
+            .split(/\r?\n/)
+            .map((line) => line.trim())
+            .filter((line) => line.startsWith('vless://'))
+            .map((line) => {
+                const parsedLink = parseVlessLink(line);
+
+                if (!parsedLink) {
+                    return {
+                        valid: false,
+                        warnings: ['VLESS URL не удалось разобрать.'],
+                        queryParamKeys: [],
+                    };
+                }
+
+                const warnings: string[] = [];
+
+                if (!parsedLink.uuid) {
+                    warnings.push('UUID отсутствует.');
+                }
+
+                if (!parsedLink.host) {
+                    warnings.push('Хост отсутствует.');
+                }
+
+                if (!parsedLink.port) {
+                    warnings.push('Порт отсутствует.');
+                }
+
+                if (parsedLink.security === 'reality') {
+                    for (const requiredParam of ['sni', 'fp', 'pbk', 'sid']) {
+                        if (!parsedLink.queryParams[requiredParam]) {
+                            warnings.push(`Параметр Reality ${requiredParam} отсутствует.`);
+                        }
+                    }
+                }
+
+                return {
+                    remark: parsedLink.remark,
+                    valid: warnings.length === 0,
+                    warnings,
+                    queryParamKeys: Object.keys(parsedLink.queryParams).sort(),
+                };
+            });
+    }
+
+    private translateDiagnosticsMessage(message: string): string {
+        const noActiveNodeMatch = message.match(
+            /^No active TopoR balancer node for (.+); preserving original links\.$/,
+        );
+
+        if (noActiveNodeMatch) {
+            return `Нет активной ноды TopoR Balancer для ${noActiveNodeMatch[1]}; исходные ссылки сохранены.`;
+        }
+
+        if (message === 'Processing failed; original subscription was used for diagnostics.') {
+            return 'Обработка не удалась; для диагностики использована исходная подписка.';
+        }
+
+        return message;
     }
 
     private async processWithDatabase(
@@ -424,6 +987,23 @@ export class ToporBalancerService implements OnModuleDestroy, OnModuleInit {
         }
 
         return null;
+    }
+
+    private extractHeader(headers: unknown, headerName: string): string | undefined {
+        if (!headers || typeof headers !== 'object') {
+            return undefined;
+        }
+
+        const normalizedHeaderName = headerName.toLowerCase();
+        const headerValue = Object.entries(headers as Record<string, unknown>).find(
+            ([key]) => key.toLowerCase() === normalizedHeaderName,
+        )?.[1];
+
+        if (Array.isArray(headerValue)) {
+            return headerValue.join(', ');
+        }
+
+        return typeof headerValue === 'string' ? headerValue : undefined;
     }
 
     private getOrCreateRepository(): ToporBalancerAssignmentRepository {
@@ -511,6 +1091,39 @@ export class ToporBalancerService implements OnModuleDestroy, OnModuleInit {
         return Array.from(hosts.values());
     }
 
+    private validateGroupCreate(input: ToporBalancerGroupCreateInput): void {
+        this.validateNonEmptyString(input.publicHostCode, 'publicHostCode');
+        this.validateNonEmptyString(input.publicName, 'publicName');
+        this.validateNonEmptyString(input.planCode, 'planCode');
+        this.validateGroupUpdate({
+            enabled: input.enabled,
+            strategy: input.strategy,
+        });
+    }
+
+    private validateGroupUpdate(input: ToporBalancerGroupUpdateInput): void {
+        this.validateOptionalNonEmptyString(input.publicHostCode, 'publicHostCode');
+        this.validateOptionalNonEmptyString(input.publicName, 'publicName');
+        this.validateOptionalNonEmptyString(input.planCode, 'planCode');
+
+        if (input.strategy !== undefined && !ADMIN_GROUP_STRATEGIES.has(input.strategy)) {
+            throw new BadRequestException('Invalid TopoR balancer group strategy');
+        }
+
+        if (input.enabled !== undefined && typeof input.enabled !== 'boolean') {
+            throw new BadRequestException('TopoR balancer group enabled must be a boolean');
+        }
+    }
+
+    private validateGroupNodeCreate(input: ToporBalancerGroupNodeCreateInput): void {
+        this.validateNonEmptyString(input.technicalHostName, 'technicalHostName');
+        this.validateNodeUpdate({
+            maxUsers: input.maxUsers ?? 300,
+            status: input.status ?? 'active',
+            weight: input.weight ?? 1,
+        });
+    }
+
     private validateNodeUpdate(input: ToporBalancerNodeUpdateInput): void {
         this.validateOptionalNonEmptyString(input.technicalHostName, 'technicalHostName');
         this.validateOptionalNonEmptyString(input.publicHostCode, 'publicHostCode');
@@ -554,9 +1167,30 @@ export class ToporBalancerService implements OnModuleDestroy, OnModuleInit {
             return this.startupConfig;
         }
 
-        const nodes = await repository.listNodes();
+        const groups = await repository.listGroups();
+        const locations: ToporBalancerConfig['locations'] = [];
 
-        return this.buildConfigFromAdminNodes(nodes);
+        for (const group of groups.filter((item) => item.enabled)) {
+            const nodes = (await repository.listGroupNodes(group.id)) ?? [];
+
+            locations.push({
+                locationCode: group.locationCode,
+                nodes: nodes.map((node) => ({
+                    maxUsers: node.maxUsers,
+                    status: node.status,
+                    technicalHostName: node.technicalHostName,
+                    weight: node.weight,
+                })),
+                planCode: group.planCode,
+                publicHostCode: group.publicHostCode,
+                publicName: group.publicName,
+            });
+        }
+
+        return {
+            enabled: true,
+            locations,
+        };
     }
 
     private buildConfigFromAdminNodes(nodes: ToporBalancerAdminNode[]): ToporBalancerConfig {
@@ -601,10 +1235,90 @@ export class ToporBalancerService implements OnModuleDestroy, OnModuleInit {
         });
     }
 
+    private async resolveDiscoveryImportGroup(
+        input: ToporBalancerDiscoveryImportInput,
+    ): Promise<ToporBalancerAdminGroup> {
+        const repository = this.getAdminRepository();
+        const normalizedGroupId = this.normalizeOptionalString(input.groupId);
+
+        if (normalizedGroupId) {
+            const group = (await repository.listGroups()).find((item) => item.id === normalizedGroupId);
+
+            if (!group) {
+                throw new NotFoundException('TopoR balancer import target group not found');
+            }
+
+            return group;
+        }
+
+        if (input.group) {
+            return this.createAdminGroup({
+                enabled: true,
+                locationCode: this.normalizeOptionalString(input.group.locationCode),
+                planCode: input.group.planCode,
+                publicHostCode: input.group.publicHostCode,
+                publicName: input.group.publicName,
+                strategy: 'least_loaded',
+            });
+        }
+
+        const legacyGroup = this.getLegacyDiscoveryImportGroup(input);
+        const existingGroup = (await repository.listGroups()).find(
+            (group) =>
+                group.publicHostCode === legacyGroup.publicHostCode &&
+                group.planCode === legacyGroup.planCode,
+        );
+
+        if (existingGroup) {
+            return existingGroup;
+        }
+
+        return this.createAdminGroup({
+            enabled: true,
+            locationCode: this.normalizeOptionalString(legacyGroup.locationCode),
+            planCode: legacyGroup.planCode,
+            publicHostCode: legacyGroup.publicHostCode,
+            publicName: legacyGroup.publicName,
+            strategy: 'least_loaded',
+        });
+    }
+
+    private getLegacyDiscoveryImportGroup(input: ToporBalancerDiscoveryImportInput): {
+        publicHostCode: string;
+        publicName: string;
+        locationCode?: string;
+        planCode: string;
+    } {
+        return {
+            locationCode: input.locationCode,
+            planCode: input.planCode ?? '',
+            publicHostCode: input.publicHostCode ?? '',
+            publicName: input.publicName ?? '',
+        };
+    }
+
     private validateDiscoveryImport(input: ToporBalancerDiscoveryImportInput): void {
-        this.validateNonEmptyString(input.publicHostCode, 'publicHostCode');
-        this.validateNonEmptyString(input.publicName, 'publicName');
-        this.validateNonEmptyString(input.planCode, 'planCode');
+        const normalizedGroupId = this.normalizeOptionalString(input.groupId);
+
+        if (normalizedGroupId && input.group) {
+            throw new BadRequestException(
+                'TopoR balancer import must target either groupId or group, not both',
+            );
+        }
+
+        if (normalizedGroupId) {
+            this.validateNonEmptyString(normalizedGroupId, 'groupId');
+        } else if (input.group) {
+            this.validateNonEmptyString(input.group.publicHostCode, 'publicHostCode');
+            this.validateNonEmptyString(input.group.publicName, 'publicName');
+            this.validateNonEmptyString(input.group.planCode, 'planCode');
+        } else {
+            const legacyGroup = this.getLegacyDiscoveryImportGroup(input);
+
+            this.validateNonEmptyString(legacyGroup.publicHostCode, 'publicHostCode');
+            this.validateNonEmptyString(legacyGroup.publicName, 'publicName');
+            this.validateNonEmptyString(legacyGroup.planCode, 'planCode');
+        }
 
         if (!Array.isArray(input.nodes) || input.nodes.length === 0) {
             throw new BadRequestException('TopoR balancer import nodes must be a non-empty array');

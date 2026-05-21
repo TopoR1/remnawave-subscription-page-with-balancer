@@ -3,10 +3,13 @@ import { randomUUID } from 'node:crypto';
 
 import type {
     ToporBalancerConfig,
+    ToporBalancerAdminGroup,
     ToporBalancerAdminNode,
     ToporBalancerAdminRequest,
     ToporBalancerDbAssignment,
+    ToporBalancerDbGroup,
     ToporBalancerDbNode,
+    ToporBalancerGroupStrategy,
     ToporBalancerLocation,
     ToporBalancerNode,
     ToporBalancerNodeStatus,
@@ -76,6 +79,7 @@ export interface ToporBalancerNodeUpdateInput {
 }
 
 export interface ToporBalancerNodeCreateInput {
+    groupId?: string;
     technicalHostName: string;
     publicHostCode: string;
     publicName: string;
@@ -87,6 +91,33 @@ export interface ToporBalancerNodeCreateInput {
 }
 
 export type ToporBalancerNodeDeleteResult = 'deleted' | 'has_assignments' | 'not_found';
+
+export interface ToporBalancerGroupCreateInput {
+    publicHostCode: string;
+    publicName: string;
+    locationCode?: string;
+    planCode: string;
+    strategy: ToporBalancerGroupStrategy;
+    enabled: boolean;
+}
+
+export interface ToporBalancerGroupUpdateInput {
+    publicHostCode?: string;
+    publicName?: string;
+    locationCode?: string;
+    planCode?: string;
+    strategy?: ToporBalancerGroupStrategy;
+    enabled?: boolean;
+}
+
+export interface ToporBalancerGroupNodeCreateInput {
+    technicalHostName: string;
+    weight: number;
+    maxUsers: number;
+    status: ToporBalancerNodeStatus;
+}
+
+export type ToporBalancerGroupDeleteResult = 'deleted' | 'has_nodes' | 'not_found';
 
 export interface ToporBalancerManualReassignInput {
     shortUuid: string;
@@ -106,6 +137,24 @@ export interface ToporBalancerAssignmentRepository {
     countNodes(): Promise<number>;
     countAssignments(): Promise<number>;
     countRequests(): Promise<number>;
+    listGroups(): Promise<ToporBalancerAdminGroup[]>;
+    createGroup(input: ToporBalancerGroupCreateInput): Promise<ToporBalancerAdminGroup | null>;
+    updateGroup(
+        id: string,
+        input: ToporBalancerGroupUpdateInput,
+    ): Promise<ToporBalancerAdminGroup | null>;
+    deleteGroup(id: string): Promise<ToporBalancerGroupDeleteResult>;
+    listGroupNodes(groupId: string): Promise<ToporBalancerAdminNode[] | null>;
+    createGroupNode(
+        groupId: string,
+        input: ToporBalancerGroupNodeCreateInput,
+    ): Promise<ToporBalancerAdminNode | null>;
+    updateGroupNode(
+        groupId: string,
+        nodeId: string,
+        input: ToporBalancerNodeUpdateInput,
+    ): Promise<ToporBalancerAdminNode | null>;
+    deleteGroupNode(groupId: string, nodeId: string): Promise<ToporBalancerNodeDeleteResult>;
     listNodes(): Promise<ToporBalancerAdminNode[]>;
     createNode(input: ToporBalancerNodeCreateInput): Promise<ToporBalancerAdminNode | null>;
     updateNode(
@@ -124,6 +173,7 @@ export interface ToporBalancerAssignmentRepository {
 
 interface DbNodeRow {
     id: string;
+    group_id: string | null;
     technical_host_name: string;
     public_host_code: string;
     public_name: string;
@@ -132,6 +182,18 @@ interface DbNodeRow {
     weight: string | number;
     max_users: number;
     status: ToporBalancerNodeStatus;
+    created_at?: Date | string;
+    updated_at?: Date | string;
+}
+
+interface DbGroupRow {
+    id: string;
+    public_host_code: string;
+    public_name: string;
+    location_code: string | null;
+    plan_code: string;
+    strategy: ToporBalancerGroupStrategy;
+    enabled: boolean;
     created_at?: Date | string;
     updated_at?: Date | string;
 }
@@ -153,6 +215,12 @@ interface DbCountRow {
 
 interface DbAdminNodeRow extends DbNodeRow {
     assigned_users: string | number;
+}
+
+interface DbAdminGroupRow extends DbGroupRow {
+    active_nodes_count: string | number;
+    assigned_users: string | number;
+    nodes_count: string | number;
 }
 
 interface DbRequestRow {
@@ -181,9 +249,23 @@ export class ToporBalancerPostgresRepository implements ToporBalancerAssignmentR
 
     public async initializeSchema(): Promise<void> {
         await this.pool.query(`
+            CREATE TABLE IF NOT EXISTS topor_balancer_groups (
+                id UUID PRIMARY KEY,
+                public_host_code TEXT NOT NULL,
+                public_name TEXT NOT NULL,
+                location_code TEXT,
+                plan_code TEXT NOT NULL,
+                strategy TEXT NOT NULL DEFAULT 'least_loaded',
+                enabled BOOLEAN NOT NULL DEFAULT TRUE,
+                created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                UNIQUE (public_host_code, plan_code)
+            );
+
             CREATE TABLE IF NOT EXISTS topor_balancer_nodes (
                 id UUID PRIMARY KEY,
-                technical_host_name TEXT UNIQUE NOT NULL,
+                group_id UUID,
+                technical_host_name TEXT NOT NULL,
                 public_host_code TEXT NOT NULL,
                 public_name TEXT NOT NULL,
                 location_code TEXT,
@@ -194,6 +276,60 @@ export class ToporBalancerPostgresRepository implements ToporBalancerAssignmentR
                 created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
                 updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
             );
+
+            ALTER TABLE topor_balancer_nodes
+                ADD COLUMN IF NOT EXISTS group_id UUID;
+
+            ALTER TABLE topor_balancer_groups
+                ADD COLUMN IF NOT EXISTS strategy TEXT NOT NULL DEFAULT 'least_loaded';
+
+            ALTER TABLE topor_balancer_groups
+                ADD COLUMN IF NOT EXISTS enabled BOOLEAN NOT NULL DEFAULT TRUE;
+
+            INSERT INTO topor_balancer_groups (
+                id,
+                public_host_code,
+                public_name,
+                location_code,
+                plan_code
+            )
+            SELECT
+                md5(n.public_host_code || ':' || n.plan_code)::uuid,
+                n.public_host_code,
+                (ARRAY_AGG(n.public_name ORDER BY n.updated_at DESC))[1],
+                (ARRAY_AGG(n.location_code ORDER BY n.updated_at DESC))[1],
+                n.plan_code
+            FROM topor_balancer_nodes n
+            WHERE n.group_id IS NULL
+            GROUP BY n.public_host_code, n.plan_code
+            ON CONFLICT (public_host_code, plan_code) DO NOTHING;
+
+            UPDATE topor_balancer_nodes n
+            SET group_id = g.id
+            FROM topor_balancer_groups g
+            WHERE n.group_id IS NULL
+              AND g.public_host_code = n.public_host_code
+              AND g.plan_code = n.plan_code;
+
+            ALTER TABLE topor_balancer_nodes
+                DROP CONSTRAINT IF EXISTS topor_balancer_nodes_technical_host_name_key;
+
+            DO $$
+            BEGIN
+                IF NOT EXISTS (
+                    SELECT 1
+                    FROM pg_constraint
+                    WHERE conname = 'topor_balancer_nodes_group_id_fkey'
+                ) THEN
+                    ALTER TABLE topor_balancer_nodes
+                        ADD CONSTRAINT topor_balancer_nodes_group_id_fkey
+                        FOREIGN KEY (group_id)
+                        REFERENCES topor_balancer_groups(id);
+                END IF;
+            END $$;
+
+            CREATE UNIQUE INDEX IF NOT EXISTS topor_balancer_nodes_group_technical_host_name_key
+                ON topor_balancer_nodes (group_id, technical_host_name);
 
             CREATE TABLE IF NOT EXISTS topor_balancer_assignments (
                 id UUID PRIMARY KEY,
@@ -226,6 +362,9 @@ export class ToporBalancerPostgresRepository implements ToporBalancerAssignmentR
 
             CREATE INDEX IF NOT EXISTS topor_balancer_assignments_node_id_idx
                 ON topor_balancer_assignments (node_id);
+
+            CREATE INDEX IF NOT EXISTS topor_balancer_nodes_group_id_idx
+                ON topor_balancer_nodes (group_id);
 
             CREATE INDEX IF NOT EXISTS topor_balancer_requests_short_uuid_created_at_idx
                 ON topor_balancer_requests (short_uuid, created_at);
@@ -338,36 +477,144 @@ export class ToporBalancerPostgresRepository implements ToporBalancerAssignmentR
         return Number(result.rows[0]?.count ?? 0);
     }
 
-    public async listNodes(): Promise<ToporBalancerAdminNode[]> {
-        const result = await this.pool.query<DbAdminNodeRow>(`
-            SELECT n.*, COUNT(a.id) AS assigned_users
-            FROM topor_balancer_nodes n
+    public async listGroups(): Promise<ToporBalancerAdminGroup[]> {
+        const result = await this.pool.query<DbAdminGroupRow>(`
+            SELECT
+                g.*,
+                COUNT(n.id) AS nodes_count,
+                COUNT(n.id) FILTER (WHERE n.status = 'active') AS active_nodes_count,
+                COUNT(DISTINCT a.id) AS assigned_users
+            FROM topor_balancer_groups g
+            LEFT JOIN topor_balancer_nodes n ON n.group_id = g.id
             LEFT JOIN topor_balancer_assignments a ON a.node_id = n.id
-            GROUP BY n.id
-            ORDER BY n.public_host_code ASC, n.plan_code ASC, n.technical_host_name ASC
+            GROUP BY g.id
+            ORDER BY g.public_host_code ASC, g.plan_code ASC
         `);
 
-        return result.rows.map(mapAdminNodeRow);
+        return result.rows.map(mapAdminGroupRow);
     }
 
-    public async createNode(
-        input: ToporBalancerNodeCreateInput,
-    ): Promise<ToporBalancerAdminNode | null> {
-        const existing = await this.pool.query<DbNodeRow>(
-            'SELECT * FROM topor_balancer_nodes WHERE technical_host_name = $1 LIMIT 1',
-            [input.technicalHostName],
+    public async createGroup(
+        input: ToporBalancerGroupCreateInput,
+    ): Promise<ToporBalancerAdminGroup | null> {
+        const id = randomUUID();
+        const result = await this.pool.query<DbGroupRow>(
+            `
+            INSERT INTO topor_balancer_groups (
+                id,
+                public_host_code,
+                public_name,
+                location_code,
+                plan_code,
+                strategy,
+                enabled
+            )
+            VALUES ($1, $2, $3, $4, $5, $6, $7)
+            ON CONFLICT (public_host_code, plan_code) DO NOTHING
+            RETURNING *
+            `,
+            [
+                id,
+                input.publicHostCode,
+                input.publicName,
+                input.locationCode ?? null,
+                input.planCode,
+                input.strategy,
+                input.enabled,
+            ],
         );
 
-        if (existing.rows[0]) {
+        if (!result.rows[0]) {
+            return null;
+        }
+
+        const groups = await this.listGroups();
+
+        return groups.find((group) => group.id === id) ?? null;
+    }
+
+    public async updateGroup(
+        id: string,
+        input: ToporBalancerGroupUpdateInput,
+    ): Promise<ToporBalancerAdminGroup | null> {
+        const updates: string[] = [];
+        const params: unknown[] = [];
+
+        addUpdate(updates, params, 'public_host_code', input.publicHostCode);
+        addUpdate(updates, params, 'public_name', input.publicName);
+        addUpdate(updates, params, 'location_code', input.locationCode);
+        addUpdate(updates, params, 'plan_code', input.planCode);
+        addUpdate(updates, params, 'strategy', input.strategy);
+        addUpdate(updates, params, 'enabled', input.enabled);
+
+        if (updates.length > 0) {
+            params.push(id);
+            await this.pool.query(
+                `
+                UPDATE topor_balancer_groups
+                SET ${updates.join(', ')}, updated_at = NOW()
+                WHERE id = $${params.length}
+                `,
+                params,
+            );
+
+            await this.syncNodeCompatibilityColumnsForGroup(id);
+        }
+
+        const groups = await this.listGroups();
+
+        return groups.find((group) => group.id === id) ?? null;
+    }
+
+    public async deleteGroup(id: string): Promise<ToporBalancerGroupDeleteResult> {
+        const nodeCount = await this.pool.query<DbCountRow>(
+            'SELECT COUNT(*) AS count FROM topor_balancer_nodes WHERE group_id = $1',
+            [id],
+        );
+
+        if (Number(nodeCount.rows[0]?.count ?? 0) > 0) {
+            return 'has_nodes';
+        }
+
+        const result = await this.pool.query<DbCountRow>(
+            `
+            WITH deleted AS (
+                DELETE FROM topor_balancer_groups
+                WHERE id = $1
+                RETURNING id
+            )
+            SELECT COUNT(*) AS count FROM deleted
+            `,
+            [id],
+        );
+
+        return Number(result.rows[0]?.count ?? 0) > 0 ? 'deleted' : 'not_found';
+    }
+
+    public async listGroupNodes(groupId: string): Promise<ToporBalancerAdminNode[] | null> {
+        if (!(await this.groupExists(groupId))) {
+            return null;
+        }
+
+        return (await this.listNodes()).filter((node) => node.groupId === groupId);
+    }
+
+    public async createGroupNode(
+        groupId: string,
+        input: ToporBalancerGroupNodeCreateInput,
+    ): Promise<ToporBalancerAdminNode | null> {
+        const group = await this.getGroup(groupId);
+
+        if (!group) {
             return null;
         }
 
         const id = randomUUID();
-
-        await this.pool.query(
+        const result = await this.pool.query<DbNodeRow>(
             `
             INSERT INTO topor_balancer_nodes (
                 id,
+                group_id,
                 technical_host_name,
                 public_host_code,
                 public_name,
@@ -377,38 +624,155 @@ export class ToporBalancerPostgresRepository implements ToporBalancerAssignmentR
                 max_users,
                 status
             )
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+            ON CONFLICT (group_id, technical_host_name) DO NOTHING
+            RETURNING *
             `,
             [
                 id,
+                group.id,
                 input.technicalHostName,
-                input.publicHostCode,
-                input.publicName,
-                input.locationCode ?? null,
-                input.planCode,
+                group.publicHostCode,
+                group.publicName,
+                group.locationCode ?? null,
+                group.planCode,
                 input.weight,
                 input.maxUsers,
                 input.status,
             ],
         );
 
+        if (!result.rows[0]) {
+            return null;
+        }
+
         const nodes = await this.listNodes();
 
         return nodes.find((node) => node.id === id) ?? null;
+    }
+
+    public async updateGroupNode(
+        groupId: string,
+        nodeId: string,
+        input: ToporBalancerNodeUpdateInput,
+    ): Promise<ToporBalancerAdminNode | null> {
+        const node = (await this.listNodes()).find(
+            (item) => item.id === nodeId && item.groupId === groupId,
+        );
+
+        if (!node) {
+            return null;
+        }
+
+        return this.updateNode(nodeId, {
+            maxUsers: input.maxUsers,
+            status: input.status,
+            technicalHostName: input.technicalHostName,
+            weight: input.weight,
+        });
+    }
+
+    public async deleteGroupNode(
+        groupId: string,
+        nodeId: string,
+    ): Promise<ToporBalancerNodeDeleteResult> {
+        const node = (await this.listNodes()).find(
+            (item) => item.id === nodeId && item.groupId === groupId,
+        );
+
+        if (!node) {
+            return 'not_found';
+        }
+
+        return this.deleteNode(nodeId);
+    }
+
+    public async listNodes(): Promise<ToporBalancerAdminNode[]> {
+        const result = await this.pool.query<DbAdminNodeRow>(`
+            SELECT
+                n.id,
+                n.group_id,
+                n.technical_host_name,
+                COALESCE(g.public_host_code, n.public_host_code) AS public_host_code,
+                COALESCE(g.public_name, n.public_name) AS public_name,
+                COALESCE(g.location_code, n.location_code) AS location_code,
+                COALESCE(g.plan_code, n.plan_code) AS plan_code,
+                n.weight,
+                n.max_users,
+                n.status,
+                n.created_at,
+                n.updated_at,
+                COUNT(a.id) AS assigned_users
+            FROM topor_balancer_nodes n
+            LEFT JOIN topor_balancer_groups g ON g.id = n.group_id
+            LEFT JOIN topor_balancer_assignments a ON a.node_id = n.id
+            GROUP BY n.id, g.id
+            ORDER BY n.public_host_code ASC, n.plan_code ASC, n.technical_host_name ASC
+        `);
+
+        return result.rows.map(mapAdminNodeRow);
+    }
+
+    public async createNode(
+        input: ToporBalancerNodeCreateInput,
+    ): Promise<ToporBalancerAdminNode | null> {
+        const group =
+            (input.groupId ? await this.getGroup(input.groupId) : null) ??
+            (await this.getOrCreateGroup({
+                enabled: true,
+                locationCode: input.locationCode,
+                planCode: input.planCode,
+                publicHostCode: input.publicHostCode,
+                publicName: input.publicName,
+                strategy: 'least_loaded',
+            }));
+
+        if (!group) {
+            return null;
+        }
+
+        return this.createGroupNode(group.id, input);
     }
 
     public async updateNode(
         id: string,
         input: ToporBalancerNodeUpdateInput,
     ): Promise<ToporBalancerAdminNode | null> {
+        const existing = await this.pool.query<DbNodeRow>(
+            'SELECT * FROM topor_balancer_nodes WHERE id = $1 LIMIT 1',
+            [id],
+        );
+        const existingNode = existing.rows[0];
+
+        if (!existingNode) {
+            return null;
+        }
+
+        if (
+            existingNode.group_id &&
+            (input.publicHostCode !== undefined ||
+                input.publicName !== undefined ||
+                input.locationCode !== undefined ||
+                input.planCode !== undefined)
+        ) {
+            await this.updateGroup(existingNode.group_id, {
+                locationCode: input.locationCode,
+                planCode: input.planCode,
+                publicHostCode: input.publicHostCode,
+                publicName: input.publicName,
+            });
+        }
+
         const updates: string[] = [];
         const params: unknown[] = [];
 
         addUpdate(updates, params, 'technical_host_name', input.technicalHostName);
-        addUpdate(updates, params, 'public_host_code', input.publicHostCode);
-        addUpdate(updates, params, 'public_name', input.publicName);
-        addUpdate(updates, params, 'location_code', input.locationCode);
-        addUpdate(updates, params, 'plan_code', input.planCode);
+        if (!existingNode.group_id) {
+            addUpdate(updates, params, 'public_host_code', input.publicHostCode);
+            addUpdate(updates, params, 'public_name', input.publicName);
+            addUpdate(updates, params, 'location_code', input.locationCode);
+            addUpdate(updates, params, 'plan_code', input.planCode);
+        }
         addUpdate(updates, params, 'weight', input.weight);
         addUpdate(updates, params, 'max_users', input.maxUsers);
         addUpdate(updates, params, 'status', input.status);
@@ -492,12 +856,27 @@ export class ToporBalancerPostgresRepository implements ToporBalancerAssignmentR
     ): Promise<ToporBalancerDbAssignment | null> {
         const nodeResult = await this.pool.query<DbNodeRow>(
             `
-            SELECT *
+            SELECT
+                n.id,
+                n.group_id,
+                n.technical_host_name,
+                COALESCE(g.public_host_code, n.public_host_code) AS public_host_code,
+                COALESCE(g.public_name, n.public_name) AS public_name,
+                COALESCE(g.location_code, n.location_code) AS location_code,
+                COALESCE(g.plan_code, n.plan_code) AS plan_code,
+                n.weight,
+                n.max_users,
+                n.status,
+                n.created_at,
+                n.updated_at
             FROM topor_balancer_nodes
-            WHERE technical_host_name = $1
-              AND public_host_code = $2
-              AND plan_code = $3
-              AND status = 'active'
+            n
+            LEFT JOIN topor_balancer_groups g ON g.id = n.group_id
+            WHERE n.technical_host_name = $1
+              AND COALESCE(g.public_host_code, n.public_host_code) = $2
+              AND COALESCE(g.plan_code, n.plan_code) = $3
+              AND COALESCE(g.enabled, TRUE) = TRUE
+              AND n.status = 'active'
             LIMIT 1
             `,
             [input.technicalHostName, input.publicHostCode, input.planCode],
@@ -562,19 +941,36 @@ export class ToporBalancerPostgresRepository implements ToporBalancerAssignmentR
         const updated: ToporBalancerAdminNode[] = [];
 
         for (const node of input) {
+            const group =
+                (node.groupId ? await this.getGroup(node.groupId) : null) ??
+                (await this.getOrCreateGroup({
+                    enabled: true,
+                    locationCode: node.locationCode,
+                    planCode: node.planCode,
+                    publicHostCode: node.publicHostCode,
+                    publicName: node.publicName,
+                    strategy: 'least_loaded',
+                }));
+
+            if (!group) {
+                continue;
+            }
+
             const existing = await this.pool.query<DbNodeRow>(
-                'SELECT * FROM topor_balancer_nodes WHERE technical_host_name = $1 LIMIT 1',
-                [node.technicalHostName],
+                `
+                SELECT *
+                FROM topor_balancer_nodes
+                WHERE group_id = $1
+                  AND technical_host_name = $2
+                LIMIT 1
+                `,
+                [group.id, node.technicalHostName],
             );
             const existingNode = existing.rows[0];
 
             if (existingNode) {
                 await this.updateNode(existingNode.id, {
-                    locationCode: node.locationCode,
                     maxUsers: node.maxUsers,
-                    planCode: node.planCode,
-                    publicHostCode: node.publicHostCode,
-                    publicName: node.publicName,
                     status: node.status,
                     weight: node.weight,
                 });
@@ -587,7 +983,7 @@ export class ToporBalancerPostgresRepository implements ToporBalancerAssignmentR
                     updated.push(adminNode);
                 }
             } else {
-                const adminNode = await this.createNode(node);
+                const adminNode = await this.createGroupNode(group.id, node);
 
                 if (adminNode) {
                     created.push(adminNode);
@@ -606,10 +1002,24 @@ export class ToporBalancerPostgresRepository implements ToporBalancerAssignmentR
         location: ToporBalancerLocation,
         node: ToporBalancerNode,
     ): Promise<void> {
+        const group = await this.getOrCreateGroup({
+            enabled: true,
+            locationCode: location.locationCode,
+            planCode: location.planCode,
+            publicHostCode: location.publicHostCode,
+            publicName: location.publicName,
+            strategy: 'least_loaded',
+        });
+
+        if (!group) {
+            return;
+        }
+
         await this.pool.query(
             `
             INSERT INTO topor_balancer_nodes (
                 id,
+                group_id,
                 technical_host_name,
                 public_host_code,
                 public_name,
@@ -619,8 +1029,8 @@ export class ToporBalancerPostgresRepository implements ToporBalancerAssignmentR
                 max_users,
                 status
             )
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
-            ON CONFLICT (technical_host_name) DO UPDATE SET
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+            ON CONFLICT (group_id, technical_host_name) DO UPDATE SET
                 public_host_code = EXCLUDED.public_host_code,
                 public_name = EXCLUDED.public_name,
                 location_code = EXCLUDED.location_code,
@@ -632,6 +1042,7 @@ export class ToporBalancerPostgresRepository implements ToporBalancerAssignmentR
             `,
             [
                 randomUUID(),
+                group.id,
                 node.technicalHostName,
                 location.publicHostCode,
                 location.publicName,
@@ -650,9 +1061,22 @@ export class ToporBalancerPostgresRepository implements ToporBalancerAssignmentR
     ): Promise<ToporBalancerDbNode | null> {
         const result = await client.query<DbNodeRow>(
             `
-            SELECT n.*
+            SELECT
+                n.id,
+                n.group_id,
+                n.technical_host_name,
+                COALESCE(g.public_host_code, n.public_host_code) AS public_host_code,
+                COALESCE(g.public_name, n.public_name) AS public_name,
+                COALESCE(g.location_code, n.location_code) AS location_code,
+                COALESCE(g.plan_code, n.plan_code) AS plan_code,
+                n.weight,
+                n.max_users,
+                n.status,
+                n.created_at,
+                n.updated_at
             FROM topor_balancer_assignments a
             JOIN topor_balancer_nodes n ON n.id = a.node_id
+            LEFT JOIN topor_balancer_groups g ON g.id = n.group_id
             WHERE a.short_uuid = $1
               AND a.public_host_code = $2
               AND a.plan_code = $3
@@ -677,14 +1101,28 @@ export class ToporBalancerPostgresRepository implements ToporBalancerAssignmentR
     ): Promise<ToporBalancerDbNode | null> {
         const result = await client.query<DbNodeRow>(
             `
-            SELECT n.*
+            SELECT
+                n.id,
+                n.group_id,
+                n.technical_host_name,
+                COALESCE(g.public_host_code, n.public_host_code) AS public_host_code,
+                COALESCE(g.public_name, n.public_name) AS public_name,
+                COALESCE(g.location_code, n.location_code) AS location_code,
+                COALESCE(g.plan_code, n.plan_code) AS plan_code,
+                n.weight,
+                n.max_users,
+                n.status,
+                n.created_at,
+                n.updated_at
             FROM topor_balancer_nodes n
+            LEFT JOIN topor_balancer_groups g ON g.id = n.group_id
             LEFT JOIN topor_balancer_assignments a ON a.node_id = n.id
-            WHERE n.public_host_code = $1
-              AND n.plan_code = $2
+            WHERE COALESCE(g.public_host_code, n.public_host_code) = $1
+              AND COALESCE(g.plan_code, n.plan_code) = $2
+              AND COALESCE(g.enabled, TRUE) = TRUE
               AND n.technical_host_name = ANY($3)
               AND n.status = 'active'
-            GROUP BY n.id
+            GROUP BY n.id, g.id
             ORDER BY
               (COUNT(a.id)::numeric / GREATEST((n.max_users::numeric * n.weight), 1)) ASC,
               n.technical_host_name ASC
@@ -731,11 +1169,94 @@ export class ToporBalancerPostgresRepository implements ToporBalancerAssignmentR
 
         return mapAssignmentRow(result.rows[0]);
     }
+
+    private async getGroup(id: string): Promise<ToporBalancerDbGroup | null> {
+        const result = await this.pool.query<DbGroupRow>(
+            'SELECT * FROM topor_balancer_groups WHERE id = $1 LIMIT 1',
+            [id],
+        );
+
+        return result.rows[0] ? mapGroupRow(result.rows[0]) : null;
+    }
+
+    private async groupExists(id: string): Promise<boolean> {
+        const result = await this.pool.query<DbCountRow>(
+            'SELECT COUNT(*) AS count FROM topor_balancer_groups WHERE id = $1',
+            [id],
+        );
+
+        return Number(result.rows[0]?.count ?? 0) > 0;
+    }
+
+    private async getOrCreateGroup(
+        input: ToporBalancerGroupCreateInput,
+    ): Promise<ToporBalancerDbGroup | null> {
+        const existing = await this.pool.query<DbGroupRow>(
+            `
+            SELECT *
+            FROM topor_balancer_groups
+            WHERE public_host_code = $1
+              AND plan_code = $2
+            LIMIT 1
+            `,
+            [input.publicHostCode, input.planCode],
+        );
+
+        if (existing.rows[0]) {
+            return mapGroupRow(existing.rows[0]);
+        }
+
+        const created = await this.createGroup(input);
+
+        return created ?? null;
+    }
+
+    private async syncNodeCompatibilityColumnsForGroup(groupId: string): Promise<void> {
+        await this.pool.query(
+            `
+            UPDATE topor_balancer_nodes n
+            SET
+                public_host_code = g.public_host_code,
+                public_name = g.public_name,
+                location_code = g.location_code,
+                plan_code = g.plan_code,
+                updated_at = NOW()
+            FROM topor_balancer_groups g
+            WHERE n.group_id = g.id
+              AND g.id = $1
+            `,
+            [groupId],
+        );
+    }
+}
+
+function mapGroupRow(row: DbGroupRow): ToporBalancerDbGroup {
+    return {
+        id: row.id,
+        publicHostCode: row.public_host_code,
+        publicName: row.public_name,
+        locationCode: row.location_code ?? undefined,
+        planCode: row.plan_code,
+        strategy: row.strategy,
+        enabled: row.enabled,
+        createdAt: row.created_at?.toString(),
+        updatedAt: row.updated_at?.toString(),
+    };
+}
+
+function mapAdminGroupRow(row: DbAdminGroupRow): ToporBalancerAdminGroup {
+    return {
+        ...mapGroupRow(row),
+        activeNodesCount: Number(row.active_nodes_count),
+        assignedUsers: Number(row.assigned_users),
+        nodesCount: Number(row.nodes_count),
+    };
 }
 
 function mapNodeRow(row: DbNodeRow): ToporBalancerDbNode {
     return {
         id: row.id,
+        groupId: row.group_id ?? undefined,
         technicalHostName: row.technical_host_name,
         publicHostCode: row.public_host_code,
         publicName: row.public_name,

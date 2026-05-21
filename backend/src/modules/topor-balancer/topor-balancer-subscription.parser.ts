@@ -113,6 +113,10 @@ export function parseVlessLink(link: string): ParsedVlessLink | null {
             flow: queryParams.flow,
             pbk: queryParams.pbk,
             sid: queryParams.sid,
+            fp: queryParams.fp,
+            path: queryParams.path,
+            serviceName: queryParams.serviceName,
+            alpn: queryParams.alpn,
         };
     } catch {
         return null;
@@ -131,7 +135,17 @@ export function replaceVlessRemark(link: string, newRemark: string): string {
     const hashIndex = link.indexOf('#');
     const linkWithoutRemark = hashIndex === -1 ? link : link.slice(0, hashIndex);
 
-    return `${linkWithoutRemark}#${encodeURIComponent(newRemark)}`;
+    let encodedRemark: string;
+
+    try {
+        encodedRemark = encodeURIComponent(newRemark);
+    } catch {
+        return link;
+    }
+
+    const replacedLink = `${linkWithoutRemark}#${encodedRemark}`;
+
+    return parseVlessLink(replacedLink) === null ? link : replacedLink;
 }
 
 function extractRawQuery(link: string): string {
@@ -224,18 +238,27 @@ function looksLikeJson(body: string): boolean {
 }
 
 function tryDecodeBase64Subscription(rawSubscription: string): string | null {
-    const normalizedSubscription = rawSubscription.trim();
+    const normalizedSubscription = rawSubscription.replace(/\s+/g, '');
 
     if (
         !normalizedSubscription ||
-        normalizedSubscription.length % 4 !== 0 ||
         !/^[A-Za-z0-9+/]+={0,2}$/.test(normalizedSubscription)
     ) {
         return null;
     }
 
     try {
-        const decodedSubscription = Buffer.from(normalizedSubscription, 'base64').toString('utf8');
+        const remainder = normalizedSubscription.length % 4;
+
+        if (remainder === 1) {
+            return null;
+        }
+
+        const paddedSubscription =
+            remainder === 0
+                ? normalizedSubscription
+                : `${normalizedSubscription}${'='.repeat(4 - remainder)}`;
+        const decodedSubscription = Buffer.from(paddedSubscription, 'base64').toString('utf8');
 
         if (!decodedSubscription.includes('vless://')) {
             return null;
