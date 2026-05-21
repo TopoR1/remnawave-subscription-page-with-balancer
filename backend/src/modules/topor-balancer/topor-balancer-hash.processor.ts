@@ -200,7 +200,7 @@ function selectNodesByPublicGroupKey(
                 left.node.technicalHostName.localeCompare(right.node.technicalHostName),
             );
 
-        const selectedNodeRef = selectWeightedNode(shortUuid, publicGroupKey, activeCandidates);
+        const selectedNodeRef = selectHashModeNode(shortUuid, publicGroupKey, activeCandidates);
 
         if (selectedNodeRef) {
             selectedByPublicGroupKey.set(publicGroupKey, selectedNodeRef);
@@ -221,6 +221,52 @@ function uniqueNodeRefs(matchingLines: MatchingLine[]): TechnicalNodeRef[] {
     }
 
     return Array.from(uniqueByTechnicalHostName.values());
+}
+
+function selectHashModeNode(
+    shortUuid: string,
+    publicGroupKey: string,
+    candidates: TechnicalNodeRef[],
+): TechnicalNodeRef | null {
+    const strategy = candidates[0]?.location.strategy ?? 'sticky_hash';
+
+    switch (strategy) {
+        case 'manual':
+            return null;
+        case 'priority_failover':
+            return (
+                candidates
+                    .slice()
+                    .sort(
+                        (left, right) =>
+                            (left.node.priority ?? 100) - (right.node.priority ?? 100) ||
+                            left.node.technicalHostName.localeCompare(
+                                right.node.technicalHostName,
+                            ),
+                    )[0] ?? null
+            );
+        case 'weighted':
+            return selectWeightedNode(shortUuid, publicGroupKey, candidates);
+        case 'least_loaded':
+        case 'sticky_hash':
+        default:
+            return selectStickyHashNode(shortUuid, publicGroupKey, candidates);
+    }
+}
+
+function selectStickyHashNode(
+    shortUuid: string,
+    publicGroupKey: string,
+    candidates: TechnicalNodeRef[],
+): TechnicalNodeRef | null {
+    if (candidates.length === 0) {
+        return null;
+    }
+
+    const hashValue = hashToBigInt(`${shortUuid}:${publicGroupKey}`);
+    const index = Number(hashValue % BigInt(candidates.length));
+
+    return candidates[index];
 }
 
 function selectWeightedNode(

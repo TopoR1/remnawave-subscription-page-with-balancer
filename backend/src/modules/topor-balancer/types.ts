@@ -2,13 +2,19 @@ export type ToporBalancerNodeStatus = 'active' | 'draining' | 'disabled' | 'dead
 
 export type ToporBalancerAssignmentMode = 'hash' | 'database';
 
-export type ToporBalancerGroupStrategy = 'least_loaded';
+export type ToporBalancerGroupStrategy =
+    | 'least_loaded'
+    | 'manual'
+    | 'priority_failover'
+    | 'sticky_hash'
+    | 'weighted';
 
 export interface ToporBalancerNode {
     technicalHostName: string;
     weight: number;
     maxUsers: number;
     status: ToporBalancerNodeStatus;
+    priority?: number;
 }
 
 export interface ToporBalancerLocation {
@@ -16,6 +22,7 @@ export interface ToporBalancerLocation {
     publicName: string;
     locationCode?: string;
     planCode: string;
+    strategy?: ToporBalancerGroupStrategy;
     nodes: ToporBalancerNode[];
 }
 
@@ -155,6 +162,7 @@ export interface ToporBalancerDbNode {
     weight: number;
     maxUsers: number;
     status: ToporBalancerNodeStatus;
+    priority: number;
     createdAt?: string;
     updatedAt?: string;
 }
@@ -259,6 +267,32 @@ export interface ToporBalancerDiscoveredHost {
     matchedNodeId: string | null;
 }
 
+export type ToporBalancerGroupDiscoveryItemStatus =
+    | 'conflict'
+    | 'free'
+    | 'in_other_group'
+    | 'in_this_group';
+
+export interface ToporBalancerGroupDiscoveryItem extends ToporBalancerDiscoveredHost {
+    canAdd: boolean;
+    currentGroupId: null | string;
+    currentGroupName: null | string;
+    status: ToporBalancerGroupDiscoveryItemStatus;
+}
+
+export interface ToporBalancerGroupDiscoveryResponse {
+    group: {
+        id: string;
+        planCode: string;
+        publicHostCode: string;
+        publicName: string;
+    };
+    items: ToporBalancerGroupDiscoveryItem[];
+    message?: string;
+    shortUuid?: string;
+    source: 'remnawave-api' | 'subscription';
+}
+
 export interface ToporBalancerDiscoveryResponse {
     source: 'remnawave-api' | 'subscription';
     shortUuid?: string;
@@ -282,6 +316,7 @@ export interface ToporBalancerDiscoveryImportInput {
         weight: number;
         maxUsers: number;
         status: ToporBalancerNodeStatus;
+        priority?: number;
     }>;
 }
 
@@ -303,5 +338,22 @@ export interface ToporBalancerDiscoveryImportResult {
         existingPublicHostCode?: string;
         existingPlanCode?: string;
         existingPublicName?: string;
+    }>;
+}
+
+export interface ToporBalancerGroupNodeImportResult {
+    alreadyInGroup: Array<{
+        nodeId?: string;
+        technicalHostName: string;
+    }>;
+    created: ToporBalancerAdminNode[];
+    errors: Array<{
+        reason: string;
+        technicalHostName?: string;
+    }>;
+    inOtherGroup: Array<{
+        currentGroupId?: string;
+        currentGroupName?: string;
+        technicalHostName: string;
     }>;
 }

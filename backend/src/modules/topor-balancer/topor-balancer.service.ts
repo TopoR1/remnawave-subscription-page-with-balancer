@@ -36,6 +36,7 @@ import type {
     ToporBalancerDiscoveryImportResult,
     ToporBalancerDebugProcessSubscriptionResult,
     ToporBalancerGroupStrategy,
+    ToporBalancerGroupNodeImportResult,
     ToporBalancerNodeStatus,
     ToporBalancerProcessResult,
     ToporBalancerSubscriptionDiagnosticsFormat,
@@ -69,7 +70,13 @@ const ADMIN_NODE_STATUSES = new Set<ToporBalancerNodeStatus>([
     'draining',
 ]);
 
-const ADMIN_GROUP_STRATEGIES = new Set<ToporBalancerGroupStrategy>(['least_loaded']);
+const ADMIN_GROUP_STRATEGIES = new Set<ToporBalancerGroupStrategy>([
+    'least_loaded',
+    'manual',
+    'priority_failover',
+    'sticky_hash',
+    'weighted',
+]);
 
 @Injectable()
 export class ToporBalancerService implements OnModuleDestroy, OnModuleInit {
@@ -266,6 +273,16 @@ export class ToporBalancerService implements OnModuleDestroy, OnModuleInit {
         return this.getAdminRepository().listGroups();
     }
 
+    public async getAdminGroup(id: string): Promise<ToporBalancerAdminGroup> {
+        const group = await this.getAdminRepository().getGroup(id);
+
+        if (!group) {
+            throw new NotFoundException('TopoR balancer group not found');
+        }
+
+        return group;
+    }
+
     public async createAdminGroup(
         input: ToporBalancerGroupCreateInput,
     ): Promise<ToporBalancerAdminGroup> {
@@ -273,11 +290,11 @@ export class ToporBalancerService implements OnModuleDestroy, OnModuleInit {
 
         const group = await this.getAdminRepository().createGroup({
             enabled: input.enabled ?? true,
-            locationCode: this.normalizeOptionalString(input.locationCode),
+            locationCode: input.locationCode?.trim() ?? '',
             planCode: input.planCode.trim(),
             publicHostCode: input.publicHostCode.trim(),
             publicName: input.publicName.trim(),
-            strategy: input.strategy ?? 'least_loaded',
+            strategy: input.strategy,
         });
 
         if (!group) {
@@ -346,6 +363,7 @@ export class ToporBalancerService implements OnModuleDestroy, OnModuleInit {
 
         const node = await this.getAdminRepository().createGroupNode(groupId, {
             maxUsers: input.maxUsers ?? 300,
+            priority: input.priority ?? 100,
             status: input.status ?? 'active',
             technicalHostName: input.technicalHostName.trim(),
             weight: input.weight ?? 1,
@@ -367,6 +385,7 @@ export class ToporBalancerService implements OnModuleDestroy, OnModuleInit {
     ): Promise<ToporBalancerAdminNode> {
         this.validateNodeUpdate({
             maxUsers: input.maxUsers,
+            priority: input.priority,
             status: input.status,
             technicalHostName: input.technicalHostName,
             weight: input.weight,
@@ -398,6 +417,97 @@ export class ToporBalancerService implements OnModuleDestroy, OnModuleInit {
         }
 
         return { deleted: true };
+    }
+
+    public async importAdminGroupNodes(
+        groupId: string,
+        input: {
+            defaults: ToporBalancerGroupNodeCreateInput;
+            mode?: 'skip_conflicts';
+            technicalHostNames: string[];
+        },
+    ): Promise<ToporBalancerGroupNodeImportResult> {
+        if (input.mode !== undefined && input.mode !== 'skip_conflicts') {
+            throw new BadRequestException('TopoR balancer import mode must be skip_conflicts');
+        }
+
+        if (!Array.isArray(input.technicalHostNames) || input.technicalHostNames.length === 0) {
+            throw new BadRequestException('TopoR balancer technicalHostNames must be a non-empty array');
+        }
+
+        this.validateGroupNodeCreate({
+            maxUsers: input.defaults.maxUsers,
+            priority: input.defaults.priority ?? 100,
+            status: input.defaults.status,
+            technicalHostName: 'validation-placeholder',
+            weight: input.defaults.weight,
+        });
+
+        const group = await this.getAdminGroup(groupId);
+        const existingNodes = await this.getAdminRepository().listNodes();
+        const created: ToporBalancerAdminNode[] = [];
+        const alreadyInGroup: ToporBalancerGroupNodeImportResult['alreadyInGroup'] = [];
+        const inOtherGroup: ToporBalancerGroupNodeImportResult['inOtherGroup'] = [];
+        const errors: ToporBalancerGroupNodeImportResult['errors'] = [];
+        const uniqueTechnicalHostNames = Array.from(
+            new Set(
+                input.technicalHostNames.map((technicalHostName) => {
+                    this.validateNonEmptyString(technicalHostName, 'technicalHostName');
+
+                    return this.normalizeTechnicalHostName(technicalHostName);
+                }),
+            ),
+        );
+
+        for (const technicalHostName of uniqueTechnicalHostNames) {
+            const matchingNodes = existingNodes.filter(
+                (node) => this.normalizeTechnicalHostName(node.technicalHostName) === technicalHostName,
+            );
+            const nodeInThisGroup = matchingNodes.find((node) => node.groupId === group.id);
+            const nodeInOtherGroup = matchingNodes.find((node) => node.groupId !== group.id);
+
+            if (nodeInThisGroup) {
+                alreadyInGroup.push({
+                    nodeId: nodeInThisGroup.id,
+                    technicalHostName,
+                });
+                continue;
+            }
+
+            if (nodeInOtherGroup) {
+                inOtherGroup.push({
+                    currentGroupId: nodeInOtherGroup.groupId,
+                    currentGroupName: nodeInOtherGroup.publicName,
+                    technicalHostName,
+                });
+                continue;
+            }
+
+            const createdNode = await this.getAdminRepository().createGroupNode(group.id, {
+                maxUsers: input.defaults.maxUsers,
+                priority: input.defaults.priority ?? 100,
+                status: input.defaults.status,
+                technicalHostName,
+                weight: input.defaults.weight,
+            });
+
+            if (createdNode) {
+                created.push(createdNode);
+                existingNodes.push(createdNode);
+            } else {
+                errors.push({
+                    reason: 'Technical node could not be imported',
+                    technicalHostName,
+                });
+            }
+        }
+
+        return {
+            alreadyInGroup,
+            created,
+            errors,
+            inOtherGroup,
+        };
     }
 
     public async listAdminNodes(): Promise<ToporBalancerAdminNode[]> {
@@ -515,6 +625,7 @@ export class ToporBalancerService implements OnModuleDestroy, OnModuleInit {
             technicalHostName: node.technicalHostName.trim(),
             weight: node.weight,
             maxUsers: node.maxUsers,
+            priority: node.priority ?? 100,
             status: node.status,
         }));
 
@@ -1059,6 +1170,7 @@ export class ToporBalancerService implements OnModuleDestroy, OnModuleInit {
                     locationCode: location.locationCode,
                     maxUsers: node.maxUsers,
                     planCode: location.planCode,
+                    priority: node.priority ?? 100,
                     publicHostCode: location.publicHostCode,
                     publicName: location.publicName,
                     status: node.status,
@@ -1094,16 +1206,21 @@ export class ToporBalancerService implements OnModuleDestroy, OnModuleInit {
     private validateGroupCreate(input: ToporBalancerGroupCreateInput): void {
         this.validateNonEmptyString(input.publicHostCode, 'publicHostCode');
         this.validateNonEmptyString(input.publicName, 'publicName');
+        this.validateNonEmptyString(input.locationCode, 'locationCode');
         this.validateNonEmptyString(input.planCode, 'planCode');
         this.validateGroupUpdate({
             enabled: input.enabled,
-            strategy: input.strategy,
         });
+
+        if (!ADMIN_GROUP_STRATEGIES.has(input.strategy)) {
+            throw new BadRequestException('Invalid TopoR balancer group strategy');
+        }
     }
 
     private validateGroupUpdate(input: ToporBalancerGroupUpdateInput): void {
         this.validateOptionalNonEmptyString(input.publicHostCode, 'publicHostCode');
         this.validateOptionalNonEmptyString(input.publicName, 'publicName');
+        this.validateOptionalNonEmptyString(input.locationCode, 'locationCode');
         this.validateOptionalNonEmptyString(input.planCode, 'planCode');
 
         if (input.strategy !== undefined && !ADMIN_GROUP_STRATEGIES.has(input.strategy)) {
@@ -1138,9 +1255,9 @@ export class ToporBalancerService implements OnModuleDestroy, OnModuleInit {
             input.weight !== undefined &&
             (typeof input.weight !== 'number' ||
                 !Number.isFinite(input.weight) ||
-                input.weight <= 0)
+                input.weight < 1)
         ) {
-            throw new BadRequestException('TopoR balancer node weight must be a finite number > 0');
+            throw new BadRequestException('TopoR balancer node weight must be a finite number >= 1');
         }
 
         if (
@@ -1148,6 +1265,13 @@ export class ToporBalancerService implements OnModuleDestroy, OnModuleInit {
             (!Number.isInteger(input.maxUsers) || input.maxUsers < 1)
         ) {
             throw new BadRequestException('TopoR balancer node maxUsers must be an integer >= 1');
+        }
+
+        if (
+            input.priority !== undefined &&
+            (!Number.isInteger(input.priority) || input.priority < 0)
+        ) {
+            throw new BadRequestException('TopoR balancer node priority must be an integer >= 0');
         }
 
     }
@@ -1177,6 +1301,7 @@ export class ToporBalancerService implements OnModuleDestroy, OnModuleInit {
                 locationCode: group.locationCode,
                 nodes: nodes.map((node) => ({
                     maxUsers: node.maxUsers,
+                    priority: node.priority,
                     status: node.status,
                     technicalHostName: node.technicalHostName,
                     weight: node.weight,
@@ -1184,6 +1309,7 @@ export class ToporBalancerService implements OnModuleDestroy, OnModuleInit {
                 planCode: group.planCode,
                 publicHostCode: group.publicHostCode,
                 publicName: group.publicName,
+                strategy: group.strategy,
             });
         }
 
@@ -1213,6 +1339,7 @@ export class ToporBalancerService implements OnModuleDestroy, OnModuleInit {
                 weight: node.weight,
                 maxUsers: node.maxUsers,
                 status: node.status,
+                priority: node.priority,
             });
             locations.set(key, location);
         }
@@ -1227,6 +1354,7 @@ export class ToporBalancerService implements OnModuleDestroy, OnModuleInit {
         this.validateNonEmptyString(input.technicalHostName, 'technicalHostName');
         this.validateNonEmptyString(input.publicHostCode, 'publicHostCode');
         this.validateNonEmptyString(input.publicName, 'publicName');
+        this.validateNonEmptyString(input.locationCode, 'locationCode');
         this.validateNonEmptyString(input.planCode, 'planCode');
         this.validateNodeUpdate({
             maxUsers: input.maxUsers,
@@ -1311,12 +1439,14 @@ export class ToporBalancerService implements OnModuleDestroy, OnModuleInit {
         } else if (input.group) {
             this.validateNonEmptyString(input.group.publicHostCode, 'publicHostCode');
             this.validateNonEmptyString(input.group.publicName, 'publicName');
+            this.validateNonEmptyString(input.group.locationCode, 'locationCode');
             this.validateNonEmptyString(input.group.planCode, 'planCode');
         } else {
             const legacyGroup = this.getLegacyDiscoveryImportGroup(input);
 
             this.validateNonEmptyString(legacyGroup.publicHostCode, 'publicHostCode');
             this.validateNonEmptyString(legacyGroup.publicName, 'publicName');
+            this.validateNonEmptyString(legacyGroup.locationCode, 'locationCode');
             this.validateNonEmptyString(legacyGroup.planCode, 'planCode');
         }
 
@@ -1330,6 +1460,7 @@ export class ToporBalancerService implements OnModuleDestroy, OnModuleInit {
             this.validateNonEmptyString(node.technicalHostName, 'technicalHostName');
             this.validateNodeUpdate({
                 maxUsers: node.maxUsers,
+                priority: node.priority,
                 status: node.status,
                 weight: node.weight,
             });
@@ -1352,21 +1483,25 @@ export class ToporBalancerService implements OnModuleDestroy, OnModuleInit {
         this.validateNonEmptyString(input.planCode, 'planCode');
         this.validateNonEmptyString(input.technicalHostName, 'technicalHostName');
 
-        const targetNode = (await this.getAdminRepository().listNodes()).find(
+        const adminNodes = await this.getAdminRepository().listNodes();
+        const targetNode = adminNodes.find(
+            (node) =>
+                node.technicalHostName === input.technicalHostName &&
+                node.publicHostCode === input.publicHostCode &&
+                node.planCode === input.planCode,
+        );
+        const mismatchedTargetNode = adminNodes.find(
             (node) => node.technicalHostName === input.technicalHostName,
         );
 
         if (!targetNode) {
-            throw new NotFoundException('TopoR balancer node not found for reassignment');
-        }
+            if (mismatchedTargetNode) {
+                throw new BadRequestException(
+                    'TopoR balancer reassignment target does not match publicHostCode and planCode',
+                );
+            }
 
-        if (
-            targetNode.publicHostCode !== input.publicHostCode ||
-            targetNode.planCode !== input.planCode
-        ) {
-            throw new BadRequestException(
-                'TopoR balancer reassignment target does not match publicHostCode and planCode',
-            );
+            throw new NotFoundException('TopoR balancer node not found for reassignment');
         }
 
         if (targetNode.status !== 'active') {
@@ -1396,6 +1531,10 @@ export class ToporBalancerService implements OnModuleDestroy, OnModuleInit {
         const trimmed = value.trim();
 
         return trimmed.length > 0 ? trimmed : undefined;
+    }
+
+    private normalizeTechnicalHostName(value: string): string {
+        return value.trim();
     }
 
     private getErrorMessage(error: unknown): string {

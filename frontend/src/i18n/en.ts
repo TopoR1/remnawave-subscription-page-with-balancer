@@ -52,7 +52,7 @@ export const en = {
             open: 'Open',
             refresh: 'Refresh',
             scanSubscription: 'Scan subscription',
-            searchRemnawave: 'Get from Remnawave API',
+            searchRemnawave: '+ Add nodes from Remnawave',
             startDraining: 'Drain',
         },
         common: {
@@ -76,8 +76,8 @@ export const en = {
         },
         discovery: {
             addModalTitle: 'Add to group',
-            alreadyInGroup: 'Already in group',
-            canImport: 'Not imported',
+            alreadyInGroup: 'Already in this group',
+            canImport: 'Free',
             conflict: 'In another group',
             created: 'Created',
             discovered: 'Discovered',

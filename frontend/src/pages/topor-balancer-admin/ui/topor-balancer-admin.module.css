@@ -38,6 +38,74 @@
     overflow-wrap: anywhere;
 }
 
+.statusBar {
+    background: rgb(22 27 35 / 72%);
+    border: 1px solid rgb(255 255 255 / 8%);
+}
+
+.statusPill {
+    min-height: 30px;
+    padding: 4px 10px;
+    background: rgb(255 255 255 / 4%);
+    border: 1px solid rgb(255 255 255 / 7%);
+    border-radius: 8px;
+}
+
+.adminLayout {
+    display: grid;
+    grid-template-columns: minmax(300px, 360px) minmax(0, 1fr);
+    gap: var(--mantine-spacing-md);
+    align-items: start;
+}
+
+.groupsPanel,
+.groupContextPanel {
+    background: rgb(22 27 35 / 72%);
+    border: 1px solid rgb(255 255 255 / 8%);
+}
+
+.groupListViewport {
+    height: min(620px, calc(100vh - 320px));
+    min-height: 360px;
+}
+
+.groupListItem {
+    width: 100%;
+    padding: 12px;
+    color: inherit;
+    text-align: left;
+    cursor: pointer;
+    background: rgb(255 255 255 / 3%);
+    border: 1px solid rgb(255 255 255 / 7%);
+    border-radius: 8px;
+}
+
+.groupListItem:hover,
+.groupListItem:focus-visible {
+    background: rgb(34 211 238 / 7%);
+    border-color: rgb(34 211 238 / 32%);
+    outline: none;
+}
+
+.groupListItemActive {
+    background: rgb(34 211 238 / 10%);
+    border-color: rgb(34 211 238 / 42%);
+}
+
+.strategyBadge {
+    cursor: help;
+}
+
+.groupOverviewGrid {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+    gap: var(--mantine-spacing-md);
+}
+
+.legacyAdmin {
+    display: none;
+}
+
 .tableCard {
     overflow: hidden;
     background: rgb(22 27 35 / 72%);
@@ -131,4 +199,17 @@
 .emptyState {
     min-height: 180px;
     padding: var(--mantine-spacing-xl);
+}
+
+@media (width <= 900px) {
+    .adminLayout,
+    .groupOverviewGrid {
+        grid-template-columns: 1fr;
+    }
+
+    .groupListViewport {
+        height: auto;
+        min-height: 0;
+        max-height: 420px;
+    }
 }

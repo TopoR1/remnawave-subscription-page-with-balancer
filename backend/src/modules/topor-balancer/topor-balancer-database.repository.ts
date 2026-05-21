@@ -1,5 +1,5 @@
 import { createRequire } from 'node:module';
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 
 import type {
     ToporBalancerConfig,
@@ -73,6 +73,7 @@ export interface ToporBalancerNodeUpdateInput {
     weight?: number;
     maxUsers?: number;
     status?: ToporBalancerNodeStatus;
+    priority?: number;
     publicName?: string;
     locationCode?: string;
     planCode?: string;
@@ -88,6 +89,7 @@ export interface ToporBalancerNodeCreateInput {
     weight: number;
     maxUsers: number;
     status: ToporBalancerNodeStatus;
+    priority?: number;
 }
 
 export type ToporBalancerNodeDeleteResult = 'deleted' | 'has_assignments' | 'not_found';
@@ -115,6 +117,7 @@ export interface ToporBalancerGroupNodeCreateInput {
     weight: number;
     maxUsers: number;
     status: ToporBalancerNodeStatus;
+    priority?: number;
 }
 
 export type ToporBalancerGroupDeleteResult = 'deleted' | 'has_nodes' | 'not_found';
@@ -138,6 +141,7 @@ export interface ToporBalancerAssignmentRepository {
     countAssignments(): Promise<number>;
     countRequests(): Promise<number>;
     listGroups(): Promise<ToporBalancerAdminGroup[]>;
+    getGroup(id: string): Promise<ToporBalancerAdminGroup | null>;
     createGroup(input: ToporBalancerGroupCreateInput): Promise<ToporBalancerAdminGroup | null>;
     updateGroup(
         id: string,
@@ -182,6 +186,7 @@ interface DbNodeRow {
     weight: string | number;
     max_users: number;
     status: ToporBalancerNodeStatus;
+    priority: number;
     created_at?: Date | string;
     updated_at?: Date | string;
 }
@@ -273,12 +278,16 @@ export class ToporBalancerPostgresRepository implements ToporBalancerAssignmentR
                 weight NUMERIC NOT NULL DEFAULT 1,
                 max_users INTEGER NOT NULL DEFAULT 300,
                 status TEXT NOT NULL DEFAULT 'active',
+                priority INTEGER NOT NULL DEFAULT 100,
                 created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
                 updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
             );
 
             ALTER TABLE topor_balancer_nodes
                 ADD COLUMN IF NOT EXISTS group_id UUID;
+
+            ALTER TABLE topor_balancer_nodes
+                ADD COLUMN IF NOT EXISTS priority INTEGER NOT NULL DEFAULT 100;
 
             ALTER TABLE topor_balancer_groups
                 ADD COLUMN IF NOT EXISTS strategy TEXT NOT NULL DEFAULT 'least_loaded';
@@ -398,7 +407,7 @@ export class ToporBalancerPostgresRepository implements ToporBalancerAssignmentR
                 return existingNode;
             }
 
-            const selectedNode = await this.selectLeastLoadedActiveNode(client, input);
+            const selectedNode = await this.selectActiveNode(client, input);
 
             if (!selectedNode) {
                 await client.query('COMMIT');
@@ -406,7 +415,9 @@ export class ToporBalancerPostgresRepository implements ToporBalancerAssignmentR
                 return null;
             }
 
-            await this.upsertAssignment(client, input, selectedNode.id);
+            if ((input.location.strategy ?? 'least_loaded') !== 'sticky_hash') {
+                await this.upsertAssignment(client, input, selectedNode.id);
+            }
             await client.query('COMMIT');
 
             return selectedNode;
@@ -492,6 +503,12 @@ export class ToporBalancerPostgresRepository implements ToporBalancerAssignmentR
         `);
 
         return result.rows.map(mapAdminGroupRow);
+    }
+
+    public async getGroup(id: string): Promise<ToporBalancerAdminGroup | null> {
+        const groups = await this.listGroups();
+
+        return groups.find((group) => group.id === id) ?? null;
     }
 
     public async createGroup(
@@ -622,9 +639,10 @@ export class ToporBalancerPostgresRepository implements ToporBalancerAssignmentR
                 plan_code,
                 weight,
                 max_users,
-                status
+                status,
+                priority
             )
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
             ON CONFLICT (group_id, technical_host_name) DO NOTHING
             RETURNING *
             `,
@@ -639,6 +657,7 @@ export class ToporBalancerPostgresRepository implements ToporBalancerAssignmentR
                 input.weight,
                 input.maxUsers,
                 input.status,
+                input.priority ?? 100,
             ],
         );
 
@@ -666,6 +685,7 @@ export class ToporBalancerPostgresRepository implements ToporBalancerAssignmentR
 
         return this.updateNode(nodeId, {
             maxUsers: input.maxUsers,
+            priority: input.priority,
             status: input.status,
             technicalHostName: input.technicalHostName,
             weight: input.weight,
@@ -700,6 +720,7 @@ export class ToporBalancerPostgresRepository implements ToporBalancerAssignmentR
                 n.weight,
                 n.max_users,
                 n.status,
+                n.priority,
                 n.created_at,
                 n.updated_at,
                 COUNT(a.id) AS assigned_users
@@ -776,6 +797,7 @@ export class ToporBalancerPostgresRepository implements ToporBalancerAssignmentR
         addUpdate(updates, params, 'weight', input.weight);
         addUpdate(updates, params, 'max_users', input.maxUsers);
         addUpdate(updates, params, 'status', input.status);
+        addUpdate(updates, params, 'priority', input.priority);
 
         if (updates.length === 0) {
             const nodes = await this.listNodes();
@@ -867,6 +889,7 @@ export class ToporBalancerPostgresRepository implements ToporBalancerAssignmentR
                 n.weight,
                 n.max_users,
                 n.status,
+                n.priority,
                 n.created_at,
                 n.updated_at
             FROM topor_balancer_nodes
@@ -1009,6 +1032,7 @@ export class ToporBalancerPostgresRepository implements ToporBalancerAssignmentR
             publicHostCode: location.publicHostCode,
             publicName: location.publicName,
             strategy: 'least_loaded',
+            ...(location.strategy ? { strategy: location.strategy } : {}),
         });
 
         if (!group) {
@@ -1027,9 +1051,10 @@ export class ToporBalancerPostgresRepository implements ToporBalancerAssignmentR
                 plan_code,
                 weight,
                 max_users,
-                status
+                status,
+                priority
             )
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
             ON CONFLICT (group_id, technical_host_name) DO UPDATE SET
                 public_host_code = EXCLUDED.public_host_code,
                 public_name = EXCLUDED.public_name,
@@ -1038,6 +1063,7 @@ export class ToporBalancerPostgresRepository implements ToporBalancerAssignmentR
                 weight = EXCLUDED.weight,
                 max_users = EXCLUDED.max_users,
                 status = EXCLUDED.status,
+                priority = EXCLUDED.priority,
                 updated_at = NOW()
             `,
             [
@@ -1051,6 +1077,7 @@ export class ToporBalancerPostgresRepository implements ToporBalancerAssignmentR
                 node.weight,
                 node.maxUsers,
                 node.status,
+                node.priority ?? 100,
             ],
         );
     }
@@ -1072,6 +1099,7 @@ export class ToporBalancerPostgresRepository implements ToporBalancerAssignmentR
                 n.weight,
                 n.max_users,
                 n.status,
+                n.priority,
                 n.created_at,
                 n.updated_at
             FROM topor_balancer_assignments a
@@ -1095,6 +1123,25 @@ export class ToporBalancerPostgresRepository implements ToporBalancerAssignmentR
         return result.rows[0] ? mapNodeRow(result.rows[0]) : null;
     }
 
+    private async selectActiveNode(
+        client: PgQueryable,
+        input: ToporBalancerAssignmentSelectionInput,
+    ): Promise<ToporBalancerDbNode | null> {
+        switch (input.location.strategy ?? 'least_loaded') {
+            case 'manual':
+                return null;
+            case 'priority_failover':
+                return this.selectPriorityFailoverActiveNode(client, input);
+            case 'sticky_hash':
+                return this.selectStickyHashActiveNode(client, input);
+            case 'weighted':
+                return this.selectWeightedActiveNode(client, input);
+            case 'least_loaded':
+            default:
+                return this.selectLeastLoadedActiveNode(client, input);
+        }
+    }
+
     private async selectLeastLoadedActiveNode(
         client: PgQueryable,
         input: ToporBalancerAssignmentSelectionInput,
@@ -1112,6 +1159,7 @@ export class ToporBalancerPostgresRepository implements ToporBalancerAssignmentR
                 n.weight,
                 n.max_users,
                 n.status,
+                n.priority,
                 n.created_at,
                 n.updated_at
             FROM topor_balancer_nodes n
@@ -1136,6 +1184,149 @@ export class ToporBalancerPostgresRepository implements ToporBalancerAssignmentR
         );
 
         return result.rows[0] ? mapNodeRow(result.rows[0]) : null;
+    }
+
+    private async selectWeightedActiveNode(
+        client: PgQueryable,
+        input: ToporBalancerAssignmentSelectionInput,
+    ): Promise<ToporBalancerDbNode | null> {
+        const result = await client.query<DbNodeRow>(
+            `
+            WITH active_nodes AS (
+                SELECT
+                    n.id,
+                    n.group_id,
+                    n.technical_host_name,
+                    COALESCE(g.public_host_code, n.public_host_code) AS public_host_code,
+                    COALESCE(g.public_name, n.public_name) AS public_name,
+                    COALESCE(g.location_code, n.location_code) AS location_code,
+                    COALESCE(g.plan_code, n.plan_code) AS plan_code,
+                    n.weight,
+                    n.max_users,
+                    n.status,
+                    n.priority,
+                    n.created_at,
+                    n.updated_at,
+                    COUNT(a.id) AS assigned_users
+                FROM topor_balancer_nodes n
+                LEFT JOIN topor_balancer_groups g ON g.id = n.group_id
+                LEFT JOIN topor_balancer_assignments a ON a.node_id = n.id
+                WHERE COALESCE(g.public_host_code, n.public_host_code) = $1
+                  AND COALESCE(g.plan_code, n.plan_code) = $2
+                  AND COALESCE(g.enabled, TRUE) = TRUE
+                  AND n.technical_host_name = ANY($3)
+                  AND n.status = 'active'
+                GROUP BY n.id, g.id
+            )
+            SELECT *
+            FROM active_nodes
+            ORDER BY
+              CASE
+                WHEN EXISTS (SELECT 1 FROM active_nodes WHERE assigned_users < max_users) THEN
+                  CASE WHEN assigned_users < max_users THEN 0 ELSE 1 END
+                ELSE 0
+              END ASC,
+              (assigned_users::numeric / GREATEST(weight, 1)) ASC,
+              technical_host_name ASC
+            LIMIT 1
+            `,
+            [
+                input.location.publicHostCode,
+                input.location.planCode,
+                input.candidateTechnicalHostNames,
+            ],
+        );
+
+        return result.rows[0] ? mapNodeRow(result.rows[0]) : null;
+    }
+
+    private async selectPriorityFailoverActiveNode(
+        client: PgQueryable,
+        input: ToporBalancerAssignmentSelectionInput,
+    ): Promise<ToporBalancerDbNode | null> {
+        const result = await client.query<DbNodeRow>(
+            `
+            SELECT
+                n.id,
+                n.group_id,
+                n.technical_host_name,
+                COALESCE(g.public_host_code, n.public_host_code) AS public_host_code,
+                COALESCE(g.public_name, n.public_name) AS public_name,
+                COALESCE(g.location_code, n.location_code) AS location_code,
+                COALESCE(g.plan_code, n.plan_code) AS plan_code,
+                n.weight,
+                n.max_users,
+                n.status,
+                n.priority,
+                n.created_at,
+                n.updated_at
+            FROM topor_balancer_nodes n
+            LEFT JOIN topor_balancer_groups g ON g.id = n.group_id
+            WHERE COALESCE(g.public_host_code, n.public_host_code) = $1
+              AND COALESCE(g.plan_code, n.plan_code) = $2
+              AND COALESCE(g.enabled, TRUE) = TRUE
+              AND n.technical_host_name = ANY($3)
+              AND n.status = 'active'
+            ORDER BY n.priority ASC, n.technical_host_name ASC
+            LIMIT 1
+            `,
+            [
+                input.location.publicHostCode,
+                input.location.planCode,
+                input.candidateTechnicalHostNames,
+            ],
+        );
+
+        return result.rows[0] ? mapNodeRow(result.rows[0]) : null;
+    }
+
+    private async selectStickyHashActiveNode(
+        client: PgQueryable,
+        input: ToporBalancerAssignmentSelectionInput,
+    ): Promise<ToporBalancerDbNode | null> {
+        const result = await client.query<DbNodeRow>(
+            `
+            SELECT
+                n.id,
+                n.group_id,
+                n.technical_host_name,
+                COALESCE(g.public_host_code, n.public_host_code) AS public_host_code,
+                COALESCE(g.public_name, n.public_name) AS public_name,
+                COALESCE(g.location_code, n.location_code) AS location_code,
+                COALESCE(g.plan_code, n.plan_code) AS plan_code,
+                n.weight,
+                n.max_users,
+                n.status,
+                n.priority,
+                n.created_at,
+                n.updated_at
+            FROM topor_balancer_nodes n
+            LEFT JOIN topor_balancer_groups g ON g.id = n.group_id
+            WHERE COALESCE(g.public_host_code, n.public_host_code) = $1
+              AND COALESCE(g.plan_code, n.plan_code) = $2
+              AND COALESCE(g.enabled, TRUE) = TRUE
+              AND n.technical_host_name = ANY($3)
+              AND n.status = 'active'
+            ORDER BY n.technical_host_name ASC
+            `,
+            [
+                input.location.publicHostCode,
+                input.location.planCode,
+                input.candidateTechnicalHostNames,
+            ],
+        );
+        const nodes = result.rows.map(mapNodeRow);
+
+        if (nodes.length === 0) {
+            return null;
+        }
+
+        const hash = createHash('sha256')
+            .update(`${input.shortUuid}:${input.location.publicHostCode}:${input.location.planCode}`)
+            .digest();
+        const index = hash.readUInt32BE(0) % nodes.length;
+
+        return nodes[index];
     }
 
     private async upsertAssignment(
@@ -1168,15 +1359,6 @@ export class ToporBalancerPostgresRepository implements ToporBalancerAssignmentR
         );
 
         return mapAssignmentRow(result.rows[0]);
-    }
-
-    private async getGroup(id: string): Promise<ToporBalancerDbGroup | null> {
-        const result = await this.pool.query<DbGroupRow>(
-            'SELECT * FROM topor_balancer_groups WHERE id = $1 LIMIT 1',
-            [id],
-        );
-
-        return result.rows[0] ? mapGroupRow(result.rows[0]) : null;
     }
 
     private async groupExists(id: string): Promise<boolean> {
@@ -1265,6 +1447,7 @@ function mapNodeRow(row: DbNodeRow): ToporBalancerDbNode {
         weight: Number(row.weight),
         maxUsers: row.max_users,
         status: row.status,
+        priority: row.priority,
         createdAt: row.created_at?.toString(),
         updatedAt: row.updated_at?.toString(),
     };

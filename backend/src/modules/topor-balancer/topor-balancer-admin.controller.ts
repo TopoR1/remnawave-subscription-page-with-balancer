@@ -44,15 +44,20 @@ export class ToporBalancerAdminController {
         return this.toporBalancerService.listAdminGroups();
     }
 
+    @Get('groups/:id')
+    public async group(@Param('id') id: string) {
+        return this.toporBalancerService.getAdminGroup(id);
+    }
+
     @Post('groups')
     public async createGroup(
         @Body()
         body: {
             publicHostCode: string;
             publicName: string;
-            locationCode?: string;
+            locationCode: string;
             planCode: string;
-            strategy?: ToporBalancerGroupStrategy;
+            strategy: ToporBalancerGroupStrategy;
             enabled?: boolean;
         },
     ) {
@@ -62,7 +67,7 @@ export class ToporBalancerAdminController {
             planCode: body.planCode,
             publicHostCode: body.publicHostCode,
             publicName: body.publicName,
-            strategy: body.strategy ?? 'least_loaded',
+            strategy: body.strategy,
         });
     }
 
@@ -101,10 +106,12 @@ export class ToporBalancerAdminController {
             weight?: number;
             maxUsers?: number;
             status?: ToporBalancerNodeStatus;
+            priority?: number;
         },
     ) {
         return this.toporBalancerService.createAdminGroupNode(id, {
             maxUsers: body.maxUsers ?? 300,
+            priority: body.priority ?? 100,
             status: body.status ?? 'active',
             technicalHostName: body.technicalHostName,
             weight: body.weight ?? 1,
@@ -121,6 +128,7 @@ export class ToporBalancerAdminController {
             weight?: number;
             maxUsers?: number;
             status?: ToporBalancerNodeStatus;
+            priority?: number;
         },
     ) {
         return this.toporBalancerService.updateAdminGroupNode(id, nodeId, body);
@@ -129,6 +137,52 @@ export class ToporBalancerAdminController {
     @Delete('groups/:id/nodes/:nodeId')
     public async deleteGroupNode(@Param('id') id: string, @Param('nodeId') nodeId: string) {
         return this.toporBalancerService.deleteAdminGroupNode(id, nodeId);
+    }
+
+    @Get('groups/:id/discovery/remnawave')
+    public async discoverGroupFromRemnawaveApi(@Param('id') id: string) {
+        return this.toporBalancerDiscoveryService.discoverGroupFromRemnawaveApi(id);
+    }
+
+    @Post('groups/:id/discovery/refresh')
+    public async refreshGroupDiscovery(@Param('id') id: string) {
+        return this.toporBalancerDiscoveryService.refreshGroupFromRemnawaveApi(id);
+    }
+
+    @Post('groups/:id/discovery/subscription')
+    public async discoverGroupFromSubscription(
+        @Param('id') id: string,
+        @Body() body: { shortUuid: string },
+    ) {
+        return this.toporBalancerDiscoveryService.discoverGroupFromSubscription(id, body.shortUuid);
+    }
+
+    @Post('groups/:id/nodes/import')
+    public async importGroupNodes(
+        @Param('id') id: string,
+        @Body()
+        body: {
+            defaults: {
+                maxUsers: number;
+                status: ToporBalancerNodeStatus;
+                weight: number;
+                priority?: number;
+            };
+            mode?: 'skip_conflicts';
+            technicalHostNames: string[];
+        },
+    ) {
+        return this.toporBalancerService.importAdminGroupNodes(id, {
+            defaults: {
+                maxUsers: body.defaults.maxUsers,
+                priority: body.defaults.priority ?? 100,
+                status: body.defaults.status,
+                technicalHostName: 'validation-placeholder',
+                weight: body.defaults.weight,
+            },
+            mode: body.mode,
+            technicalHostNames: body.technicalHostNames,
+        });
     }
 
     @Post('nodes')
@@ -143,6 +197,7 @@ export class ToporBalancerAdminController {
             weight: number;
             maxUsers: number;
             status: ToporBalancerNodeStatus;
+            priority?: number;
         },
     ) {
         return this.toporBalancerService.createAdminNode(body);
@@ -158,6 +213,7 @@ export class ToporBalancerAdminController {
             weight?: number;
             maxUsers?: number;
             status?: ToporBalancerNodeStatus;
+            priority?: number;
             publicName?: string;
             locationCode?: string;
             planCode?: string;
@@ -169,6 +225,7 @@ export class ToporBalancerAdminController {
             weight: body.weight,
             maxUsers: body.maxUsers,
             status: body.status,
+            priority: body.priority,
             publicName: body.publicName,
             locationCode: body.locationCode,
             planCode: body.planCode,
@@ -260,6 +317,7 @@ export class ToporBalancerAdminController {
                 weight: number;
                 maxUsers: number;
                 status: ToporBalancerNodeStatus;
+                priority?: number;
             }>;
         },
     ) {

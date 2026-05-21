@@ -8,6 +8,8 @@ import type {
     ToporBalancerDiscoveryImportInput,
     ToporBalancerDiscoveryImportResult,
     ToporBalancerDiscoveryResponse,
+    ToporBalancerGroupDiscoveryItem,
+    ToporBalancerGroupDiscoveryResponse,
 } from './types';
 
 import { parseSubscription } from './topor-balancer-subscription.parser';
@@ -143,10 +145,152 @@ export class ToporBalancerDiscoveryService {
         };
     }
 
+    public async discoverGroupFromRemnawaveApi(
+        groupId: string,
+    ): Promise<ToporBalancerGroupDiscoveryResponse> {
+        const response = await this.discoverFromRemnawaveApi();
+
+        return this.mapDiscoveryResponseToGroup(groupId, response);
+    }
+
+    public async refreshGroupFromRemnawaveApi(
+        groupId: string,
+    ): Promise<ToporBalancerGroupDiscoveryResponse> {
+        try {
+            return await this.discoverGroupFromRemnawaveApi(groupId);
+        } catch (error) {
+            const group = await this.toporBalancerService.getAdminGroup(groupId);
+
+            this.logger.warn(`[ToporBalancerDiscovery] Remnawave API group refresh failed: ${error}`);
+
+            return {
+                group: this.mapGroupSummary(group),
+                items: [],
+                message: 'Remnawave API discovery is not available; use subscription scan.',
+                source: 'remnawave-api',
+            };
+        }
+    }
+
+    public async discoverGroupFromSubscription(
+        groupId: string,
+        shortUuid: string,
+    ): Promise<ToporBalancerGroupDiscoveryResponse> {
+        const response = await this.discoverFromSubscription(shortUuid);
+
+        return this.mapDiscoveryResponseToGroup(groupId, response);
+    }
+
     public async importDiscoveredNodes(
         input: ToporBalancerDiscoveryImportInput,
     ): Promise<ToporBalancerDiscoveryImportResult> {
         return this.toporBalancerService.importDiscoveredNodes(input);
+    }
+
+    private async mapDiscoveryResponseToGroup(
+        groupId: string,
+        response: ToporBalancerDiscoveryResponse,
+    ): Promise<ToporBalancerGroupDiscoveryResponse> {
+        const group = await this.toporBalancerService.getAdminGroup(groupId);
+        const importedNodes = await this.toporBalancerService.listAdminNodes();
+        const items = response.items.map((item) =>
+            this.mapDiscoveredHostToGroupItem(item, group.id, importedNodes),
+        );
+
+        return {
+            group: this.mapGroupSummary(group),
+            items,
+            shortUuid: response.shortUuid,
+            source: response.source,
+        };
+    }
+
+    private mapDiscoveredHostToGroupItem(
+        item: ToporBalancerDiscoveredHost,
+        groupId: string,
+        importedNodes: Awaited<ReturnType<ToporBalancerService['listAdminNodes']>>,
+    ): ToporBalancerGroupDiscoveryItem {
+        const technicalHostName = this.normalizeTechnicalHostName(item.technicalHostName);
+        const matchingNodes = importedNodes.filter(
+            (node) => this.normalizeTechnicalHostName(node.technicalHostName) === technicalHostName,
+        );
+        const nodeInThisGroup = matchingNodes.find((node) => node.groupId === groupId);
+        const nodesInOtherGroups = matchingNodes.filter((node) => node.groupId !== groupId);
+
+        if (nodeInThisGroup) {
+            return {
+                ...item,
+                alreadyImported: true,
+                canAdd: false,
+                currentGroupId: nodeInThisGroup.groupId ?? null,
+                currentGroupName: nodeInThisGroup.publicName,
+                matchedGroupId: nodeInThisGroup.groupId,
+                matchedGroupPlanCode: nodeInThisGroup.planCode,
+                matchedGroupPublicHostCode: nodeInThisGroup.publicHostCode,
+                matchedNodeId: nodeInThisGroup.id,
+                status: 'in_this_group',
+                technicalHostName,
+            };
+        }
+
+        if (nodesInOtherGroups.length === 1) {
+            const nodeInOtherGroup = nodesInOtherGroups[0];
+
+            return {
+                ...item,
+                alreadyImported: true,
+                canAdd: false,
+                currentGroupId: nodeInOtherGroup.groupId ?? null,
+                currentGroupName: nodeInOtherGroup.publicName,
+                matchedGroupId: nodeInOtherGroup.groupId,
+                matchedGroupPlanCode: nodeInOtherGroup.planCode,
+                matchedGroupPublicHostCode: nodeInOtherGroup.publicHostCode,
+                matchedNodeId: nodeInOtherGroup.id,
+                status: 'in_other_group',
+                technicalHostName,
+            };
+        }
+
+        if (nodesInOtherGroups.length > 1) {
+            return {
+                ...item,
+                alreadyImported: true,
+                canAdd: false,
+                currentGroupId: null,
+                currentGroupName: nodesInOtherGroups.map((node) => node.publicName).join(', '),
+                matchedNodeId: null,
+                status: 'conflict',
+                technicalHostName,
+            };
+        }
+
+        return {
+            ...item,
+            alreadyImported: false,
+            canAdd: true,
+            currentGroupId: null,
+            currentGroupName: null,
+            matchedGroupId: undefined,
+            matchedGroupPlanCode: undefined,
+            matchedGroupPublicHostCode: undefined,
+            matchedNodeId: null,
+            status: 'free',
+            technicalHostName,
+        };
+    }
+
+    private mapGroupSummary(group: {
+        id: string;
+        planCode: string;
+        publicHostCode: string;
+        publicName: string;
+    }): ToporBalancerGroupDiscoveryResponse['group'] {
+        return {
+            id: group.id,
+            planCode: group.planCode,
+            publicHostCode: group.publicHostCode,
+            publicName: group.publicName,
+        };
     }
 
     private async getImportedNodesSafe() {

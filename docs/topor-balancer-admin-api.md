@@ -19,6 +19,7 @@ Groups are the public locations users see. Technical nodes live inside a group a
 ```http
 GET /api/topor-balancer/groups
 POST /api/topor-balancer/groups
+GET /api/topor-balancer/groups/:id
 PATCH /api/topor-balancer/groups/:id
 DELETE /api/topor-balancer/groups/:id
 ```
@@ -33,6 +34,8 @@ DELETE /api/topor-balancer/groups/:id
   "enabled": true
 }
 ```
+
+Supported `strategy` values: `least_loaded`, `weighted`, `sticky_hash`, `priority_failover`, `manual`.
 
 Deleting a group with nodes returns `409 Conflict`.
 
@@ -55,6 +58,39 @@ DELETE /api/topor-balancer/groups/:id/nodes/:nodeId
 ```
 
 Deleting a node with assignments returns `409 Conflict`. For production removal, prefer `status: "draining"` or `status: "disabled"`.
+
+## Group Discovery
+
+Group-scoped discovery returns each discovered technical node with its relation to the selected public group.
+
+```http
+GET /api/topor-balancer/groups/:id/discovery/remnawave
+POST /api/topor-balancer/groups/:id/discovery/refresh
+POST /api/topor-balancer/groups/:id/discovery/subscription
+POST /api/topor-balancer/groups/:id/nodes/import
+```
+
+```json
+{
+  "shortUuid": "user-short-uuid"
+}
+```
+
+Discovery item statuses are `free`, `in_this_group`, `in_other_group`, and `conflict`. Sensitive subscription values such as UUID, `pbk`, `sid`, and raw VLESS links are not returned.
+
+```json
+{
+  "technicalHostNames": ["FI-STD-01", "FI-STD-02"],
+  "defaults": {
+    "weight": 1,
+    "maxUsers": 300,
+    "status": "active"
+  },
+  "mode": "skip_conflicts"
+}
+```
+
+The group import endpoint never moves nodes between groups. Existing nodes in the selected group are returned in `alreadyInGroup`; nodes owned by another group are returned in `inOtherGroup`.
 
 ## Discovery Import
 

@@ -50,6 +50,10 @@ const ADMIN_REQUESTS_URL = '/api/topor-balancer/requests'
 const DISCOVERY_API_URL = '/api/topor-balancer/discovery/remnawave'
 const DISCOVERY_SUBSCRIPTION_URL = '/api/topor-balancer/discovery/subscription'
 const DISCOVERY_IMPORT_URL = '/api/topor-balancer/discovery/import'
+const groupDiscoveryApiUrl = (groupId: string) => `/api/topor-balancer/groups/${encodeURIComponent(groupId)}/discovery/remnawave`
+const groupDiscoveryRefreshUrl = (groupId: string) => `/api/topor-balancer/groups/${encodeURIComponent(groupId)}/discovery/refresh`
+const groupDiscoverySubscriptionUrl = (groupId: string) => `/api/topor-balancer/groups/${encodeURIComponent(groupId)}/discovery/subscription`
+const groupNodesImportUrl = (groupId: string) => `/api/topor-balancer/groups/${encodeURIComponent(groupId)}/nodes/import`
 const SUBSCRIPTION_DIAGNOSTICS_URL = '/api/topor-balancer/diagnostics/subscription'
 const RUNTIME_CONFIG_HEALTH_URL = '/api/topor-balancer/runtime-config-health'
 
@@ -60,11 +64,12 @@ const DIAGNOSTICS_USER_AGENTS = [
     { label: 'v2RayTun', value: 'v2RayTun/6.0' },
     { label: 'Hiddify', value: 'Hiddify/2.0' },
     { label: 'Happ', value: 'Happ/1.0' },
-    { label: texts.diagnostics.customUserAgent, value: 'custom' }
+    { label: 'Свой клиент', value: 'custom' }
 ] as const
 
 type ToporBalancerNodeStatus = (typeof NODE_STATUSES)[number]
-type ToporBalancerGroupStrategy = 'least_loaded'
+type ToporBalancerGroupStrategy = 'least_loaded' | 'manual' | 'priority_failover' | 'sticky_hash' | 'weighted'
+type DiscoveryItemStatus = 'conflict' | 'free' | 'in_other_group' | 'in_this_group'
 
 interface ToporBalancerHealth {
     assignmentCount: number
@@ -137,6 +142,9 @@ interface ToporBalancerRequest {
 
 interface DiscoveredHost {
     alreadyImported: boolean
+    canAdd?: boolean
+    currentGroupId?: null | string
+    currentGroupName?: null | string
     flow?: string
     host?: string
     matchedGroupId?: string
@@ -154,27 +162,45 @@ interface DiscoveredHost {
     sni?: string
     technicalHostName: string
     type?: string
+    status?: DiscoveryItemStatus
 }
 
 interface DiscoveryResponse {
+    group?: {
+        id: string
+        planCode: string
+        publicHostCode: string
+        publicName: string
+    }
     items: DiscoveredHost[]
+    message?: string
     shortUuid?: string
     source: 'remnawave-api' | 'subscription'
 }
 
+interface ImportConflict {
+    existingGroupId?: string
+    existingPlanCode?: string
+    existingPublicHostCode?: string
+    existingPublicName?: string
+    reason: string
+    technicalHostName: string
+}
+
+interface GroupImportConflict {
+    currentGroupId?: string
+    currentGroupName?: string
+    technicalHostName: string
+}
+
 interface ImportResult {
-    conflicts: Array<{
-        existingGroupId?: string
-        existingPlanCode?: string
-        existingPublicHostCode?: string
-        existingPublicName?: string
-        reason: string
-        technicalHostName: string
-    }>
+    alreadyInGroup?: Array<{ nodeId?: string; technicalHostName: string }>
+    conflicts?: ImportConflict[]
     created: ToporBalancerNode[]
     errors?: Array<{ reason: string; technicalHostName?: string }>
-    skipped: Array<{ reason: string; technicalHostName: string }>
-    updated: ToporBalancerNode[]
+    inOtherGroup?: GroupImportConflict[]
+    skipped?: Array<{ reason: string; technicalHostName: string }>
+    updated?: ToporBalancerNode[]
 }
 
 type ImportMode = 'existing' | 'new'
@@ -226,10 +252,44 @@ function formatText(template: string, values: Record<string, number | string>) {
     return Object.entries(values).reduce((current, [key, value]) => current.replaceAll('{{' + key + '}}', String(value)), template)
 }
 
+function getAdminErrorMessage(error: unknown, fallback: string) {
+    if (!(error instanceof Error)) {
+        return fallback
+    }
+
+    if (error.message.includes('Unexpected token')) {
+        return 'Админ-интерфейс получил некорректный ответ. Проверьте, что серверная часть запущена и доступна.'
+    }
+
+    return error.message
+}
+
 function Help({ label }: { label: string }) {
+    const [opened, setOpened] = useState(false)
+
     return (
-        <Tooltip label={label} maw={360} multiline withArrow>
-            <ActionIcon aria-label={label} className={classes.helpIcon} radius="xl" size="xs" tabIndex={0} variant="subtle">
+        <Tooltip label={label} maw={360} multiline opened={opened} withArrow>
+            <ActionIcon
+                aria-expanded={opened}
+                aria-label={label}
+                className={classes.helpIcon}
+                onBlur={() => setOpened(false)}
+                onClick={(event) => {
+                    event.preventDefault()
+                    setOpened((current) => !current)
+                }}
+                onFocus={() => setOpened(true)}
+                onMouseEnter={() => setOpened(true)}
+                onMouseLeave={() => setOpened(false)}
+                onTouchStart={(event) => {
+                    event.preventDefault()
+                    setOpened((current) => !current)
+                }}
+                radius="xl"
+                size="xs"
+                tabIndex={0}
+                variant="subtle"
+            >
                 ?
             </ActionIcon>
         </Tooltip>
@@ -309,6 +369,52 @@ function statusOptions() {
     }))
 }
 
+const strategyOptions: Array<{ label: string; value: ToporBalancerGroupStrategy }> = [
+    { label: 'Минимальная нагрузка', value: 'least_loaded' },
+    { label: 'Взвешенная', value: 'weighted' },
+    { label: 'Ручная', value: 'manual' },
+    { label: 'Приоритетный резерв', value: 'priority_failover' },
+    { label: 'Статический хеш', value: 'sticky_hash' }
+]
+
+const strategyTooltips: Record<ToporBalancerGroupStrategy, string> = {
+    least_loaded: 'Новые назначения идут на активную ноду с минимальной эффективной нагрузкой: назначения / (лимит пользователей * вес).',
+    manual: 'Новые пользователи не назначаются автоматически. Используются только существующие ручные назначения, иначе подписка сохраняет исходные ссылки.',
+    priority_failover: 'Выбирается первая активная нода по приоритету. Если основная недоступна, используется следующая.',
+    sticky_hash: 'Статический выбор по идентификатору пользователя. Без БД стабилен, но может измениться при изменении списка нод.',
+    weighted: 'Новые назначения распределяются по весам. Ноды с большим весом получают больше пользователей; лимит пользователей учитывается как мягкий.'
+}
+
+function StrategyLegend() {
+    return (
+        <Group gap={6}>
+            {strategyOptions.map((strategy) => (
+                <Group gap={4} key={strategy.value} wrap="nowrap">
+                    <Badge className={classes.strategyBadge} variant="light">
+                        {strategy.label}
+                    </Badge>
+                    <Help label={strategyTooltips[strategy.value]} />
+                </Group>
+            ))}
+        </Group>
+    )
+}
+
+function StatusLegend() {
+    return (
+        <Group gap={6}>
+            {NODE_STATUSES.map((status) => (
+                <Group gap={4} key={status} wrap="nowrap">
+                    <Badge color={getStatusColor(status)} variant="light">
+                        {statusLabels[status]}
+                    </Badge>
+                    <Help label={statusTooltips[status]} />
+                </Group>
+            ))}
+        </Group>
+    )
+}
+
 function normalizeTechnicalHostName(value: string) {
     return value.trim()
 }
@@ -325,12 +431,21 @@ function getDiagnosticsStatusColor(status: SubscriptionDiagnosticsResult['groups
 
 function getDiagnosticsStatusLabel(status: SubscriptionDiagnosticsResult['groups'][number]['status']) {
     const labels: Record<SubscriptionDiagnosticsResult['groups'][number]['status'], string> = {
-        'fail-open': texts.diagnostics.statusFailOpen,
-        'no-active-node': texts.diagnostics.statusNoActiveNode,
-        ok: texts.diagnostics.statusOk
+        'fail-open': 'Исходные ссылки',
+        'no-active-node': 'Нет активной ноды',
+        ok: 'Готово'
     }
 
     return labels[status]
+}
+
+function getAssignmentModeLabel(mode?: string) {
+    const labels: Record<string, string> = {
+        database: 'База данных',
+        hash: 'Хеш'
+    }
+
+    return mode ? labels[mode] ?? mode : '-'
 }
 
 export function ToporBalancerAdminPage() {
@@ -345,6 +460,10 @@ export function ToporBalancerAdminPage() {
     const [discoveredHosts, setDiscoveredHosts] = useState<DiscoveredHost[]>([])
     const [selectedHosts, setSelectedHosts] = useState<string[]>([])
     const [selectedGroupId, setSelectedGroupId] = useState<string | null>(null)
+    const [groupSearch, setGroupSearch] = useState('')
+    const [isCreateGroupModalOpen, setIsCreateGroupModalOpen] = useState(false)
+    const [isGroupEditorOpen, setIsGroupEditorOpen] = useState(false)
+    const [groupEditorTab, setGroupEditorTab] = useState('overview')
     const [discoveryImportStatuses, setDiscoveryImportStatuses] = useState<Record<string, DiscoveryImportStatusState>>({})
     const [errorMessage, setErrorMessage] = useState('')
     const [isLoading, setIsLoading] = useState(false)
@@ -354,6 +473,8 @@ export function ToporBalancerAdminPage() {
     const [importMode, setImportMode] = useState<ImportMode>('existing')
     const [importTargetGroupId, setImportTargetGroupId] = useState<string | null>(null)
     const [lastImportResult, setLastImportResult] = useState<ImportResult | null>(null)
+    const [lastDiscoverySource, setLastDiscoverySource] = useState<DiscoveryResponse['source'] | null>(null)
+    const [lastRefreshAt, setLastRefreshAt] = useState<Date | null>(null)
     const [shortUuid, setShortUuid] = useState('')
     const [diagnosticsShortUuid, setDiagnosticsShortUuid] = useState('')
     const [diagnosticsUserAgentPreset, setDiagnosticsUserAgentPreset] = useState('v2RayTun/6.0')
@@ -364,7 +485,7 @@ export function ToporBalancerAdminPage() {
         locationCode: 'FI',
         planCode: 'standard',
         publicHostCode: 'fi_standard',
-        publicName: '🇫🇮 Finland',
+        publicName: '🇫🇮 Финляндия',
         strategy: 'least_loaded' as ToporBalancerGroupStrategy
     })
     const [nodeForm, setNodeForm] = useState({
@@ -382,7 +503,7 @@ export function ToporBalancerAdminPage() {
         locationCode: 'FI',
         planCode: 'standard',
         publicHostCode: 'fi_standard',
-        publicName: '🇫🇮 Finland'
+        publicName: '🇫🇮 Финляндия'
     })
 
     const isLoggedIn = Boolean(adminToken)
@@ -391,6 +512,30 @@ export function ToporBalancerAdminPage() {
         () => nodes.filter((node) => selectedGroup && node.groupId === selectedGroup.id),
         [nodes, selectedGroup]
     )
+    const selectedGroupAssignments = useMemo(() => {
+        const selectedNodeIds = new Set(selectedGroupNodes.map((node) => node.id))
+
+        return assignments.filter((assignment) => selectedNodeIds.has(assignment.nodeId))
+    }, [assignments, selectedGroupNodes])
+    const filteredGroups = useMemo(() => {
+        const query = groupSearch.trim().toLowerCase()
+
+        if (!query) {
+            return groups
+        }
+
+        return groups.filter((group) =>
+            [
+                group.publicName,
+                group.publicHostCode,
+                group.locationCode,
+                group.planCode,
+                group.strategy
+            ]
+                .filter(Boolean)
+                .some((value) => value?.toLowerCase().includes(query))
+        )
+    }, [groupSearch, groups])
     const discoveredByTechnicalHostName = useMemo(
         () =>
             new Map(
@@ -472,8 +617,9 @@ export function ToporBalancerAdminPage() {
             setAssignments(safeArray<ToporBalancerAssignment>(assignmentsResponse).slice(0, 500))
             setRequests(safeArray<ToporBalancerRequest>(requestsResponse).slice(0, 500))
             setSelectedGroupId((current) => current ?? nextGroups[0]?.id ?? null)
+            setLastRefreshAt(new Date())
         } catch (error) {
-            setErrorMessage(error instanceof Error ? error.message : texts.messages.adminApiLoadFailed)
+            setErrorMessage(getAdminErrorMessage(error, texts.messages.adminApiLoadFailed))
         } finally {
             setIsLoading(false)
         }
@@ -513,6 +659,7 @@ export function ToporBalancerAdminPage() {
         setSelectedGroupId(null)
         setDiscoveryImportStatuses({})
         setLastImportResult(null)
+        setLastDiscoverySource(null)
         setSubscriptionDiagnostics(null)
     }
 
@@ -543,9 +690,12 @@ export function ToporBalancerAdminPage() {
 
             await refreshAdminData()
             setSelectedGroupId(group?.id ?? null)
+            setIsCreateGroupModalOpen(false)
+            setGroupEditorTab('overview')
+            setIsGroupEditorOpen(Boolean(group?.id))
             notifications.show({ color: 'green', message: texts.messages.groupCreated, title: texts.common.ready })
         } catch (error) {
-            setErrorMessage(error instanceof Error ? error.message : texts.messages.groupCreateFailed)
+            setErrorMessage(getAdminErrorMessage(error, texts.messages.groupCreateFailed))
         } finally {
             setIsLoading(false)
         }
@@ -561,7 +711,7 @@ export function ToporBalancerAdminPage() {
             })
             await refreshAdminData()
         } catch (error) {
-            setErrorMessage(error instanceof Error ? error.message : texts.messages.groupUpdateFailed)
+            setErrorMessage(getAdminErrorMessage(error, texts.messages.groupUpdateFailed))
         } finally {
             setIsLoading(false)
         }
@@ -576,13 +726,10 @@ export function ToporBalancerAdminPage() {
             })
             await refreshAdminData()
             setSelectedGroupId(null)
+            setIsGroupEditorOpen(false)
             notifications.show({ color: 'green', message: texts.messages.groupDeleted, title: texts.common.ready })
         } catch (error) {
-            setErrorMessage(
-                error instanceof Error
-                    ? error.message
-                    : texts.messages.groupDeleteFailed
-            )
+            setErrorMessage(getAdminErrorMessage(error, texts.messages.groupDeleteFailed))
         } finally {
             setIsLoading(false)
         }
@@ -615,7 +762,7 @@ export function ToporBalancerAdminPage() {
             await refreshAdminData()
             notifications.show({ color: 'green', message: texts.messages.nodeAdded, title: texts.common.ready })
         } catch (error) {
-            setErrorMessage(error instanceof Error ? error.message : texts.messages.nodeAddFailed)
+            setErrorMessage(getAdminErrorMessage(error, texts.messages.nodeAddFailed))
         } finally {
             setIsLoading(false)
         }
@@ -635,7 +782,7 @@ export function ToporBalancerAdminPage() {
             })
             await refreshAdminData()
         } catch (error) {
-            setErrorMessage(error instanceof Error ? error.message : texts.messages.nodeUpdateFailed)
+            setErrorMessage(getAdminErrorMessage(error, texts.messages.nodeUpdateFailed))
         } finally {
             setIsLoading(false)
         }
@@ -655,33 +802,36 @@ export function ToporBalancerAdminPage() {
             await refreshAdminData()
             notifications.show({ color: 'green', message: texts.messages.nodeDeleted, title: texts.common.ready })
         } catch (error) {
-            setErrorMessage(
-                error instanceof Error
-                    ? error.message
-                    : texts.messages.nodeDeleteFailed
-            )
+            setErrorMessage(getAdminErrorMessage(error, texts.messages.nodeDeleteFailed))
         } finally {
             setIsLoading(false)
         }
     }
 
     const runApiDiscovery = async () => {
+        if (!selectedGroup) {
+            notifications.show({ color: 'red', message: texts.discovery.selectGroup, title: texts.common.noGroup })
+            return
+        }
+
         setIsDiscoveryLoading(true)
         setErrorMessage('')
 
         try {
-            const response = await fetchAdminJson<DiscoveryResponse>(DISCOVERY_API_URL)
+            const response = await fetchAdminJson<DiscoveryResponse>(groupDiscoveryRefreshUrl(selectedGroup.id), {
+                method: 'POST'
+            })
             const items = response?.items ?? []
             setDiscoveredHosts(items)
             setDiscoveryImportStatuses({})
             setLastImportResult(null)
-            setSelectedHosts(
-                items
-                    .filter((item) => !item.alreadyImported)
-                    .map((item) => normalizeTechnicalHostName(item.technicalHostName))
-            )
+            setLastDiscoverySource('remnawave-api')
+            setSelectedHosts(items.filter((item) => item.canAdd).map((item) => normalizeTechnicalHostName(item.technicalHostName)))
+            if (response?.message) {
+                notifications.show({ color: 'yellow', message: response.message, title: texts.messages.searchFailed })
+            }
         } catch (error) {
-            setErrorMessage(error instanceof Error ? error.message : texts.messages.searchFailed)
+            setErrorMessage(getAdminErrorMessage(error, texts.messages.searchFailed))
         } finally {
             setIsDiscoveryLoading(false)
         }
@@ -689,6 +839,11 @@ export function ToporBalancerAdminPage() {
 
     const runSubscriptionDiscovery = async () => {
         const normalizedShortUuid = shortUuid.trim()
+
+        if (!selectedGroup) {
+            notifications.show({ color: 'red', message: texts.discovery.selectGroup, title: texts.common.noGroup })
+            return
+        }
 
         if (!normalizedShortUuid) {
             notifications.show({
@@ -703,7 +858,7 @@ export function ToporBalancerAdminPage() {
         setErrorMessage('')
 
         try {
-            const response = await fetchAdminJson<DiscoveryResponse>(DISCOVERY_SUBSCRIPTION_URL, {
+            const response = await fetchAdminJson<DiscoveryResponse>(groupDiscoverySubscriptionUrl(selectedGroup.id), {
                 body: JSON.stringify({ shortUuid: normalizedShortUuid }),
                 method: 'POST'
             })
@@ -711,13 +866,10 @@ export function ToporBalancerAdminPage() {
             setDiscoveredHosts(items)
             setDiscoveryImportStatuses({})
             setLastImportResult(null)
-            setSelectedHosts(
-                items
-                    .filter((item) => !item.alreadyImported)
-                    .map((item) => normalizeTechnicalHostName(item.technicalHostName))
-            )
+            setLastDiscoverySource('subscription')
+            setSelectedHosts(items.filter((item) => item.canAdd).map((item) => normalizeTechnicalHostName(item.technicalHostName)))
         } catch (error) {
-            setErrorMessage(error instanceof Error ? error.message : texts.messages.scanFailed)
+            setErrorMessage(getAdminErrorMessage(error, texts.messages.scanFailed))
         } finally {
             setIsDiscoveryLoading(false)
         }
@@ -733,6 +885,34 @@ export function ToporBalancerAdminPage() {
         )
     }
 
+    const openGroupEditor = (group: ToporBalancerGroup, tab = 'overview') => {
+        if (group.id !== selectedGroupId) {
+            setDiscoveredHosts([])
+            setSelectedHosts([])
+            setDiscoveryImportStatuses({})
+            setLastImportResult(null)
+            setLastDiscoverySource(null)
+        }
+
+        setSelectedGroupId(group.id)
+        setGroupEditorTab(tab)
+        setIsGroupEditorOpen(true)
+    }
+
+    const openAddNodesFlow = () => {
+        if (!selectedGroup) {
+            notifications.show({ color: 'red', message: texts.messages.selectGroupFirst, title: texts.common.noGroup })
+            return
+        }
+
+        setGroupEditorTab('discovery')
+        setIsGroupEditorOpen(true)
+
+        if (discoveredHosts.length === 0) {
+            void runApiDiscovery()
+        }
+    }
+
     const importSelectedHosts = async () => {
         if (selectedHosts.length === 0) {
             notifications.show({
@@ -743,10 +923,91 @@ export function ToporBalancerAdminPage() {
             return
         }
 
-        setImportMode(groups.length > 0 ? 'existing' : 'new')
-        setImportTargetGroupId(selectedGroup?.id ?? groups[0]?.id ?? null)
-        setLastImportResult(null)
-        setIsImportModalOpen(true)
+        if (!selectedGroup) {
+            notifications.show({ color: 'red', message: texts.discovery.selectGroup, title: texts.common.noGroup })
+            return
+        }
+
+        setIsDiscoveryLoading(true)
+        setErrorMessage('')
+
+        try {
+            const result = await fetchAdminJson<ImportResult>(groupNodesImportUrl(selectedGroup.id), {
+                body: JSON.stringify({
+                    defaults: importDefaults,
+                    mode: 'skip_conflicts',
+                    technicalHostNames: selectedHosts
+                }),
+                method: 'POST'
+            })
+            const createdNodes = safeArray<ToporBalancerNode>(result?.created)
+            const alreadyInGroup = safeArray<{ technicalHostName: string }>(result?.alreadyInGroup)
+            const inOtherGroup = safeArray<{ currentGroupName?: string; technicalHostName: string }>(result?.inOtherGroup)
+            const errors = safeArray<{ reason: string; technicalHostName?: string }>(result?.errors)
+
+            setDiscoveryImportStatuses((current) => {
+                const next = { ...current }
+
+                createdNodes.forEach((node) => {
+                    next[normalizeTechnicalHostName(node.technicalHostName)] = { status: 'imported' }
+                })
+                alreadyInGroup.forEach((item) => {
+                    next[normalizeTechnicalHostName(item.technicalHostName)] = {
+                        message: texts.discovery.alreadyInGroup,
+                        status: 'skipped'
+                    }
+                })
+                inOtherGroup.forEach((item) => {
+                    next[normalizeTechnicalHostName(item.technicalHostName)] = {
+                        message: item.currentGroupName ?? texts.discovery.conflict,
+                        status: 'conflict'
+                    }
+                })
+                errors.forEach((error) => {
+                    if (error.technicalHostName) {
+                        next[normalizeTechnicalHostName(error.technicalHostName)] = {
+                            message: error.reason,
+                            status: 'error'
+                        }
+                    }
+                })
+
+                return next
+            })
+            setSelectedHosts((current) =>
+                current.filter((technicalHostName) => {
+                    const normalizedTechnicalHostName = normalizeTechnicalHostName(technicalHostName)
+
+                    return (
+                        !createdNodes.some((node) => normalizeTechnicalHostName(node.technicalHostName) === normalizedTechnicalHostName) &&
+                        !alreadyInGroup.some((item) => normalizeTechnicalHostName(item.technicalHostName) === normalizedTechnicalHostName)
+                    )
+                })
+            )
+            await refreshAdminData()
+
+            if (lastDiscoverySource === 'subscription' && shortUuid.trim()) {
+                await runSubscriptionDiscovery()
+            } else {
+                await runApiDiscovery()
+            }
+
+            setLastImportResult(result)
+
+            notifications.show({
+                color: inOtherGroup.length > 0 || errors.length > 0 ? 'yellow' : 'green',
+                message: formatText(texts.discovery.importSummaryToast, {
+                    conflicts: inOtherGroup.length,
+                    created: createdNodes.length,
+                    skipped: alreadyInGroup.length
+                }),
+                title: texts.discovery.importFinished
+            })
+        } catch (error) {
+            setErrorMessage(getAdminErrorMessage(error, texts.messages.importFailed))
+        } finally {
+            setIsDiscoveryLoading(false)
+        }
     }
 
     const performDiscoveryImport = async () => {
@@ -857,7 +1118,7 @@ export function ToporBalancerAdminPage() {
                         message: texts.discovery.alreadyInGroup
                     }
                 })
-                safeArray<ImportResult['conflicts'][number]>(result?.conflicts).forEach((conflict) => {
+                safeArray<ImportConflict>(result?.conflicts).forEach((conflict) => {
                     next[normalizeTechnicalHostName(conflict.technicalHostName)] = {
                         status: 'conflict',
                         message: `${conflict.existingPublicHostCode ?? '-'}:${conflict.existingPlanCode ?? '-'}`
@@ -889,11 +1150,11 @@ export function ToporBalancerAdminPage() {
             setLastImportResult(result)
             notifications.show({
                 color: conflictNames.size > 0 || errorNames.size > 0 ? 'yellow' : 'green',
-                message: formatText(texts.discovery.importSummaryToast, { created: result?.created.length ?? 0, skipped: result?.skipped.length ?? 0, conflicts: result?.conflicts.length ?? 0 }),
+                message: formatText(texts.discovery.importSummaryToast, { created: result?.created.length ?? 0, skipped: result?.skipped?.length ?? 0, conflicts: result?.conflicts?.length ?? 0 }),
                 title: texts.discovery.importFinished
             })
         } catch (error) {
-            setErrorMessage(error instanceof Error ? error.message : texts.messages.importFailed)
+            setErrorMessage(getAdminErrorMessage(error, texts.messages.importFailed))
         } finally {
             setIsDiscoveryLoading(false)
         }
@@ -930,7 +1191,7 @@ export function ToporBalancerAdminPage() {
 
             setSubscriptionDiagnostics(result)
         } catch (error) {
-            setErrorMessage(error instanceof Error ? error.message : texts.messages.subscriptionDiagnosticsFailed)
+            setErrorMessage(getAdminErrorMessage(error, texts.messages.subscriptionDiagnosticsFailed))
         } finally {
             setIsDiagnosticsLoading(false)
         }
@@ -953,17 +1214,306 @@ export function ToporBalancerAdminPage() {
         URL.revokeObjectURL(url)
     }
 
-    const statusCards = [
-        { color: health?.enabled ? 'green' : 'gray', label: 'Balancer', value: health?.enabled ? texts.common.enabled : texts.common.disabled },
+    const statusItems = [
+        { color: health?.enabled ? 'green' : 'gray', label: 'Балансировщик', value: health?.enabled ? texts.common.enabled : texts.common.disabled },
         { color: health?.databaseConnected ? 'green' : 'red', label: texts.common.database, value: health?.databaseConnected ? texts.common.connected : texts.common.disconnected },
-        { color: 'cyan', label: texts.common.mode, value: health?.assignmentMode ?? '-' },
-        { color: 'blue', label: texts.groups.title, value: String(groups.length) },
-        { color: 'violet', label: texts.nodes.title, value: String(nodes.length) },
-        { color: runtimeHealth?.fallbackConfigOk ? 'green' : 'red', label: texts.common.runtimeConfig, value: runtimeHealth?.fallbackConfigOk ? texts.common.ok : texts.common.problem }
+        { color: 'cyan', label: texts.common.mode, value: getAssignmentModeLabel(health?.assignmentMode) },
+        { color: 'blue', label: 'Группы', value: String(groups.length) },
+        { color: 'violet', label: 'Ноды', value: String(nodes.length) },
+        { color: 'gray', label: 'Последнее обновление', value: lastRefreshAt ? formatDate(lastRefreshAt.toISOString()) : '-' }
     ]
 
     return (
         <Page>
+            <Modal
+                opened={isCreateGroupModalOpen}
+                onClose={() => setIsCreateGroupModalOpen(false)}
+                size="lg"
+                title="Создать группу"
+            >
+                <Stack gap="md">
+                    <Group grow>
+                        <TextInput
+                            label={<FieldLabel help={tooltips.publicName} label={texts.fields.publicName} />}
+                            onChange={(event) => setGroupForm((current) => ({ ...current, publicName: event.currentTarget.value }))}
+                            value={groupForm.publicName}
+                        />
+                        <TextInput
+                            label={<FieldLabel help={tooltips.publicHostCode} label={texts.fields.publicHostCode} />}
+                            onChange={(event) => setGroupForm((current) => ({ ...current, publicHostCode: event.currentTarget.value }))}
+                            value={groupForm.publicHostCode}
+                        />
+                    </Group>
+                    <Group grow>
+                        <TextInput
+                            label={<FieldLabel help={tooltips.locationCode} label={texts.fields.locationCode} />}
+                            onChange={(event) => setGroupForm((current) => ({ ...current, locationCode: event.currentTarget.value }))}
+                            value={groupForm.locationCode}
+                        />
+                        <TextInput
+                            label={<FieldLabel help={tooltips.planCode} label={texts.fields.planCode} />}
+                            onChange={(event) => setGroupForm((current) => ({ ...current, planCode: event.currentTarget.value }))}
+                            value={groupForm.planCode}
+                        />
+                        <Select
+                            data={strategyOptions}
+                            label={<FieldLabel help={tooltips.strategy} label={texts.fields.strategy} />}
+                            onChange={(value) =>
+                                setGroupForm((current) => ({
+                                    ...current,
+                                    strategy: (value as ToporBalancerGroupStrategy | null) ?? 'least_loaded'
+                                }))
+                            }
+                            value={groupForm.strategy}
+                        />
+                    </Group>
+                    <StrategyLegend />
+                    <Group justify="space-between">
+                        <Switch
+                            checked={groupForm.enabled}
+                            label={texts.common.enabled}
+                            onChange={(event) => setGroupForm((current) => ({ ...current, enabled: event.currentTarget.checked }))}
+                        />
+                        <Group gap="sm">
+                            <Button onClick={() => setIsCreateGroupModalOpen(false)} variant="subtle">
+                                {texts.actions.close}
+                            </Button>
+                            <Button leftSection={<IconPlus size={16} />} loading={isLoading} onClick={createGroup}>
+                                Создать группу
+                            </Button>
+                        </Group>
+                    </Group>
+                </Stack>
+            </Modal>
+
+            <Modal
+                opened={isGroupEditorOpen}
+                onClose={() => setIsGroupEditorOpen(false)}
+                padding="lg"
+                size="92vw"
+                title={selectedGroup ? `Группа: ${selectedGroup.publicName}` : 'Группа'}
+            >
+                {selectedGroup && (
+                    <Tabs onChange={(value) => setGroupEditorTab(value ?? 'overview')} value={groupEditorTab}>
+                        <Tabs.List>
+                            <Tabs.Tab value="overview">Обзор</Tabs.Tab>
+                            <Tabs.Tab value="nodes">Ноды</Tabs.Tab>
+                            <Tabs.Tab value="discovery">Найти в Remnawave</Tabs.Tab>
+                            <Tabs.Tab value="assignments">Назначения</Tabs.Tab>
+                            <Tabs.Tab value="diagnostics">Диагностика</Tabs.Tab>
+                            <Tabs.Tab value="settings">Настройки</Tabs.Tab>
+                        </Tabs.List>
+
+                        <Tabs.Panel pt="md" value="overview">
+                            <Stack gap="md">
+                                <Group className={classes.groupOverviewGrid}>
+                                    <Card className={classes.tableCard} p="md" radius="md">
+                                        <Stack gap={8}>
+                                            <Text c="dimmed" size="sm">Публичная группа</Text>
+                                            <Title order={3}>{selectedGroup.publicName}</Title>
+                                            <Group gap="xs">
+                                                <Badge variant="light">{selectedGroup.publicHostCode}</Badge>
+                                                <Badge variant="light">{selectedGroup.planCode}</Badge>
+                                                {selectedGroup.locationCode && <Badge variant="light">{selectedGroup.locationCode}</Badge>}
+                                            </Group>
+                                        </Stack>
+                                    </Card>
+                                    <Card className={classes.tableCard} p="md" radius="md">
+                                        <Stack gap={8}>
+                                            <Text c="dimmed" size="sm">Состояние</Text>
+                                            <Group gap="xs">
+                                                <Badge color={selectedGroup.enabled ? 'green' : 'gray'} variant="light">
+                                                    {selectedGroup.enabled ? texts.status.groupEnabled : texts.status.groupDisabled}
+                                                </Badge>
+                                                <Badge color="blue" variant="light">{selectedGroup.activeNodesCount}/{selectedGroup.nodesCount} активных нод</Badge>
+                                                <Badge color="violet" variant="light">{selectedGroup.assignedUsers} назначений</Badge>
+                                            </Group>
+                                            <Text size="sm">Стратегия: {strategyOptions.find((item) => item.value === selectedGroup.strategy)?.label ?? selectedGroup.strategy}</Text>
+                                        </Stack>
+                                    </Card>
+                                </Group>
+                                <Group gap="sm">
+                                    <Button leftSection={<IconPlus size={16} />} onClick={openAddNodesFlow}>
+                                        Добавить ноды
+                                    </Button>
+                                    <Button onClick={() => setGroupEditorTab('diagnostics')} variant="light">
+                                        Диагностика
+                                    </Button>
+                                    <Button onClick={() => setGroupEditorTab('settings')} variant="light">
+                                        Настройки
+                                    </Button>
+                                    <Button color="red" onClick={() => patchGroup(selectedGroup, { enabled: !selectedGroup.enabled })} variant="subtle">
+                                        {selectedGroup.enabled ? 'Отключить группу' : 'Включить группу'}
+                                    </Button>
+                                    <Button color="red" disabled={selectedGroup.nodesCount > 0} leftSection={<IconTrash size={16} />} onClick={() => deleteGroup(selectedGroup)} variant="subtle">
+                                        Удалить группу
+                                    </Button>
+                                </Group>
+                                <TechnicalNodesTable
+                                    deleteNode={deleteNode}
+                                    discoveredByTechnicalHostName={discoveredByTechnicalHostName}
+                                    nodes={selectedGroupNodes}
+                                    patchNode={patchNode}
+                                />
+                            </Stack>
+                        </Tabs.Panel>
+
+                        <Tabs.Panel pt="md" value="nodes">
+                            <Stack gap="md">
+                                <Card className={classes.tableCard} p="md" radius="md">
+                                    <Stack gap="sm">
+                                        <Group align="end" grow>
+                                            <TextInput
+                                                label={<FieldLabel help={tooltips.technicalHostName} label={texts.fields.technicalHostName} />}
+                                                onChange={(event) => setNodeForm((current) => ({ ...current, technicalHostName: event.currentTarget.value }))}
+                                                placeholder="FI-STD-01"
+                                                value={nodeForm.technicalHostName}
+                                            />
+                                            <NumberInput
+                                                label={<FieldLabel help={tooltips.weight} label={texts.fields.weight} />}
+                                                min={0.0001}
+                                                onChange={(value) => setNodeForm((current) => ({ ...current, weight: Number(value) || 1 }))}
+                                                value={nodeForm.weight}
+                                            />
+                                            <NumberInput
+                                                label={<FieldLabel help={tooltips.maxUsers} label={texts.fields.maxUsers} />}
+                                                min={1}
+                                                onChange={(value) => setNodeForm((current) => ({ ...current, maxUsers: Number(value) || 300 }))}
+                                                value={nodeForm.maxUsers}
+                                            />
+                                            <Select
+                                                data={statusOptions()}
+                                                label={<FieldLabel help={tooltips.status} label={texts.fields.status} />}
+                                                onChange={(value) =>
+                                                    setNodeForm((current) => ({
+                                                        ...current,
+                                                        status: (value as ToporBalancerNodeStatus | null) ?? 'active'
+                                                    }))
+                                                }
+                                                value={nodeForm.status}
+                                            />
+                                            <Button leftSection={<IconPlus size={16} />} loading={isLoading} onClick={createNode}>
+                                                Добавить ноду
+                                            </Button>
+                                        </Group>
+                                        <StatusLegend />
+                                    </Stack>
+                                </Card>
+                                <TechnicalNodesTable
+                                    deleteNode={deleteNode}
+                                    discoveredByTechnicalHostName={discoveredByTechnicalHostName}
+                                    nodes={selectedGroupNodes}
+                                    patchNode={patchNode}
+                                />
+                            </Stack>
+                        </Tabs.Panel>
+
+                        <Tabs.Panel pt="md" value="discovery">
+                            <Stack gap="md">
+                                <Card className={classes.tableCard} p="md" radius="md">
+                                    <Group align="end" justify="space-between">
+                                        <Group align="end">
+                                            <Button leftSection={<IconRefresh size={16} />} loading={isDiscoveryLoading} onClick={runApiDiscovery} variant="light">
+                                                Обновить список
+                                            </Button>
+                                            <TextInput
+                                                label="UUID тестовой подписки"
+                                                onChange={(event) => setShortUuid(event.currentTarget.value)}
+                                                placeholder="Введите UUID"
+                                                value={shortUuid}
+                                            />
+                                            <Button leftSection={<IconSearch size={16} />} loading={isDiscoveryLoading} onClick={runSubscriptionDiscovery} variant="light">
+                                                Сканировать подписку
+                                            </Button>
+                                        </Group>
+                                        <Button disabled={selectedHosts.length === 0} leftSection={<IconDownload size={16} />} loading={isDiscoveryLoading} onClick={importSelectedHosts}>
+                                            Импортировать выбранные
+                                        </Button>
+                                    </Group>
+                                </Card>
+                                <DiscoveredHostsTable
+                                    hosts={discoveredHosts}
+                                    importedByTechnicalHostName={importedByTechnicalHostName}
+                                    importStatuses={discoveryImportStatuses}
+                                    selectedGroup={selectedGroup}
+                                    selectedHosts={selectedHosts}
+                                    toggleSelectedHost={toggleSelectedHost}
+                                />
+                                {lastImportResult && <ImportResultSummary result={lastImportResult} />}
+                            </Stack>
+                        </Tabs.Panel>
+
+                        <Tabs.Panel pt="md" value="assignments">
+                            <AssignmentsTable assignments={selectedGroupAssignments} nodes={selectedGroupNodes} />
+                        </Tabs.Panel>
+
+                        <Tabs.Panel pt="md" value="diagnostics">
+                            <Stack gap="md">
+                                <Card className={classes.tableCard} p="md" radius="md">
+                                    <Stack gap="md">
+                                        <Group justify="space-between">
+                                            <Title order={4}>{texts.diagnostics.subscriptionTitle}</Title>
+                                            {subscriptionDiagnostics && (
+                                                <Badge color={subscriptionDiagnostics.ok ? 'green' : subscriptionDiagnostics.errors.length > 0 ? 'red' : 'yellow'} variant="light">
+                                                    {subscriptionDiagnostics.ok ? texts.diagnostics.resultOk : texts.diagnostics.resultProblem}
+                                                </Badge>
+                                            )}
+                                        </Group>
+                                        <Group align="end" grow>
+                                            <TextInput
+                                                label="UUID подписки"
+                                                onChange={(event) => setDiagnosticsShortUuid(event.currentTarget.value)}
+                                                placeholder="Введите UUID"
+                                                value={diagnosticsShortUuid}
+                                            />
+                                            <Select
+                                                data={DIAGNOSTICS_USER_AGENTS}
+                                                label="Клиент"
+                                                onChange={(value) => setDiagnosticsUserAgentPreset(value ?? 'v2RayTun/6.0')}
+                                                value={diagnosticsUserAgentPreset}
+                                            />
+                                            {diagnosticsUserAgentPreset === 'custom' && (
+                                                <TextInput
+                                                    label="Свой клиент"
+                                                    onChange={(event) => setDiagnosticsCustomUserAgent(event.currentTarget.value)}
+                                                    value={diagnosticsCustomUserAgent}
+                                                />
+                                            )}
+                                            <Button leftSection={<IconSearch size={16} />} loading={isDiagnosticsLoading} onClick={runSubscriptionDiagnostics}>
+                                                Проверить
+                                            </Button>
+                                        </Group>
+                                        {subscriptionDiagnostics && (
+                                            <Stack gap="md">
+                                                <Group gap="sm">
+                                                    <Badge variant="light">Формат: {subscriptionDiagnostics.format}</Badge>
+                                                    <Badge variant="light">Входящих VLESS: {subscriptionDiagnostics.inputLinksCount}</Badge>
+                                                    <Badge variant="light">Исходящих VLESS: {subscriptionDiagnostics.outputLinksCount}</Badge>
+                                                </Group>
+                                                <DiagnosticsSummary result={subscriptionDiagnostics} />
+                                                <Group justify="flex-end">
+                                                    <Button leftSection={<IconDownload size={16} />} onClick={downloadSubscriptionDiagnostics} variant="light">
+                                                        Скачать отчёт
+                                                    </Button>
+                                                </Group>
+                                            </Stack>
+                                        )}
+                                    </Stack>
+                                </Card>
+                                <Alert color={runtimeHealth?.fallbackConfigOk ? 'green' : 'red'} variant="light">
+                                    {texts.diagnostics.runtimeConfig}: {runtimeHealth?.appConfigRoute ?? '/assets/.app-config-v2.json'}; источник: {runtimeHealth?.lastConfigSource ?? '-'}; ошибка: {runtimeHealth?.lastRuntimeConfigError ?? '-'}
+                                </Alert>
+                                <RequestsTable requests={requests} />
+                            </Stack>
+                        </Tabs.Panel>
+
+                        <Tabs.Panel pt="md" value="settings">
+                            <GroupSettingsForm group={selectedGroup} isLoading={isLoading} patchGroup={patchGroup} />
+                        </Tabs.Panel>
+                    </Tabs>
+                )}
+            </Modal>
+
             <Modal
                 opened={isImportModalOpen}
                 onClose={() => setIsImportModalOpen(false)}
@@ -1052,6 +1602,7 @@ export function ToporBalancerAdminPage() {
                             value={importDefaults.status}
                         />
                     </Group>
+                    <StatusLegend />
 
                     {lastImportResult && <ImportResultSummary result={lastImportResult} />}
 
@@ -1065,7 +1616,7 @@ export function ToporBalancerAdminPage() {
                     </Group>
                 </Stack>
             </Modal>
-            <Container maw={1440} px={{ base: 'md', sm: 'lg', md: 'xl' }} py="xl">
+            <Container maw={1320} px={{ base: 'md', sm: 'lg', md: 'xl' }} py="xl">
                 <Stack gap="lg">
                     <Group justify="space-between">
                         <Group gap="sm">
@@ -1121,8 +1672,128 @@ export function ToporBalancerAdminPage() {
 
                     {isLoggedIn && (
                         <>
+                            <Card className={classes.statusBar} p="sm" radius="md">
+                                <Group gap="sm" wrap="wrap">
+                                    {statusItems.map((item) => (
+                                        <Group className={classes.statusPill} gap={6} key={item.label} wrap="nowrap">
+                                            <Text c="dimmed" size="xs">{item.label}</Text>
+                                            <Text c={item.color} fw={700} size="sm">{item.value}</Text>
+                                        </Group>
+                                    ))}
+                                </Group>
+                            </Card>
+
+                            <div className={classes.adminLayout}>
+                                <Card className={classes.groupsPanel} p="md" radius="md">
+                                    <Stack gap="md">
+                                        <Group justify="space-between">
+                                            <Title order={3}>Группы</Title>
+                                            <Button leftSection={<IconPlus size={16} />} onClick={() => setIsCreateGroupModalOpen(true)} size="sm">
+                                                Создать группу
+                                            </Button>
+                                        </Group>
+                                        <TextInput
+                                            leftSection={<IconSearch size={16} />}
+                                            onChange={(event) => setGroupSearch(event.currentTarget.value)}
+                                            placeholder="Поиск по группе, коду или тарифу"
+                                            value={groupSearch}
+                                        />
+                                        <ScrollArea className={classes.groupListViewport}>
+                                            <Stack gap="xs">
+                                                {filteredGroups.length === 0 && (
+                                                    <Stack align="center" className={classes.emptyState} gap={6}>
+                                                        <Text fw={700}>{groups.length === 0 ? texts.groups.emptyTitle : 'Ничего не найдено'}</Text>
+                                                        <Text c="dimmed" size="sm">{groups.length === 0 ? texts.groups.emptyText : 'Измените поиск или создайте новую группу.'}</Text>
+                                                    </Stack>
+                                                )}
+                                                {filteredGroups.map((group) => (
+                                                    <button
+                                                        className={`${classes.groupListItem} ${selectedGroup?.id === group.id ? classes.groupListItemActive : ''}`}
+                                                        key={group.id}
+                                                        onClick={() => openGroupEditor(group)}
+                                                        type="button"
+                                                    >
+                                                        <Group justify="space-between" wrap="nowrap">
+                                                            <Stack gap={2}>
+                                                                <Text fw={700} size="sm">{group.publicName}</Text>
+                                                                <Text c="dimmed" size="xs">{group.publicHostCode} · {group.planCode}</Text>
+                                                            </Stack>
+                                                            <Badge color={group.enabled ? 'green' : 'gray'} size="sm" variant="light">
+                                                                {group.enabled ? texts.status.groupEnabled : texts.status.groupDisabled}
+                                                            </Badge>
+                                                        </Group>
+                                                        <Group gap="xs" mt={8}>
+                                                            <Badge color="blue" size="xs" variant="light">{group.activeNodesCount}/{group.nodesCount} нод</Badge>
+                                                            <Badge color="violet" size="xs" variant="light">{group.assignedUsers} назначений</Badge>
+                                                        </Group>
+                                                    </button>
+                                                ))}
+                                            </Stack>
+                                        </ScrollArea>
+                                    </Stack>
+                                </Card>
+
+                                <Card className={classes.groupContextPanel} p="md" radius="md">
+                                    {selectedGroup ? (
+                                        <Stack gap="md">
+                                            <Group justify="space-between" wrap="nowrap">
+                                                <div>
+                                                    <Title order={3}>{selectedGroup.publicName}</Title>
+                                                    <Text c="dimmed" size="sm">
+                                                        {selectedGroup.publicHostCode} · {selectedGroup.planCode} · {selectedGroup.locationCode || '-'}
+                                                    </Text>
+                                                </div>
+                                                <Badge color={selectedGroup.enabled ? 'green' : 'gray'} variant="light">
+                                                    {selectedGroup.enabled ? texts.status.groupEnabled : texts.status.groupDisabled}
+                                                </Badge>
+                                            </Group>
+
+                                            <Group gap="xs">
+                                                <Badge color="blue" variant="light">{selectedGroup.activeNodesCount}/{selectedGroup.nodesCount} активных нод</Badge>
+                                                <Badge color="violet" variant="light">{selectedGroup.assignedUsers} назначений</Badge>
+                                                <Badge variant="light">{strategyOptions.find((item) => item.value === selectedGroup.strategy)?.label ?? selectedGroup.strategy}</Badge>
+                                            </Group>
+
+                                            <Group gap="sm">
+                                                <Button leftSection={<IconPlus size={16} />} onClick={openAddNodesFlow}>
+                                                    Добавить ноды
+                                                </Button>
+                                                <Button onClick={() => openGroupEditor(selectedGroup, 'diagnostics')} variant="light">
+                                                    Диагностика
+                                                </Button>
+                                                <Button onClick={() => openGroupEditor(selectedGroup, 'settings')} variant="light">
+                                                    Настройки
+                                                </Button>
+                                                <Button color="red" onClick={() => patchGroup(selectedGroup, { enabled: !selectedGroup.enabled })} variant="subtle">
+                                                    {selectedGroup.enabled ? 'Отключить группу' : 'Включить группу'}
+                                                </Button>
+                                                <Button color="red" disabled={selectedGroup.nodesCount > 0} leftSection={<IconTrash size={16} />} onClick={() => deleteGroup(selectedGroup)} variant="subtle">
+                                                    Удалить группу
+                                                </Button>
+                                            </Group>
+
+                                            <TechnicalNodesTable
+                                                deleteNode={deleteNode}
+                                                discoveredByTechnicalHostName={discoveredByTechnicalHostName}
+                                                nodes={selectedGroupNodes}
+                                                patchNode={patchNode}
+                                            />
+                                        </Stack>
+                                    ) : (
+                                        <Stack align="center" className={classes.emptyState} gap="sm">
+                                            <Title order={3}>Сначала создайте группу</Title>
+                                            <Text c="dimmed" size="sm">После создания откроется редактор, где можно сразу добавить ноды.</Text>
+                                            <Button leftSection={<IconPlus size={16} />} onClick={() => setIsCreateGroupModalOpen(true)}>
+                                                Создать группу
+                                            </Button>
+                                        </Stack>
+                                    )}
+                                </Card>
+                            </div>
+
+                            <div className={classes.legacyAdmin}>
                             <SimpleGrid cols={{ base: 1, xs: 2, md: 3 }} spacing="md">
-                                {statusCards.map((card) => (
+                                {statusItems.map((card) => (
                                     <Card className={classes.statusCard} key={card.label} p="lg" radius="md">
                                         <Stack gap={6}>
                                             <Text c="dimmed" size="sm">
@@ -1268,9 +1939,9 @@ export function ToporBalancerAdminPage() {
                                                         {texts.actions.searchRemnawave}
                                                     </Button>
                                                     <TextInput
-                                                        label={texts.forms.shortUuidLabel}
+                                                        label="UUID тестовой подписки"
                                                         onChange={(event) => setShortUuid(event.currentTarget.value)}
-                                                        placeholder={texts.forms.shortUuidPlaceholder}
+                                                        placeholder="Введите UUID"
                                                         value={shortUuid}
                                                     />
                                                     <Button leftSection={<IconSearch size={16} />} loading={isDiscoveryLoading} onClick={runSubscriptionDiscovery} variant="light">
@@ -1311,20 +1982,20 @@ export function ToporBalancerAdminPage() {
                                                 </Group>
                                                 <Group align="end" grow>
                                                     <TextInput
-                                                        label={texts.fields.shortUuid}
+                                                        label="UUID подписки"
                                                         onChange={(event) => setDiagnosticsShortUuid(event.currentTarget.value)}
-                                                        placeholder={texts.forms.shortUuidPlaceholder}
+                                                        placeholder="Введите UUID"
                                                         value={diagnosticsShortUuid}
                                                     />
                                                     <Select
                                                         data={DIAGNOSTICS_USER_AGENTS}
-                                                        label={texts.diagnostics.userAgent}
+                                                        label="Клиент"
                                                         onChange={(value) => setDiagnosticsUserAgentPreset(value ?? 'v2RayTun/6.0')}
                                                         value={diagnosticsUserAgentPreset}
                                                     />
                                                     {diagnosticsUserAgentPreset === 'custom' && (
                                                         <TextInput
-                                                            label={texts.diagnostics.customUserAgent}
+                                                            label="Свой клиент"
                                                             onChange={(event) => setDiagnosticsCustomUserAgent(event.currentTarget.value)}
                                                             value={diagnosticsCustomUserAgent}
                                                         />
@@ -1337,22 +2008,22 @@ export function ToporBalancerAdminPage() {
                                                     <Stack gap="md">
                                                         <SimpleGrid cols={{ base: 1, sm: 3 }} spacing="md">
                                                             <Card className={classes.statusCard} p="md" radius="md">
-                                                                <Text c="dimmed" size="sm">{texts.diagnostics.format}</Text>
+                                                                <Text c="dimmed" size="sm">Формат</Text>
                                                                 <Text fw={700}>{subscriptionDiagnostics.format}</Text>
                                                             </Card>
                                                             <Card className={classes.statusCard} p="md" radius="md">
-                                                                <Text c="dimmed" size="sm">{texts.diagnostics.inputLinks}</Text>
+                                                                <Text c="dimmed" size="sm">Входящих VLESS</Text>
                                                                 <Text fw={700}>{subscriptionDiagnostics.inputLinksCount}</Text>
                                                             </Card>
                                                             <Card className={classes.statusCard} p="md" radius="md">
-                                                                <Text c="dimmed" size="sm">{texts.diagnostics.outputLinks}</Text>
+                                                                <Text c="dimmed" size="sm">Исходящих VLESS</Text>
                                                                 <Text fw={700}>{subscriptionDiagnostics.outputLinksCount}</Text>
                                                             </Card>
                                                         </SimpleGrid>
                                                         <DiagnosticsSummary result={subscriptionDiagnostics} />
                                                         <Group justify="flex-end">
                                                             <Button leftSection={<IconDownload size={16} />} onClick={downloadSubscriptionDiagnostics} variant="light">
-                                                                {texts.diagnostics.downloadReport}
+                                                                Скачать отчёт
                                                             </Button>
                                                         </Group>
                                                     </Stack>
@@ -1367,6 +2038,7 @@ export function ToporBalancerAdminPage() {
                                     </Stack>
                                 </Tabs.Panel>
                             </Tabs>
+                            </div>
                         </>
                     )}
                 </Stack>
@@ -1375,20 +2047,118 @@ export function ToporBalancerAdminPage() {
     )
 }
 
+function GroupSettingsForm({
+    group,
+    isLoading,
+    patchGroup
+}: {
+    group: ToporBalancerGroup
+    isLoading: boolean
+    patchGroup: (group: ToporBalancerGroup, patch: Partial<ToporBalancerGroup>) => void
+}) {
+    const [form, setForm] = useState({
+        enabled: group.enabled,
+        locationCode: group.locationCode ?? '',
+        planCode: group.planCode,
+        publicHostCode: group.publicHostCode,
+        publicName: group.publicName,
+        strategy: group.strategy
+    })
+
+    useEffect(() => {
+        setForm({
+            enabled: group.enabled,
+            locationCode: group.locationCode ?? '',
+            planCode: group.planCode,
+            publicHostCode: group.publicHostCode,
+            publicName: group.publicName,
+            strategy: group.strategy
+        })
+    }, [group])
+
+    return (
+        <Card className={classes.tableCard} p="md" radius="md">
+            <Stack gap="md">
+                <Group grow>
+                    <TextInput
+                        label={<FieldLabel help={tooltips.publicName} label={texts.fields.publicName} />}
+                        onChange={(event) => setForm((current) => ({ ...current, publicName: event.currentTarget.value }))}
+                        value={form.publicName}
+                    />
+                    <TextInput
+                        label={<FieldLabel help={tooltips.publicHostCode} label={texts.fields.publicHostCode} />}
+                        onChange={(event) => setForm((current) => ({ ...current, publicHostCode: event.currentTarget.value }))}
+                        value={form.publicHostCode}
+                    />
+                </Group>
+                <Group grow>
+                    <TextInput
+                        label={<FieldLabel help={tooltips.locationCode} label={texts.fields.locationCode} />}
+                        onChange={(event) => setForm((current) => ({ ...current, locationCode: event.currentTarget.value }))}
+                        value={form.locationCode}
+                    />
+                    <TextInput
+                        label={<FieldLabel help={tooltips.planCode} label={texts.fields.planCode} />}
+                        onChange={(event) => setForm((current) => ({ ...current, planCode: event.currentTarget.value }))}
+                        value={form.planCode}
+                    />
+                    <Select
+                        data={strategyOptions}
+                        label={<FieldLabel help={tooltips.strategy} label={texts.fields.strategy} />}
+                        onChange={(value) =>
+                            setForm((current) => ({
+                                ...current,
+                                strategy: (value as ToporBalancerGroupStrategy | null) ?? current.strategy
+                            }))
+                        }
+                        value={form.strategy}
+                    />
+                </Group>
+                <StrategyLegend />
+                <Group justify="space-between">
+                    <Switch
+                        checked={form.enabled}
+                        label={texts.common.enabled}
+                        onChange={(event) => setForm((current) => ({ ...current, enabled: event.currentTarget.checked }))}
+                    />
+                    <Button
+                        loading={isLoading}
+                        onClick={() =>
+                            patchGroup(group, {
+                                enabled: form.enabled,
+                                locationCode: form.locationCode.trim() || undefined,
+                                planCode: form.planCode.trim(),
+                                publicHostCode: form.publicHostCode.trim(),
+                                publicName: form.publicName.trim(),
+                                strategy: form.strategy
+                            })
+                        }
+                    >
+                        Сохранить настройки
+                    </Button>
+                </Group>
+            </Stack>
+        </Card>
+    )
+}
+
 function ImportResultSummary({ result }: { result: ImportResult }) {
-    const hasDetails = result.conflicts.length > 0 || (result.errors?.length ?? 0) > 0
+    const conflicts = [...safeArray<ImportConflict>(result.conflicts), ...safeArray<GroupImportConflict>(result.inOtherGroup)]
+    const skipped = [...safeArray<{ reason: string; technicalHostName: string }>(result.skipped), ...safeArray<{ nodeId?: string; technicalHostName: string }>(result.alreadyInGroup)]
+    const errors = safeArray<{ reason: string; technicalHostName?: string }>(result.errors)
+    const hasDetails = conflicts.length > 0 || errors.length > 0
 
     return (
         <Alert color={hasDetails ? 'yellow' : 'green'} variant="light">
             <Stack gap={6}>
-                <Text fw={700}>{formatText(texts.discovery.importSummary, { created: result.created.length, skipped: result.skipped.length, conflicts: result.conflicts.length, errors: result.errors?.length ?? 0 })}</Text>
-                {result.conflicts.map((conflict) => (
+                <Text fw={700}>{formatText(texts.discovery.importSummary, { created: result.created.length, skipped: skipped.length, conflicts: conflicts.length, errors: errors.length })}</Text>
+                {conflicts.map((conflict) => (
                     <Text key={`conflict-${conflict.technicalHostName}`} size="sm">
-                        {conflict.technicalHostName}: {texts.discovery.alreadyInGroup} {conflict.existingPublicHostCode ?? '-'}:
-                        {conflict.existingPlanCode ?? '-'}
+                        {conflict.technicalHostName}: {texts.discovery.conflict}{' '}
+                        {'reason' in conflict ? `${conflict.existingPublicHostCode ?? '-'}:${conflict.existingPlanCode ?? '-'}` : conflict.currentGroupName ?? '-'}
                     </Text>
                 ))}
-                {result.errors?.map((error, index) => (
+                {errors.map((error, index) => (
                     <Text key={`error-${error.technicalHostName ?? index}`} size="sm">
                         {error.technicalHostName ?? 'import'}: {error.reason}
                     </Text>
@@ -1422,10 +2192,10 @@ function DiagnosticsSummary({ result }: { result: SubscriptionDiagnosticsResult 
                     <Table highlightOnHover>
                         <Table.Thead>
                             <Table.Tr>
-                                <Table.Th>{texts.fields.publicHostCode}</Table.Th>
-                                <Table.Th>{texts.fields.planCode}</Table.Th>
-                                <Table.Th>{texts.diagnostics.selectedNode}</Table.Th>
-                                <Table.Th>{texts.fields.status}</Table.Th>
+                                <Table.Th>Код группы</Table.Th>
+                                <Table.Th>Тариф</Table.Th>
+                                <Table.Th>Техническая нода</Table.Th>
+                                <Table.Th>Статус</Table.Th>
                             </Table.Tr>
                         </Table.Thead>
                         <Table.Tbody>
@@ -1450,10 +2220,10 @@ function DiagnosticsSummary({ result }: { result: SubscriptionDiagnosticsResult 
                     <Table highlightOnHover>
                         <Table.Thead>
                             <Table.Tr>
-                                <Table.Th>{texts.fields.technicalHostName}</Table.Th>
-                                <Table.Th>{texts.fields.status}</Table.Th>
-                                <Table.Th>{texts.diagnostics.queryParams}</Table.Th>
-                                <Table.Th>{texts.diagnostics.warnings}</Table.Th>
+                                <Table.Th>Техническая нода</Table.Th>
+                                <Table.Th>Статус</Table.Th>
+                                <Table.Th>Параметры</Table.Th>
+                                <Table.Th>Предупреждения</Table.Th>
                             </Table.Tr>
                         </Table.Thead>
                         <Table.Tbody>
@@ -1510,21 +2280,21 @@ function GroupsTable({
                     <Table.Thead>
                         <Table.Tr>
                             <Table.Th>
-                                <HeaderWithHelp help={tooltips.publicName}>{texts.fields.publicName}</HeaderWithHelp>
+                                <HeaderWithHelp help={tooltips.publicName}>Публичное название</HeaderWithHelp>
                             </Table.Th>
                             <Table.Th>
-                                <HeaderWithHelp help={tooltips.publicHostCode}>{texts.fields.publicHostCode}</HeaderWithHelp>
+                                <HeaderWithHelp help={tooltips.publicHostCode}>Код группы</HeaderWithHelp>
                             </Table.Th>
                             <Table.Th>
-                                <HeaderWithHelp help={tooltips.locationCode}>{texts.fields.locationCode}</HeaderWithHelp>
+                                <HeaderWithHelp help={tooltips.locationCode}>Локация</HeaderWithHelp>
                             </Table.Th>
                             <Table.Th>
-                                <HeaderWithHelp help={tooltips.planCode}>{texts.fields.planCode}</HeaderWithHelp>
+                                <HeaderWithHelp help={tooltips.planCode}>Тариф</HeaderWithHelp>
                             </Table.Th>
-                            <Table.Th>{texts.fields.strategy}</Table.Th>
+                            <Table.Th>Стратегия</Table.Th>
                             <Table.Th>{texts.groups.activeNodes}</Table.Th>
-                            <Table.Th>{texts.fields.assignedUsers}</Table.Th>
-                            <Table.Th>{texts.fields.status}</Table.Th>
+                            <Table.Th>Назначения</Table.Th>
+                            <Table.Th>Статус</Table.Th>
                             <Table.Th>{texts.common.actions}</Table.Th>
                         </Table.Tr>
                     </Table.Thead>
@@ -1535,7 +2305,7 @@ function GroupsTable({
                                 <Table.Td>{group.publicHostCode}</Table.Td>
                                 <Table.Td>{group.locationCode || '-'}</Table.Td>
                                 <Table.Td>{group.planCode}</Table.Td>
-                                <Table.Td>{group.strategy}</Table.Td>
+                                <Table.Td>{strategyOptions.find((item) => item.value === group.strategy)?.label ?? group.strategy}</Table.Td>
                                 <Table.Td>
                                     {group.activeNodesCount}/{group.nodesCount}
                                 </Table.Td>
@@ -1614,19 +2384,19 @@ function TechnicalNodesTable({
                     <Table.Thead>
                         <Table.Tr>
                             <Table.Th>
-                                <HeaderWithHelp help={tooltips.technicalHostName}>{texts.fields.technicalHostName}</HeaderWithHelp>
+                                <HeaderWithHelp help={tooltips.technicalHostName}>Техническая нода</HeaderWithHelp>
                             </Table.Th>
                             <Table.Th>
-                                <HeaderWithHelp help={tooltips.status}>{texts.fields.status}</HeaderWithHelp>
+                                <HeaderWithHelp help={tooltips.status}>Статус</HeaderWithHelp>
                             </Table.Th>
                             <Table.Th>
-                                <HeaderWithHelp help={tooltips.weight}>{texts.fields.weight}</HeaderWithHelp>
+                                <HeaderWithHelp help={tooltips.weight}>Вес</HeaderWithHelp>
                             </Table.Th>
                             <Table.Th>
-                                <HeaderWithHelp help={tooltips.maxUsers}>{texts.fields.maxUsers}</HeaderWithHelp>
+                                <HeaderWithHelp help={tooltips.maxUsers}>Лимит пользователей</HeaderWithHelp>
                             </Table.Th>
-                            <Table.Th>{texts.fields.assignedUsers}</Table.Th>
-                            <Table.Th>{texts.fields.importStatus}</Table.Th>
+                            <Table.Th>Назначения</Table.Th>
+                            <Table.Th>Импорт</Table.Th>
                             <Table.Th>{texts.common.actions}</Table.Th>
                         </Table.Tr>
                     </Table.Thead>
@@ -1668,7 +2438,7 @@ function TechnicalNodesTable({
                                     <Table.Td>{node.assignedUsers}</Table.Td>
                                     <Table.Td>
                                         <Badge color={discoveredHost ? 'green' : 'gray'} variant="light">
-                                            {discoveredHost ? texts.discovery.discovered : texts.discovery.importedLocal}
+                                            {discoveredHost ? 'Импортировано' : 'Не импортировано'}
                                         </Badge>
                                     </Table.Td>
                                     <Table.Td>
@@ -1698,10 +2468,12 @@ function TechnicalNodesTable({
 }
 
 function getDiscoveredHostStatusBadge({
+    host,
     importedNode,
     importStatus,
     isImportedIntoSelectedGroup
 }: {
+    host: DiscoveredHost
     importedNode?: ToporBalancerNode
     importStatus?: DiscoveryImportStatusState
     isImportedIntoSelectedGroup: boolean
@@ -1720,6 +2492,22 @@ function getDiscoveredHostStatusBadge({
 
     if (importStatus?.status === 'error') {
         return { color: 'red', label: texts.discovery.error, tooltip: importStatus.message }
+    }
+
+    if (host.status === 'free') {
+        return { color: 'gray', label: texts.discovery.canImport, tooltip: texts.tooltips.discovered }
+    }
+
+    if (host.status === 'in_this_group') {
+        return { color: 'green', label: texts.discovery.alreadyInGroup, tooltip: host.currentGroupName ?? texts.tooltips.imported }
+    }
+
+    if (host.status === 'in_other_group') {
+        return { color: 'yellow', label: texts.discovery.conflict, tooltip: host.currentGroupName ?? undefined }
+    }
+
+    if (host.status === 'conflict') {
+        return { color: 'red', label: texts.discovery.conflict, tooltip: host.currentGroupName ?? undefined }
     }
 
     if (isImportedIntoSelectedGroup) {
@@ -1773,17 +2561,17 @@ function DiscoveredHostsTable({
                         <Table.Tr>
                             <Table.Th />
                             <Table.Th>
-                                <HeaderWithHelp help={tooltips.technicalHostName}>{texts.fields.technicalHostName}</HeaderWithHelp>
+                                <HeaderWithHelp help={tooltips.technicalHostName}>Техническая нода</HeaderWithHelp>
                             </Table.Th>
-                            <Table.Th>{texts.fields.importStatus}</Table.Th>
-                            <Table.Th>{texts.fields.host}</Table.Th>
-                            <Table.Th>{texts.fields.port}</Table.Th>
-                            <Table.Th>{texts.fields.protocol}</Table.Th>
-                            <Table.Th>{texts.fields.security}</Table.Th>
-                            <Table.Th>{texts.fields.type}</Table.Th>
-                            <Table.Th>{texts.fields.sni}</Table.Th>
-                            <Table.Th>{texts.fields.flow}</Table.Th>
-                            <Table.Th>{texts.fields.keys}</Table.Th>
+                            <Table.Th>Статус</Table.Th>
+                            <Table.Th>Хост</Table.Th>
+                            <Table.Th>Порт</Table.Th>
+                            <Table.Th>Протокол</Table.Th>
+                            <Table.Th>Защита</Table.Th>
+                            <Table.Th>Транспорт</Table.Th>
+                            <Table.Th>Серверное имя</Table.Th>
+                            <Table.Th>Поток</Table.Th>
+                            <Table.Th>Ключи</Table.Th>
                         </Table.Tr>
                     </Table.Thead>
                     <Table.Tbody>
@@ -1797,17 +2585,19 @@ function DiscoveredHostsTable({
                                     importedNode.groupId === selectedGroup.id
                             )
                             const statusBadge = getDiscoveredHostStatusBadge({
+                                host,
                                 importStatus,
                                 importedNode,
                                 isImportedIntoSelectedGroup
                             })
+                            const canAdd = host.canAdd ?? (!isImportedIntoSelectedGroup && !importedNode)
 
                             return (
                                 <Table.Tr key={technicalHostName}>
                                     <Table.Td>
                                         <Checkbox
                                             checked={selectedHosts.includes(technicalHostName)}
-                                            disabled={isImportedIntoSelectedGroup}
+                                            disabled={!canAdd}
                                             onChange={() => toggleSelectedHost(technicalHostName)}
                                         />
                                     </Table.Td>
@@ -1846,11 +2636,11 @@ function AssignmentsTable({ assignments, nodes }: { assignments: ToporBalancerAs
                 <Table className={classes.assignmentsTable} highlightOnHover stickyHeader>
                     <Table.Thead>
                         <Table.Tr>
-                            <Table.Th>{texts.fields.shortUuid}</Table.Th>
-                            <Table.Th>{texts.fields.publicHostCode}</Table.Th>
-                            <Table.Th>{texts.fields.planCode}</Table.Th>
-                            <Table.Th>{texts.fields.technicalHostName}</Table.Th>
-                            <Table.Th>{texts.fields.updatedAt}</Table.Th>
+                            <Table.Th>UUID подписки</Table.Th>
+                            <Table.Th>Код группы</Table.Th>
+                            <Table.Th>Тариф</Table.Th>
+                            <Table.Th>Техническая нода</Table.Th>
+                            <Table.Th>Обновлено</Table.Th>
                         </Table.Tr>
                     </Table.Thead>
                     <Table.Tbody>
@@ -1877,13 +2667,13 @@ function RequestsTable({ requests }: { requests: ToporBalancerRequest[] }) {
                 <Table className={classes.requestsTable} highlightOnHover stickyHeader>
                     <Table.Thead>
                         <Table.Tr>
-                            <Table.Th>{texts.fields.createdAt}</Table.Th>
-                            <Table.Th>{texts.fields.shortUuid}</Table.Th>
-                            <Table.Th>{texts.fields.responseFormat}</Table.Th>
-                            <Table.Th>{texts.fields.inputLinksCount}</Table.Th>
-                            <Table.Th>{texts.fields.outputLinksCount}</Table.Th>
-                            <Table.Th>{texts.fields.status}</Table.Th>
-                            <Table.Th>{texts.fields.errorMessage}</Table.Th>
+                            <Table.Th>Создано</Table.Th>
+                            <Table.Th>UUID подписки</Table.Th>
+                            <Table.Th>Формат</Table.Th>
+                            <Table.Th>Входящих ссылок</Table.Th>
+                            <Table.Th>Исходящих ссылок</Table.Th>
+                            <Table.Th>Статус</Table.Th>
+                            <Table.Th>Ошибка</Table.Th>
                         </Table.Tr>
                     </Table.Thead>
                     <Table.Tbody>

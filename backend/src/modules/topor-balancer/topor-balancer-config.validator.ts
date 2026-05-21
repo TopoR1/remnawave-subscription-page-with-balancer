@@ -1,5 +1,6 @@
 import type {
     ToporBalancerConfig,
+    ToporBalancerGroupStrategy,
     ToporBalancerLocation,
     ToporBalancerNode,
     ToporBalancerNodeStatus,
@@ -8,8 +9,16 @@ import type {
 const DEFAULT_NODE_WEIGHT = 1;
 const DEFAULT_NODE_MAX_USERS = 300;
 const DEFAULT_NODE_STATUS: ToporBalancerNodeStatus = 'active';
+const DEFAULT_NODE_PRIORITY = 100;
 
 const NODE_STATUSES = new Set<ToporBalancerNodeStatus>(['active', 'dead', 'disabled', 'draining']);
+const GROUP_STRATEGIES = new Set<ToporBalancerGroupStrategy>([
+    'least_loaded',
+    'manual',
+    'priority_failover',
+    'sticky_hash',
+    'weighted',
+]);
 
 export class ToporBalancerConfigValidationError extends Error {
     constructor(public readonly issues: string[]) {
@@ -68,7 +77,9 @@ function normalizeLocation(
 
     const publicHostCode = readRequiredString(location, 'publicHostCode', path, issues);
     const publicName = readRequiredString(location, 'publicName', path, issues);
+    const locationCode = readRequiredString(location, 'locationCode', path, issues);
     const planCode = readRequiredString(location, 'planCode', path, issues);
+    const strategy = readOptionalGroupStrategy(location.strategy, `${path}.strategy`, issues);
     const nodesInput = Array.isArray(location.nodes) ? location.nodes : [];
 
     if (location.nodes !== undefined && !Array.isArray(location.nodes)) {
@@ -78,8 +89,9 @@ function normalizeLocation(
     return {
         publicHostCode,
         publicName,
-        locationCode: readOptionalString(location.locationCode),
+        locationCode,
         planCode,
+        strategy,
         nodes: nodesInput.map((node, index) => normalizeNode(node, locationIndex, index, issues)),
     };
 }
@@ -100,6 +112,7 @@ function normalizeNode(
             weight: DEFAULT_NODE_WEIGHT,
             maxUsers: DEFAULT_NODE_MAX_USERS,
             status: DEFAULT_NODE_STATUS,
+            priority: DEFAULT_NODE_PRIORITY,
         };
     }
 
@@ -118,6 +131,12 @@ function normalizeNode(
             issues,
         ),
         status: readOptionalNodeStatus(node.status, `${path}.status`, issues),
+        priority: readOptionalNonNegativeInteger(
+            node.priority,
+            DEFAULT_NODE_PRIORITY,
+            `${path}.priority`,
+            issues,
+        ),
     };
 }
 
@@ -133,14 +152,6 @@ function readRequiredString(
         issues.push(`${path}.${key} is required`);
 
         return '';
-    }
-
-    return value;
-}
-
-function readOptionalString(value: unknown): string | undefined {
-    if (typeof value !== 'string' || value.trim().length === 0) {
-        return undefined;
     }
 
     return value;
@@ -165,6 +176,25 @@ function readOptionalPositiveInteger(
     return value;
 }
 
+function readOptionalNonNegativeInteger(
+    value: unknown,
+    defaultValue: number,
+    path: string,
+    issues: string[],
+): number {
+    if (value === undefined) {
+        return defaultValue;
+    }
+
+    if (typeof value !== 'number' || !Number.isInteger(value) || value < 0) {
+        issues.push(`${path} must be a non-negative integer`);
+
+        return defaultValue;
+    }
+
+    return value;
+}
+
 function readOptionalNodeStatus(
     value: unknown,
     path: string,
@@ -181,6 +211,24 @@ function readOptionalNodeStatus(
     }
 
     return value as ToporBalancerNodeStatus;
+}
+
+function readOptionalGroupStrategy(
+    value: unknown,
+    path: string,
+    issues: string[],
+): ToporBalancerGroupStrategy {
+    if (value === undefined) {
+        return 'least_loaded';
+    }
+
+    if (typeof value !== 'string' || !GROUP_STRATEGIES.has(value as ToporBalancerGroupStrategy)) {
+        issues.push(`${path} must be one of: ${Array.from(GROUP_STRATEGIES).join(', ')}`);
+
+        return 'least_loaded';
+    }
+
+    return value as ToporBalancerGroupStrategy;
 }
 
 function validateUniqueLocations(locations: ToporBalancerLocation[], issues: string[]): void {
