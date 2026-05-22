@@ -1,10 +1,15 @@
 import { Body, Controller, Delete, Get, Param, Patch, Post, Query, UseGuards } from '@nestjs/common';
 
-import type { ToporBalancerGroupStrategy, ToporBalancerNodeStatus } from './types';
+import type {
+    ToporBalancerGroupSquadScope,
+    ToporBalancerGroupStrategy,
+    ToporBalancerNodeStatus,
+} from './types';
 
 import { ToporBalancerAdminGuard } from './topor-balancer-admin.guard';
 import { ToporBalancerDiscoveryService } from './topor-balancer-discovery.service';
 import { ToporBalancerService } from './topor-balancer.service';
+import { ToporRemnawaveTopologyService } from './topor-remnawave-topology.service';
 
 @Controller('api/topor-balancer')
 export class ToporBalancerBootstrapController {
@@ -22,6 +27,7 @@ export class ToporBalancerAdminController {
     constructor(
         private readonly toporBalancerService: ToporBalancerService,
         private readonly toporBalancerDiscoveryService: ToporBalancerDiscoveryService,
+        private readonly toporRemnawaveTopologyService: ToporRemnawaveTopologyService,
     ) {}
 
     @Get('health')
@@ -59,14 +65,18 @@ export class ToporBalancerAdminController {
             planCode: string;
             strategy: ToporBalancerGroupStrategy;
             enabled?: boolean;
+            squadScope?: ToporBalancerGroupSquadScope;
+            internalSquadUuid?: string;
         },
     ) {
         return this.toporBalancerService.createAdminGroup({
             enabled: body.enabled ?? true,
+            internalSquadUuid: body.internalSquadUuid,
             locationCode: body.locationCode,
             planCode: body.planCode,
             publicHostCode: body.publicHostCode,
             publicName: body.publicName,
+            squadScope: body.squadScope,
             strategy: body.strategy,
         });
     }
@@ -82,9 +92,26 @@ export class ToporBalancerAdminController {
             planCode?: string;
             strategy?: ToporBalancerGroupStrategy;
             enabled?: boolean;
+            squadScope?: ToporBalancerGroupSquadScope;
+            internalSquadUuid?: string;
         },
     ) {
         return this.toporBalancerService.updateAdminGroup(id, body);
+    }
+
+    @Get('remnawave-topology')
+    public async remnawaveTopology() {
+        return this.toporRemnawaveTopologyService.getCachedTopology();
+    }
+
+    @Post('remnawave-topology/refresh')
+    public async refreshRemnawaveTopology() {
+        return this.toporRemnawaveTopologyService.refreshTopology();
+    }
+
+    @Get('groups/:id/remnawave-validation')
+    public async validateGroupRemnawaveTopology(@Param('id') id: string) {
+        return this.toporRemnawaveTopologyService.validateGroup(id);
     }
 
     @Delete('groups/:id')

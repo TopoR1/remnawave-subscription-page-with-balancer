@@ -6,6 +6,7 @@ import type {
     ToporBalancerDebugInfo,
     ToporBalancerLocation,
     ToporBalancerProcessResult,
+    ToporRemnawaveTopologySnapshot,
 } from './types';
 import type { ToporBalancerAssignmentRepository } from './topor-balancer-database.repository';
 
@@ -26,8 +27,15 @@ export interface ProcessSubscriptionWithDatabaseBalancerInput {
     userAgent?: string;
     config: ToporBalancerConfig;
     repository: ToporBalancerAssignmentRepository;
+    topology?: ToporRemnawaveTopologySnapshot;
+    userAccess?: ToporBalancerRuntimeUserAccess;
     debug?: boolean;
     logger?: (message: string) => void;
+}
+
+export interface ToporBalancerRuntimeUserAccess {
+    squads: Array<{ name: string; uuid: string }>;
+    accessibleNodeUuids: string[];
 }
 
 interface TechnicalNodeRef {
@@ -38,6 +46,18 @@ interface MatchingLine {
     line: string;
     parsedLink: ParsedVlessLink;
     nodeRef: TechnicalNodeRef;
+}
+
+interface GroupCandidateDiagnostic {
+    publicHostCode: string;
+    planCode: string;
+    userSquads: Array<{ name: string; uuid: string }>;
+    accessibleNodesCount: number;
+    groupNodesCount: number;
+    subscriptionCandidateNodes: string[];
+    effectiveCandidateNodes: string[];
+    selectedTechnicalHostName?: string;
+    warnings: string[];
 }
 
 function getPublicGroupKey(location: ToporBalancerLocation): string {
@@ -56,11 +76,11 @@ export async function processSubscriptionWithDatabaseBalancer(
     const plainBody = decodeSubscriptionBody(input.body, format);
     const technicalNodeMap = buildTechnicalNodeMap(input.config);
     const matchingLines = collectMatchingLines(plainBody, technicalNodeMap);
-    const selectedByPublicGroupKey = await selectNodesByPublicGroupKey(input, matchingLines);
+    const selection = await selectNodesByPublicGroupKey(input, matchingLines);
     const outputPlainBody = filterSubscriptionBody(
         plainBody,
         technicalNodeMap,
-        selectedByPublicGroupKey,
+        selection.selectedByPublicGroupKey,
     );
     const outputBody = encodeSubscriptionBody(outputPlainBody, format, input.body);
     const debugInfo = buildDebugInfo(
@@ -68,7 +88,8 @@ export async function processSubscriptionWithDatabaseBalancer(
         format,
         plainBody,
         matchingLines,
-        selectedByPublicGroupKey,
+        selection.selectedByPublicGroupKey,
+        selection.groupCandidateDiagnostics,
         outputPlainBody,
     );
 
@@ -157,7 +178,10 @@ function collectMatchingLines(
 async function selectNodesByPublicGroupKey(
     input: ProcessSubscriptionWithDatabaseBalancerInput,
     matchingLines: MatchingLine[],
-): Promise<Map<string, ToporBalancerDbNode>> {
+): Promise<{
+    groupCandidateDiagnostics: GroupCandidateDiagnostic[];
+    selectedByPublicGroupKey: Map<string, ToporBalancerDbNode>;
+}> {
     const groups = new Map<string, MatchingLine[]>();
 
     for (const matchingLine of matchingLines) {
@@ -167,28 +191,144 @@ async function selectNodesByPublicGroupKey(
     }
 
     const selectedByPublicGroupKey = new Map<string, ToporBalancerDbNode>();
+    const groupCandidateDiagnostics: GroupCandidateDiagnostic[] = [];
 
     for (const [publicGroupKey, group] of groups.entries()) {
         const location = group[0].nodeRef.location;
-        const candidateTechnicalHostNames = Array.from(
+        const subscriptionCandidateTechnicalHostNames = Array.from(
             new Set(
                 group
                     .map((matchingLine) => matchingLine.parsedLink.remark)
                     .filter((remark): remark is string => Boolean(remark)),
             ),
         );
+        const accessResult = filterCandidatesByUserAccess({
+            candidateTechnicalHostNames: subscriptionCandidateTechnicalHostNames,
+            input,
+            location,
+        });
+        const warnings = [...accessResult.warnings];
+
+        if (accessResult.effectiveCandidateTechnicalHostNames.length === 0) {
+            warnings.push(
+                `No accessible TopoR balancer candidates for ${publicGroupKey}; preserving original links.`,
+            );
+            groupCandidateDiagnostics.push({
+                publicHostCode: location.publicHostCode,
+                planCode: location.planCode,
+                userSquads: input.userAccess?.squads ?? [],
+                accessibleNodesCount: input.userAccess?.accessibleNodeUuids.length ?? 0,
+                groupNodesCount: location.nodes.length,
+                subscriptionCandidateNodes: subscriptionCandidateTechnicalHostNames,
+                effectiveCandidateNodes: [],
+                warnings,
+            });
+            continue;
+        }
+
         const selectedNode = await input.repository.getOrCreateAssignment({
             shortUuid: input.shortUuid,
             location,
-            candidateTechnicalHostNames,
+            candidateTechnicalHostNames: accessResult.effectiveCandidateTechnicalHostNames,
         });
 
         if (selectedNode) {
             selectedByPublicGroupKey.set(publicGroupKey, selectedNode);
         }
+
+        groupCandidateDiagnostics.push({
+            publicHostCode: location.publicHostCode,
+            planCode: location.planCode,
+            userSquads: input.userAccess?.squads ?? [],
+            accessibleNodesCount: input.userAccess?.accessibleNodeUuids.length ?? 0,
+            groupNodesCount: location.nodes.length,
+            subscriptionCandidateNodes: subscriptionCandidateTechnicalHostNames,
+            effectiveCandidateNodes: accessResult.effectiveCandidateTechnicalHostNames,
+            ...(selectedNode ? { selectedTechnicalHostName: selectedNode.technicalHostName } : {}),
+            warnings,
+        });
     }
 
-    return selectedByPublicGroupKey;
+    return {
+        groupCandidateDiagnostics,
+        selectedByPublicGroupKey,
+    };
+}
+
+function filterCandidatesByUserAccess(input: {
+    candidateTechnicalHostNames: string[];
+    input: ProcessSubscriptionWithDatabaseBalancerInput;
+    location: ToporBalancerLocation;
+}): {
+    effectiveCandidateTechnicalHostNames: string[];
+    warnings: string[];
+} {
+    if (!input.input.topology && !input.input.userAccess) {
+        return {
+            effectiveCandidateTechnicalHostNames: input.candidateTechnicalHostNames,
+            warnings: [],
+        };
+    }
+
+    const userSquadUuids = new Set(input.input.userAccess?.squads.map((squad) => squad.uuid) ?? []);
+    const userAccessibleNodeUuids = new Set(input.input.userAccess?.accessibleNodeUuids ?? []);
+    const hostByRemark = new Map(
+        (input.input.topology?.hosts ?? []).map((host) => [host.remark, host]),
+    );
+    const warnings: string[] = [];
+    const effectiveCandidateTechnicalHostNames: string[] = [];
+
+    for (const technicalHostName of input.candidateTechnicalHostNames) {
+        const host = hostByRemark.get(technicalHostName);
+
+        if (!host) {
+            warnings.push(
+                `Candidate ${technicalHostName} has no Remnawave topology host; excluded for user-aware balancing.`,
+            );
+            continue;
+        }
+
+        const hostSquadUuids = new Set(host.accessibleSquads.map((squad) => squad.uuid));
+        const isUserNodeAccessible =
+            Boolean(host.nodeUuid && userAccessibleNodeUuids.has(host.nodeUuid)) ||
+            host.accessibleSquads.some((squad) => userSquadUuids.has(squad.uuid));
+
+        if (
+            input.location.squadScope === 'specific_internal_squad' &&
+            input.location.internalSquadUuid
+        ) {
+            if (
+                userSquadUuids.size > 0 &&
+                !userSquadUuids.has(input.location.internalSquadUuid)
+            ) {
+                warnings.push(
+                    `User is not in required squad ${input.location.internalSquadUuid} for ${getPublicGroupKey(input.location)}.`,
+                );
+                continue;
+            }
+
+            if (!hostSquadUuids.has(input.location.internalSquadUuid)) {
+                warnings.push(
+                    `Candidate ${technicalHostName} is not accessible to required squad ${input.location.internalSquadUuid}; excluded.`,
+                );
+                continue;
+            }
+        }
+
+        if (!isUserNodeAccessible) {
+            warnings.push(
+                `Candidate ${technicalHostName} is not accessible to this user's squads; excluded.`,
+            );
+            continue;
+        }
+
+        effectiveCandidateTechnicalHostNames.push(technicalHostName);
+    }
+
+    return {
+        effectiveCandidateTechnicalHostNames,
+        warnings,
+    };
 }
 
 function filterSubscriptionBody(
@@ -244,11 +384,13 @@ function buildDebugInfo(
     plainBody: string,
     matchingLines: MatchingLine[],
     selectedByPublicGroupKey: Map<string, ToporBalancerDbNode>,
+    groupCandidateDiagnostics: GroupCandidateDiagnostic[],
     outputPlainBody: string,
 ): ToporBalancerDebugInfo {
     const missingSelectionWarnings = buildMissingSelectionWarnings(
         matchingLines,
         selectedByPublicGroupKey,
+        groupCandidateDiagnostics,
     );
 
     return {
@@ -258,6 +400,9 @@ function buildDebugInfo(
         detectedFormat: format,
         totalVlessLinks: extractVlessLinks(plainBody).length,
         matchedTechnicalLinks: matchingLines.length,
+        userSquads: input.userAccess?.squads ?? [],
+        accessibleNodesCount: input.userAccess?.accessibleNodeUuids.length ?? 0,
+        groupCandidateDiagnostics,
         selectedNodes: Object.fromEntries(
             Array.from(selectedByPublicGroupKey.entries()).map(([publicGroupKey, node]) => [
                 publicGroupKey,
@@ -265,20 +410,41 @@ function buildDebugInfo(
             ]),
         ),
         outputLinkCount: extractVlessLinks(outputPlainBody).length,
-        ...(missingSelectionWarnings.length > 0 ? { warnings: missingSelectionWarnings } : {}),
+        ...(missingSelectionWarnings.length > 0 || groupCandidateDiagnostics.some((group) => group.warnings.length > 0)
+            ? {
+                  warnings: [
+                      ...missingSelectionWarnings,
+                      ...groupCandidateDiagnostics.flatMap((group) => group.warnings),
+                  ],
+              }
+            : {}),
     };
 }
 
 function buildMissingSelectionWarnings(
     matchingLines: MatchingLine[],
     selectedByPublicGroupKey: Map<string, ToporBalancerDbNode>,
+    groupCandidateDiagnostics: GroupCandidateDiagnostic[],
 ): string[] {
     const matchingGroupKeys = new Set(
         matchingLines.map((matchingLine) => getPublicGroupKey(matchingLine.nodeRef.location)),
     );
+    const noAccessibleCandidateGroupKeys = new Set(
+        groupCandidateDiagnostics
+            .filter(
+                (diagnostic) =>
+                    diagnostic.subscriptionCandidateNodes.length > 0 &&
+                    diagnostic.effectiveCandidateNodes.length === 0,
+            )
+            .map((diagnostic) => `${diagnostic.publicHostCode}:${diagnostic.planCode}`),
+    );
 
     return Array.from(matchingGroupKeys)
-        .filter((publicGroupKey) => !selectedByPublicGroupKey.has(publicGroupKey))
+        .filter(
+            (publicGroupKey) =>
+                !selectedByPublicGroupKey.has(publicGroupKey) &&
+                !noAccessibleCandidateGroupKeys.has(publicGroupKey),
+        )
         .map(
             (publicGroupKey) =>
                 `No active TopoR balancer node for ${publicGroupKey}; preserving original links.`,

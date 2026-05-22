@@ -14,6 +14,7 @@ import type {
 
 import { parseSubscription } from './topor-balancer-subscription.parser';
 import { ToporBalancerService } from './topor-balancer.service';
+import { ToporRemnawaveTopologyService } from './topor-remnawave-topology.service';
 
 @Injectable()
 export class ToporBalancerDiscoveryService {
@@ -23,6 +24,7 @@ export class ToporBalancerDiscoveryService {
         private readonly axiosService: AxiosService,
         private readonly configService: ConfigService,
         private readonly toporBalancerService: ToporBalancerService,
+        private readonly toporRemnawaveTopologyService?: ToporRemnawaveTopologyService,
     ) {}
 
     public getPanelUrl(): string {
@@ -30,10 +32,11 @@ export class ToporBalancerDiscoveryService {
     }
 
     public async discoverFromRemnawaveApi(): Promise<ToporBalancerDiscoveryResponse> {
-        const [hostsResponse, nodesResponse, importedNodes] = await Promise.all([
+        const [hostsResponse, nodesResponse, importedNodes, topology] = await Promise.all([
             this.axiosService.getRemnawaveHosts(),
             this.axiosService.getRemnawaveNodes(),
             this.getImportedNodesSafe(),
+            this.getTopologySafe(),
         ]);
 
         if (!hostsResponse.isOk || !hostsResponse.response) {
@@ -48,14 +51,17 @@ export class ToporBalancerDiscoveryService {
             }
         }
 
+        const topologyByRemark = new Map(topology.hosts.map((host) => [host.remark, host]));
         const items = hostsResponse.response.response
             .filter((host) => this.normalizeTechnicalHostName(host.remark).length > 0)
             .map((host): ToporBalancerDiscoveredHost => {
                 const technicalHostName = this.normalizeTechnicalHostName(host.remark);
                 const matchedNode = importedNodes.get(technicalHostName);
                 const firstRemnawaveNodeUuid = host.nodes[0];
+                const topologyHost = topologyByRemark.get(technicalHostName);
 
                 return {
+                    accessibleSquads: topologyHost?.accessibleSquads ?? [],
                     alreadyImported: Boolean(matchedNode),
                     host: host.address,
                     matchedGroupId: matchedNode?.groupId,
@@ -71,7 +77,10 @@ export class ToporBalancerDiscoveryService {
                     remnawaveNodeUuid: firstRemnawaveNodeUuid
                         ? this.maskSecret(firstRemnawaveNodeUuid)
                         : undefined,
+                    remnawaveInboundName: topologyHost?.inboundName,
+                    remnawaveProfileName: topologyHost?.profileName,
                     security: host.securityLayer.toLowerCase(),
+                    squadStatus: 'unknown',
                     sni: host.sni ?? undefined,
                     technicalHostName,
                 };
@@ -194,7 +203,7 @@ export class ToporBalancerDiscoveryService {
         const group = await this.toporBalancerService.getAdminGroup(groupId);
         const importedNodes = await this.toporBalancerService.listAdminNodes();
         const items = response.items.map((item) =>
-            this.mapDiscoveredHostToGroupItem(item, group.id, importedNodes),
+            this.mapDiscoveredHostToGroupItem(item, group, importedNodes),
         );
 
         return {
@@ -207,15 +216,33 @@ export class ToporBalancerDiscoveryService {
 
     private mapDiscoveredHostToGroupItem(
         item: ToporBalancerDiscoveredHost,
-        groupId: string,
+        group: Awaited<ReturnType<ToporBalancerService['getAdminGroup']>>,
         importedNodes: Awaited<ReturnType<ToporBalancerService['listAdminNodes']>>,
     ): ToporBalancerGroupDiscoveryItem {
         const technicalHostName = this.normalizeTechnicalHostName(item.technicalHostName);
+        const isAccessibleToGroup =
+            group.squadScope !== 'specific_internal_squad' ||
+            !group.internalSquadUuid ||
+            Boolean(item.accessibleSquads?.some((squad) => squad.uuid === group.internalSquadUuid));
         const matchingNodes = importedNodes.filter(
             (node) => this.normalizeTechnicalHostName(node.technicalHostName) === technicalHostName,
         );
-        const nodeInThisGroup = matchingNodes.find((node) => node.groupId === groupId);
-        const nodesInOtherGroups = matchingNodes.filter((node) => node.groupId !== groupId);
+        const nodeInThisGroup = matchingNodes.find((node) => node.groupId === group.id);
+        const nodesInOtherGroups = matchingNodes.filter((node) => node.groupId !== group.id);
+
+        if (!isAccessibleToGroup) {
+            return {
+                ...item,
+                alreadyImported: Boolean(nodeInThisGroup || nodesInOtherGroups.length > 0),
+                canAdd: false,
+                currentGroupId: nodeInThisGroup?.groupId ?? null,
+                currentGroupName: nodeInThisGroup?.publicName ?? null,
+                matchedNodeId: nodeInThisGroup?.id ?? null,
+                squadStatus: 'not_accessible_to_selected_squad',
+                status: 'not_accessible_to_selected_squad',
+                technicalHostName,
+            };
+        }
 
         if (nodeInThisGroup) {
             return {
@@ -274,6 +301,7 @@ export class ToporBalancerDiscoveryService {
             matchedGroupPlanCode: undefined,
             matchedGroupPublicHostCode: undefined,
             matchedNodeId: null,
+            squadStatus: item.accessibleSquads?.length ? 'accessible' : 'unknown',
             status: 'free',
             technicalHostName,
         };
@@ -304,6 +332,46 @@ export class ToporBalancerDiscoveryService {
             this.logger.warn(`[ToporBalancerDiscovery] local node lookup failed: ${error}`);
 
             return new Map();
+        }
+    }
+
+    private async getTopologySafe() {
+        try {
+            if (!this.toporRemnawaveTopologyService) {
+                return {
+                    hosts: [],
+                    inbounds: [],
+                    nodes: [],
+                    squads: [],
+                    warnings: [],
+                };
+            }
+
+            const topology = await this.toporRemnawaveTopologyService.refreshTopology();
+
+            return topology;
+        } catch (error) {
+            this.logger.warn(`[ToporBalancerDiscovery] topology refresh failed: ${error}`);
+
+            try {
+                return (
+                    (await this.toporRemnawaveTopologyService?.getCachedTopology()) ?? {
+                        hosts: [],
+                        inbounds: [],
+                        nodes: [],
+                        squads: [],
+                        warnings: [],
+                    }
+                );
+            } catch {
+                return {
+                    hosts: [],
+                    inbounds: [],
+                    nodes: [],
+                    squads: [],
+                    warnings: [],
+                };
+            }
         }
     }
 

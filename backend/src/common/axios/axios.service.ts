@@ -335,6 +335,30 @@ export class AxiosService implements OnModuleInit {
         }
     }
 
+    public async getRemnawaveRawEndpoint<T = unknown>(
+        endpoint: string,
+    ): Promise<ICommandResponse<T>> {
+        try {
+            const response = await this.axiosInstance.request<T>({
+                method: 'GET',
+                url: endpoint.replace(/^\/+/, ''),
+            });
+
+            return {
+                isOk: true,
+                response: response.data,
+            };
+        } catch (error) {
+            if (error instanceof AxiosError) {
+                this.logger.warn(`Remnawave endpoint ${endpoint} is not available: ${error.message}`);
+            } else {
+                this.logger.warn(`Remnawave endpoint ${endpoint} is not available: ${error}`);
+            }
+
+            return { isOk: false };
+        }
+    }
+
     public async getSubscription(
         clientIp: string,
         shortUuid: string,

@@ -9,10 +9,16 @@ import type {
     ToporBalancerDbAssignment,
     ToporBalancerDbGroup,
     ToporBalancerDbNode,
+    ToporBalancerGroupSquadScope,
     ToporBalancerGroupStrategy,
     ToporBalancerLocation,
     ToporBalancerNode,
     ToporBalancerNodeStatus,
+    ToporRemnawaveTopologyHost,
+    ToporRemnawaveTopologyInbound,
+    ToporRemnawaveTopologyNode,
+    ToporRemnawaveTopologySnapshot,
+    ToporRemnawaveTopologySquad,
 } from './types';
 
 interface PgQueryResult<T> {
@@ -101,6 +107,8 @@ export interface ToporBalancerGroupCreateInput {
     planCode: string;
     strategy: ToporBalancerGroupStrategy;
     enabled: boolean;
+    squadScope?: ToporBalancerGroupSquadScope;
+    internalSquadUuid?: string;
 }
 
 export interface ToporBalancerGroupUpdateInput {
@@ -110,6 +118,8 @@ export interface ToporBalancerGroupUpdateInput {
     planCode?: string;
     strategy?: ToporBalancerGroupStrategy;
     enabled?: boolean;
+    squadScope?: ToporBalancerGroupSquadScope;
+    internalSquadUuid?: string;
 }
 
 export interface ToporBalancerGroupNodeCreateInput {
@@ -169,6 +179,8 @@ export interface ToporBalancerAssignmentRepository {
     listAssignments(filters: ToporBalancerAssignmentFilters): Promise<ToporBalancerDbAssignment[]>;
     reassign(input: ToporBalancerManualReassignInput): Promise<ToporBalancerDbAssignment | null>;
     listRequests(filters: ToporBalancerRequestFilters): Promise<ToporBalancerAdminRequest[]>;
+    replaceRemnawaveTopologyCache(input: ToporRemnawaveTopologySnapshot): Promise<void>;
+    getRemnawaveTopologyCache(): Promise<ToporRemnawaveTopologySnapshot>;
     upsertImportedNodes(
         input: ToporBalancerNodeCreateInput[],
     ): Promise<{ created: ToporBalancerAdminNode[]; updated: ToporBalancerAdminNode[] }>;
@@ -199,6 +211,8 @@ interface DbGroupRow {
     plan_code: string;
     strategy: ToporBalancerGroupStrategy;
     enabled: boolean;
+    squad_scope: ToporBalancerGroupSquadScope;
+    internal_squad_uuid: string | null;
     created_at?: Date | string;
     updated_at?: Date | string;
 }
@@ -226,6 +240,43 @@ interface DbAdminGroupRow extends DbGroupRow {
     active_nodes_count: string | number;
     assigned_users: string | number;
     nodes_count: string | number;
+    nodes_count_source?: 'db_group_id';
+}
+
+interface DbTopologyHostRow {
+    uuid: string;
+    remark: string;
+    address: string | null;
+    inbound_uuid: string | null;
+    node_uuid: string | null;
+    node_name: string | null;
+    profile_uuid: string | null;
+    profile_name: string | null;
+    inbound_name: string | null;
+    accessible_squads: Array<{ name: string; uuid: string }> | string | null;
+    updated_at?: Date | string;
+}
+
+interface DbTopologyNodeRow {
+    uuid: string;
+    name: string;
+    address: string | null;
+    status: string | null;
+    updated_at?: Date | string;
+}
+
+interface DbTopologyInboundRow {
+    uuid: string;
+    name: string;
+    profile_uuid: string | null;
+    profile_name: string | null;
+    updated_at?: Date | string;
+}
+
+interface DbTopologySquadRow {
+    uuid: string;
+    name: string;
+    updated_at?: Date | string;
 }
 
 interface DbRequestRow {
@@ -262,6 +313,8 @@ export class ToporBalancerPostgresRepository implements ToporBalancerAssignmentR
                 plan_code TEXT NOT NULL,
                 strategy TEXT NOT NULL DEFAULT 'least_loaded',
                 enabled BOOLEAN NOT NULL DEFAULT TRUE,
+                squad_scope TEXT NOT NULL DEFAULT 'any_visible_to_user',
+                internal_squad_uuid TEXT,
                 created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
                 updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
                 UNIQUE (public_host_code, plan_code)
@@ -294,6 +347,12 @@ export class ToporBalancerPostgresRepository implements ToporBalancerAssignmentR
 
             ALTER TABLE topor_balancer_groups
                 ADD COLUMN IF NOT EXISTS enabled BOOLEAN NOT NULL DEFAULT TRUE;
+
+            ALTER TABLE topor_balancer_groups
+                ADD COLUMN IF NOT EXISTS squad_scope TEXT NOT NULL DEFAULT 'any_visible_to_user';
+
+            ALTER TABLE topor_balancer_groups
+                ADD COLUMN IF NOT EXISTS internal_squad_uuid TEXT;
 
             INSERT INTO topor_balancer_groups (
                 id,
@@ -368,6 +427,49 @@ export class ToporBalancerPostgresRepository implements ToporBalancerAssignmentR
 
             ALTER TABLE topor_balancer_requests
                 ADD COLUMN IF NOT EXISTS error_message TEXT;
+
+            CREATE TABLE IF NOT EXISTS topor_remnawave_hosts (
+                uuid TEXT PRIMARY KEY,
+                remark TEXT NOT NULL,
+                address TEXT,
+                inbound_uuid TEXT,
+                node_uuid TEXT,
+                node_name TEXT,
+                profile_uuid TEXT,
+                profile_name TEXT,
+                inbound_name TEXT,
+                accessible_squads JSONB NOT NULL DEFAULT '[]'::jsonb,
+                updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+            );
+
+            CREATE TABLE IF NOT EXISTS topor_remnawave_nodes (
+                uuid TEXT PRIMARY KEY,
+                name TEXT NOT NULL,
+                address TEXT,
+                status TEXT,
+                updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+            );
+
+            CREATE TABLE IF NOT EXISTS topor_remnawave_inbounds (
+                uuid TEXT PRIMARY KEY,
+                name TEXT NOT NULL,
+                profile_uuid TEXT,
+                profile_name TEXT,
+                updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+            );
+
+            CREATE TABLE IF NOT EXISTS topor_remnawave_internal_squads (
+                uuid TEXT PRIMARY KEY,
+                name TEXT NOT NULL,
+                updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+            );
+
+            CREATE TABLE IF NOT EXISTS topor_remnawave_host_squad_access (
+                host_uuid TEXT NOT NULL REFERENCES topor_remnawave_hosts(uuid) ON DELETE CASCADE,
+                squad_uuid TEXT NOT NULL REFERENCES topor_remnawave_internal_squads(uuid) ON DELETE CASCADE,
+                updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                PRIMARY KEY (host_uuid, squad_uuid)
+            );
 
             CREATE INDEX IF NOT EXISTS topor_balancer_assignments_node_id_idx
                 ON topor_balancer_assignments (node_id);
@@ -492,9 +594,10 @@ export class ToporBalancerPostgresRepository implements ToporBalancerAssignmentR
         const result = await this.pool.query<DbAdminGroupRow>(`
             SELECT
                 g.*,
-                COUNT(n.id) AS nodes_count,
-                COUNT(n.id) FILTER (WHERE n.status = 'active') AS active_nodes_count,
-                COUNT(DISTINCT a.id) AS assigned_users
+                COUNT(DISTINCT n.id) AS nodes_count,
+                COUNT(DISTINCT n.id) FILTER (WHERE n.status = 'active') AS active_nodes_count,
+                COUNT(DISTINCT a.id) AS assigned_users,
+                'db_group_id' AS nodes_count_source
             FROM topor_balancer_groups g
             LEFT JOIN topor_balancer_nodes n ON n.group_id = g.id
             LEFT JOIN topor_balancer_assignments a ON a.node_id = n.id
@@ -524,9 +627,11 @@ export class ToporBalancerPostgresRepository implements ToporBalancerAssignmentR
                 location_code,
                 plan_code,
                 strategy,
-                enabled
+                enabled,
+                squad_scope,
+                internal_squad_uuid
             )
-            VALUES ($1, $2, $3, $4, $5, $6, $7)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
             ON CONFLICT (public_host_code, plan_code) DO NOTHING
             RETURNING *
             `,
@@ -538,6 +643,8 @@ export class ToporBalancerPostgresRepository implements ToporBalancerAssignmentR
                 input.planCode,
                 input.strategy,
                 input.enabled,
+                input.squadScope ?? 'any_visible_to_user',
+                input.internalSquadUuid ?? null,
             ],
         );
 
@@ -563,6 +670,8 @@ export class ToporBalancerPostgresRepository implements ToporBalancerAssignmentR
         addUpdate(updates, params, 'plan_code', input.planCode);
         addUpdate(updates, params, 'strategy', input.strategy);
         addUpdate(updates, params, 'enabled', input.enabled);
+        addUpdate(updates, params, 'squad_scope', input.squadScope);
+        addUpdate(updates, params, 'internal_squad_uuid', input.internalSquadUuid);
 
         if (updates.length > 0) {
             params.push(id);
@@ -1017,6 +1126,147 @@ export class ToporBalancerPostgresRepository implements ToporBalancerAssignmentR
         return { created, updated };
     }
 
+    public async replaceRemnawaveTopologyCache(
+        input: ToporRemnawaveTopologySnapshot,
+    ): Promise<void> {
+        const client = await this.pool.connect();
+
+        try {
+            await client.query('BEGIN');
+            await client.query('DELETE FROM topor_remnawave_host_squad_access');
+            await client.query('DELETE FROM topor_remnawave_hosts');
+            await client.query('DELETE FROM topor_remnawave_nodes');
+            await client.query('DELETE FROM topor_remnawave_inbounds');
+            await client.query('DELETE FROM topor_remnawave_internal_squads');
+
+            for (const node of input.nodes) {
+                await client.query(
+                    `
+                    INSERT INTO topor_remnawave_nodes (uuid, name, address, status)
+                    VALUES ($1, $2, $3, $4)
+                    ON CONFLICT (uuid) DO UPDATE SET
+                        name = EXCLUDED.name,
+                        address = EXCLUDED.address,
+                        status = EXCLUDED.status,
+                        updated_at = NOW()
+                    `,
+                    [node.uuid, node.name, node.address ?? null, node.status ?? null],
+                );
+            }
+
+            for (const inbound of input.inbounds) {
+                await client.query(
+                    `
+                    INSERT INTO topor_remnawave_inbounds (uuid, name, profile_uuid, profile_name)
+                    VALUES ($1, $2, $3, $4)
+                    ON CONFLICT (uuid) DO UPDATE SET
+                        name = EXCLUDED.name,
+                        profile_uuid = EXCLUDED.profile_uuid,
+                        profile_name = EXCLUDED.profile_name,
+                        updated_at = NOW()
+                    `,
+                    [
+                        inbound.uuid,
+                        inbound.name,
+                        inbound.profileUuid ?? null,
+                        inbound.profileName ?? null,
+                    ],
+                );
+            }
+
+            for (const squad of input.squads) {
+                await client.query(
+                    `
+                    INSERT INTO topor_remnawave_internal_squads (uuid, name)
+                    VALUES ($1, $2)
+                    ON CONFLICT (uuid) DO UPDATE SET
+                        name = EXCLUDED.name,
+                        updated_at = NOW()
+                    `,
+                    [squad.uuid, squad.name],
+                );
+            }
+
+            for (const host of input.hosts) {
+                await client.query(
+                    `
+                    INSERT INTO topor_remnawave_hosts (
+                        uuid,
+                        remark,
+                        address,
+                        inbound_uuid,
+                        node_uuid,
+                        node_name,
+                        profile_uuid,
+                        profile_name,
+                        inbound_name,
+                        accessible_squads
+                    )
+                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10::jsonb)
+                    ON CONFLICT (uuid) DO UPDATE SET
+                        remark = EXCLUDED.remark,
+                        address = EXCLUDED.address,
+                        inbound_uuid = EXCLUDED.inbound_uuid,
+                        node_uuid = EXCLUDED.node_uuid,
+                        node_name = EXCLUDED.node_name,
+                        profile_uuid = EXCLUDED.profile_uuid,
+                        profile_name = EXCLUDED.profile_name,
+                        inbound_name = EXCLUDED.inbound_name,
+                        accessible_squads = EXCLUDED.accessible_squads,
+                        updated_at = NOW()
+                    `,
+                    [
+                        host.uuid,
+                        host.remark,
+                        host.address ?? null,
+                        host.inboundUuid ?? null,
+                        host.nodeUuid ?? null,
+                        host.nodeName ?? null,
+                        host.profileUuid ?? null,
+                        host.profileName ?? null,
+                        host.inboundName ?? null,
+                        JSON.stringify(host.accessibleSquads),
+                    ],
+                );
+
+                for (const squad of host.accessibleSquads) {
+                    await client.query(
+                        `
+                        INSERT INTO topor_remnawave_host_squad_access (host_uuid, squad_uuid)
+                        VALUES ($1, $2)
+                        ON CONFLICT (host_uuid, squad_uuid) DO UPDATE SET updated_at = NOW()
+                        `,
+                        [host.uuid, squad.uuid],
+                    );
+                }
+            }
+
+            await client.query('COMMIT');
+        } catch (error) {
+            await client.query('ROLLBACK');
+            throw error;
+        } finally {
+            client.release();
+        }
+    }
+
+    public async getRemnawaveTopologyCache(): Promise<ToporRemnawaveTopologySnapshot> {
+        const [hostsResult, nodesResult, inboundsResult, squadsResult] = await Promise.all([
+            this.pool.query<DbTopologyHostRow>('SELECT * FROM topor_remnawave_hosts ORDER BY remark ASC'),
+            this.pool.query<DbTopologyNodeRow>('SELECT * FROM topor_remnawave_nodes ORDER BY name ASC'),
+            this.pool.query<DbTopologyInboundRow>('SELECT * FROM topor_remnawave_inbounds ORDER BY name ASC'),
+            this.pool.query<DbTopologySquadRow>('SELECT * FROM topor_remnawave_internal_squads ORDER BY name ASC'),
+        ]);
+
+        return {
+            hosts: hostsResult.rows.map(mapTopologyHostRow),
+            nodes: nodesResult.rows.map(mapTopologyNodeRow),
+            inbounds: inboundsResult.rows.map(mapTopologyInboundRow),
+            squads: squadsResult.rows.map(mapTopologySquadRow),
+            warnings: [],
+        };
+    }
+
     public async close(): Promise<void> {
         await this.pool.end();
     }
@@ -1421,6 +1671,8 @@ function mapGroupRow(row: DbGroupRow): ToporBalancerDbGroup {
         planCode: row.plan_code,
         strategy: row.strategy,
         enabled: row.enabled,
+        squadScope: row.squad_scope ?? 'any_visible_to_user',
+        internalSquadUuid: row.internal_squad_uuid ?? undefined,
         createdAt: row.created_at?.toString(),
         updatedAt: row.updated_at?.toString(),
     };
@@ -1432,7 +1684,70 @@ function mapAdminGroupRow(row: DbAdminGroupRow): ToporBalancerAdminGroup {
         activeNodesCount: Number(row.active_nodes_count),
         assignedUsers: Number(row.assigned_users),
         nodesCount: Number(row.nodes_count),
+        nodesCountSource: row.nodes_count_source ?? 'db_group_id',
     };
+}
+
+function mapTopologyHostRow(row: DbTopologyHostRow): ToporRemnawaveTopologyHost {
+    return {
+        uuid: row.uuid,
+        remark: row.remark,
+        address: row.address ?? undefined,
+        inboundUuid: row.inbound_uuid ?? undefined,
+        nodeUuid: row.node_uuid ?? undefined,
+        nodeName: row.node_name ?? undefined,
+        profileUuid: row.profile_uuid ?? undefined,
+        profileName: row.profile_name ?? undefined,
+        inboundName: row.inbound_name ?? undefined,
+        accessibleSquads: parseJsonArray(row.accessible_squads),
+        updatedAt: row.updated_at?.toString(),
+    };
+}
+
+function mapTopologyNodeRow(row: DbTopologyNodeRow): ToporRemnawaveTopologyNode {
+    return {
+        uuid: row.uuid,
+        name: row.name,
+        address: row.address ?? undefined,
+        status: row.status ?? undefined,
+        updatedAt: row.updated_at?.toString(),
+    };
+}
+
+function mapTopologyInboundRow(row: DbTopologyInboundRow): ToporRemnawaveTopologyInbound {
+    return {
+        uuid: row.uuid,
+        name: row.name,
+        profileUuid: row.profile_uuid ?? undefined,
+        profileName: row.profile_name ?? undefined,
+        updatedAt: row.updated_at?.toString(),
+    };
+}
+
+function mapTopologySquadRow(row: DbTopologySquadRow): ToporRemnawaveTopologySquad {
+    return {
+        uuid: row.uuid,
+        name: row.name,
+        updatedAt: row.updated_at?.toString(),
+    };
+}
+
+function parseJsonArray(value: Array<{ name: string; uuid: string }> | string | null): Array<{ name: string; uuid: string }> {
+    if (Array.isArray(value)) {
+        return value;
+    }
+
+    if (!value) {
+        return [];
+    }
+
+    try {
+        const parsed = JSON.parse(value);
+
+        return Array.isArray(parsed) ? parsed : [];
+    } catch {
+        return [];
+    }
 }
 
 function mapNodeRow(row: DbNodeRow): ToporBalancerDbNode {

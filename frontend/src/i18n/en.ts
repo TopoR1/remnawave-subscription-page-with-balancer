@@ -227,6 +227,7 @@ export const en = {
             publicHostCode: 'Internal balancer group code. Used to combine technical nodes.',
             publicName: 'Name shown to the user in the app. For example: 🇫🇮 Finland.',
             status: 'Status defines whether users can be assigned to this node.',
+            strategy: 'Algorithm used by Balancer to select the technical node for a user.',
             technicalHostName: 'Must exactly match the VLESS link name after # in the Remnawave subscription.',
             weight: 'Relative load share. Higher value means this node can receive more users.',
         },

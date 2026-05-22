@@ -9,6 +9,10 @@ export type ToporBalancerGroupStrategy =
     | 'sticky_hash'
     | 'weighted';
 
+export type ToporBalancerGroupSquadScope =
+    | 'any_visible_to_user'
+    | 'specific_internal_squad';
+
 export interface ToporBalancerNode {
     technicalHostName: string;
     weight: number;
@@ -23,6 +27,8 @@ export interface ToporBalancerLocation {
     locationCode?: string;
     planCode: string;
     strategy?: ToporBalancerGroupStrategy;
+    squadScope?: ToporBalancerGroupSquadScope;
+    internalSquadUuid?: string;
     nodes: ToporBalancerNode[];
 }
 
@@ -79,6 +85,19 @@ export interface ToporBalancerDebugInfo {
     totalVlessLinks: number;
     matchedTechnicalLinks: number;
     selectedNodes: Record<string, string>;
+    userSquads?: Array<{ name: string; uuid: string }>;
+    accessibleNodesCount?: number;
+    groupCandidateDiagnostics?: Array<{
+        publicHostCode: string;
+        planCode: string;
+        userSquads: Array<{ name: string; uuid: string }>;
+        accessibleNodesCount: number;
+        groupNodesCount: number;
+        subscriptionCandidateNodes: string[];
+        effectiveCandidateNodes: string[];
+        selectedTechnicalHostName?: string;
+        warnings: string[];
+    }>;
     outputLinkCount: number;
     warnings?: string[];
 }
@@ -125,19 +144,75 @@ export interface ToporBalancerDebugProcessSubscriptionResult {
 
 export type ToporBalancerSubscriptionDiagnosticsFormat = 'base64' | 'plain' | 'unknown';
 
+export type ToporBalancerSubscriptionDiagnosticsStatus =
+    | 'failed_open'
+    | 'partially_processed'
+    | 'passed_through'
+    | 'processed';
+
 export type ToporBalancerSubscriptionDiagnosticsGroupStatus =
     | 'fail-open'
     | 'no-active-node'
-    | 'ok';
+    | 'ok'
+    | 'passed-through'
+    | 'partial';
+
+export type ToporBalancerSubscriptionDiagnosticsUnchangedReason =
+    | 'format_unsupported'
+    | 'group_disabled'
+    | 'no_active_node'
+    | 'no_accessible_candidates'
+    | 'no_selected_node'
+    | 'technicalHostName_mismatch';
 
 export interface ToporBalancerSubscriptionDiagnosticsResult {
     ok: boolean;
+    status: ToporBalancerSubscriptionDiagnosticsStatus;
     format: ToporBalancerSubscriptionDiagnosticsFormat;
+    totalVlessLinks: number;
+    matchedTechnicalLinks: number;
+    userSquads: Array<{ name: string; uuid: string }>;
+    accessibleNodesCount: number;
+    unmatchedRemarks: string[];
+    matchedGroups: Array<{
+        publicHostCode: string;
+        planCode: string;
+        publicName: string;
+        technicalHostNames: string[];
+        matchedRemarks: string[];
+        selectedTechnicalHostName?: string;
+        userSquads: Array<{ name: string; uuid: string }>;
+        accessibleNodesCount: number;
+        groupNodesCount: number;
+        effectiveCandidateNodes: string[];
+        outputRemarks: string[];
+        outputContainsPublicName: boolean;
+        rewrittenLinksCount: number;
+        unchangedLinksCount: number;
+        unchangedReasons: Array<{
+            reason: ToporBalancerSubscriptionDiagnosticsUnchangedReason;
+            remark?: string;
+            technicalHostName?: string;
+            message: string;
+        }>;
+    }>;
+    selectedNodes: Record<string, string>;
+    rewrittenLinksCount: number;
+    unchangedLinksCount: number;
+    unchangedReasons: Array<{
+        publicHostCode?: string;
+        planCode?: string;
+        reason: ToporBalancerSubscriptionDiagnosticsUnchangedReason;
+        remark?: string;
+        technicalHostName?: string;
+        message: string;
+    }>;
     inputLinksCount: number;
     outputLinksCount: number;
     groups: Array<{
         publicHostCode: string;
         planCode: string;
+        publicName?: string;
         selectedTechnicalHostName?: string;
         status: ToporBalancerSubscriptionDiagnosticsGroupStatus;
     }>;
@@ -175,6 +250,8 @@ export interface ToporBalancerDbGroup {
     planCode: string;
     strategy: ToporBalancerGroupStrategy;
     enabled: boolean;
+    squadScope: ToporBalancerGroupSquadScope;
+    internalSquadUuid?: string;
     createdAt?: string;
     updatedAt?: string;
 }
@@ -194,10 +271,59 @@ export interface ToporBalancerAdminNode extends ToporBalancerDbNode {
     assignedUsers: number;
 }
 
+export interface ToporRemnawaveTopologyHost {
+    uuid: string;
+    remark: string;
+    address?: string;
+    inboundUuid?: string;
+    nodeUuid?: string;
+    nodeName?: string;
+    profileUuid?: string;
+    profileName?: string;
+    inboundName?: string;
+    accessibleSquads: Array<{
+        uuid: string;
+        name: string;
+    }>;
+    updatedAt?: string;
+}
+
+export interface ToporRemnawaveTopologyNode {
+    uuid: string;
+    name: string;
+    address?: string;
+    status?: string;
+    updatedAt?: string;
+}
+
+export interface ToporRemnawaveTopologyInbound {
+    uuid: string;
+    name: string;
+    profileUuid?: string;
+    profileName?: string;
+    updatedAt?: string;
+}
+
+export interface ToporRemnawaveTopologySquad {
+    uuid: string;
+    name: string;
+    updatedAt?: string;
+}
+
+export interface ToporRemnawaveTopologySnapshot {
+    hosts: ToporRemnawaveTopologyHost[];
+    nodes: ToporRemnawaveTopologyNode[];
+    inbounds: ToporRemnawaveTopologyInbound[];
+    squads: ToporRemnawaveTopologySquad[];
+    warnings: string[];
+    refreshedAt?: string;
+}
+
 export interface ToporBalancerAdminGroup extends ToporBalancerDbGroup {
     activeNodesCount: number;
     assignedUsers: number;
     nodesCount: number;
+    nodesCountSource?: 'db_group_id';
 }
 
 export interface ToporBalancerAdminHealth {
@@ -260,6 +386,13 @@ export interface ToporBalancerDiscoveredHost {
     rawRemark?: string;
     remnawaveNodeName?: string;
     remnawaveNodeUuid?: string;
+    remnawaveInboundName?: string;
+    remnawaveProfileName?: string;
+    accessibleSquads?: Array<{
+        uuid: string;
+        name: string;
+    }>;
+    squadStatus?: 'accessible' | 'not_accessible_to_selected_squad' | 'unknown';
     alreadyImported: boolean;
     matchedGroupId?: string;
     matchedGroupPublicHostCode?: string;
@@ -271,7 +404,8 @@ export type ToporBalancerGroupDiscoveryItemStatus =
     | 'conflict'
     | 'free'
     | 'in_other_group'
-    | 'in_this_group';
+    | 'in_this_group'
+    | 'not_accessible_to_selected_squad';
 
 export interface ToporBalancerGroupDiscoveryItem extends ToporBalancerDiscoveredHost {
     canAdd: boolean;
@@ -306,11 +440,15 @@ export interface ToporBalancerDiscoveryImportInput {
         publicName: string;
         locationCode?: string;
         planCode: string;
+        squadScope?: ToporBalancerGroupSquadScope;
+        internalSquadUuid?: string;
     };
     publicHostCode?: string;
     publicName?: string;
     locationCode?: string;
     planCode?: string;
+    squadScope?: ToporBalancerGroupSquadScope;
+    internalSquadUuid?: string;
     nodes: Array<{
         technicalHostName: string;
         weight: number;

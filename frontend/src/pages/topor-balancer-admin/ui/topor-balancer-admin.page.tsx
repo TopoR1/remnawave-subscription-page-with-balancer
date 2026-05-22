@@ -56,6 +56,8 @@ const groupDiscoverySubscriptionUrl = (groupId: string) => `/api/topor-balancer/
 const groupNodesImportUrl = (groupId: string) => `/api/topor-balancer/groups/${encodeURIComponent(groupId)}/nodes/import`
 const SUBSCRIPTION_DIAGNOSTICS_URL = '/api/topor-balancer/diagnostics/subscription'
 const RUNTIME_CONFIG_HEALTH_URL = '/api/topor-balancer/runtime-config-health'
+const REMNAWAVE_TOPOLOGY_URL = '/api/topor-balancer/remnawave-topology'
+const REMNAWAVE_TOPOLOGY_REFRESH_URL = '/api/topor-balancer/remnawave-topology/refresh'
 
 const NODE_STATUSES = ['active', 'draining', 'disabled', 'dead'] as const
 const texts = i18n[defaultLocale].toporBalancerAdmin
@@ -69,7 +71,8 @@ const DIAGNOSTICS_USER_AGENTS = [
 
 type ToporBalancerNodeStatus = (typeof NODE_STATUSES)[number]
 type ToporBalancerGroupStrategy = 'least_loaded' | 'manual' | 'priority_failover' | 'sticky_hash' | 'weighted'
-type DiscoveryItemStatus = 'conflict' | 'free' | 'in_other_group' | 'in_this_group'
+type ToporBalancerGroupSquadScope = 'any_visible_to_user' | 'specific_internal_squad'
+type DiscoveryItemStatus = 'conflict' | 'free' | 'in_other_group' | 'in_this_group' | 'not_accessible_to_selected_squad'
 
 interface ToporBalancerHealth {
     assignmentCount: number
@@ -97,9 +100,12 @@ interface ToporBalancerGroup {
     id: string
     locationCode?: string
     nodesCount: number
+    nodesCountSource?: 'db_group_id'
     planCode: string
     publicHostCode: string
     publicName: string
+    squadScope: ToporBalancerGroupSquadScope
+    internalSquadUuid?: string
     strategy: ToporBalancerGroupStrategy
     updatedAt?: string
 }
@@ -157,12 +163,33 @@ interface DiscoveredHost {
     rawRemark?: string
     remnawaveNodeName?: string
     remnawaveNodeUuid?: string
+    remnawaveInboundName?: string
+    remnawaveProfileName?: string
+    accessibleSquads?: Array<{ name: string; uuid: string }>
+    squadStatus?: 'accessible' | 'not_accessible_to_selected_squad' | 'unknown'
     security?: string
     sid?: string
     sni?: string
     technicalHostName: string
     type?: string
     status?: DiscoveryItemStatus
+}
+
+interface RemnawaveTopologySnapshot {
+    hosts: Array<{
+        uuid: string
+        remark: string
+        address?: string
+        nodeName?: string
+        profileName?: string
+        inboundName?: string
+        accessibleSquads: Array<{ name: string; uuid: string }>
+    }>
+    nodes: Array<{ uuid: string; name: string; status?: string }>
+    inbounds: Array<{ uuid: string; name: string; profileName?: string }>
+    squads: Array<{ uuid: string; name: string }>
+    warnings: string[]
+    refreshedAt?: string
 }
 
 interface DiscoveryResponse {
@@ -213,14 +240,54 @@ interface DiscoveryImportStatusState {
 
 interface SubscriptionDiagnosticsResult {
     ok: boolean
+    status: 'failed_open' | 'partially_processed' | 'passed_through' | 'processed'
     format: 'base64' | 'plain' | 'unknown'
+    totalVlessLinks: number
+    matchedTechnicalLinks: number
+    userSquads: Array<{ name: string; uuid: string }>
+    accessibleNodesCount: number
+    unmatchedRemarks: string[]
+    matchedGroups: Array<{
+        publicHostCode: string
+        planCode: string
+        publicName: string
+        technicalHostNames: string[]
+        matchedRemarks: string[]
+        selectedTechnicalHostName?: string
+        userSquads: Array<{ name: string; uuid: string }>
+        accessibleNodesCount: number
+        groupNodesCount: number
+        effectiveCandidateNodes: string[]
+        outputRemarks: string[]
+        outputContainsPublicName: boolean
+        rewrittenLinksCount: number
+        unchangedLinksCount: number
+        unchangedReasons: Array<{
+            reason: DiagnosticsUnchangedReason
+            remark?: string
+            technicalHostName?: string
+            message: string
+        }>
+    }>
+    selectedNodes: Record<string, string>
+    rewrittenLinksCount: number
+    unchangedLinksCount: number
+    unchangedReasons: Array<{
+        publicHostCode?: string
+        planCode?: string
+        reason: DiagnosticsUnchangedReason
+        remark?: string
+        technicalHostName?: string
+        message: string
+    }>
     inputLinksCount: number
     outputLinksCount: number
     groups: Array<{
         publicHostCode: string
         planCode: string
+        publicName?: string
         selectedTechnicalHostName?: string
-        status: 'fail-open' | 'no-active-node' | 'ok'
+        status: 'fail-open' | 'no-active-node' | 'ok' | 'partial' | 'passed-through'
     }>
     vlessValidation: Array<{
         remark?: string
@@ -231,6 +298,14 @@ interface SubscriptionDiagnosticsResult {
     warnings: string[]
     errors: string[]
 }
+
+type DiagnosticsUnchangedReason =
+    | 'format_unsupported'
+    | 'group_disabled'
+    | 'no_active_node'
+    | 'no_accessible_candidates'
+    | 'no_selected_node'
+    | 'technicalHostName_mismatch'
 
 const statusLabels: Record<ToporBalancerNodeStatus, string> = {
     active: texts.status.active,
@@ -423,6 +498,8 @@ function getDiagnosticsStatusColor(status: SubscriptionDiagnosticsResult['groups
     const colors: Record<SubscriptionDiagnosticsResult['groups'][number]['status'], string> = {
         'fail-open': 'yellow',
         'no-active-node': 'red',
+        'passed-through': 'yellow',
+        partial: 'yellow',
         ok: 'green'
     }
 
@@ -430,13 +507,48 @@ function getDiagnosticsStatusColor(status: SubscriptionDiagnosticsResult['groups
 }
 
 function getDiagnosticsStatusLabel(status: SubscriptionDiagnosticsResult['groups'][number]['status']) {
-    const labels: Record<SubscriptionDiagnosticsResult['groups'][number]['status'], string> = {
+    const labels: Partial<Record<SubscriptionDiagnosticsResult['groups'][number]['status'], string>> = {
         'fail-open': 'Исходные ссылки',
         'no-active-node': 'Нет активной ноды',
         ok: 'Готово'
     }
 
+    return labels[status] ?? status
+}
+
+function getDiagnosticsOverallStatusColor(status: SubscriptionDiagnosticsResult['status']) {
+    const colors: Record<SubscriptionDiagnosticsResult['status'], string> = {
+        failed_open: 'red',
+        partially_processed: 'yellow',
+        passed_through: 'yellow',
+        processed: 'green'
+    }
+
+    return colors[status]
+}
+
+function getDiagnosticsOverallStatusLabel(status: SubscriptionDiagnosticsResult['status']) {
+    const labels: Record<SubscriptionDiagnosticsResult['status'], string> = {
+        failed_open: 'failed_open',
+        partially_processed: 'partially_processed',
+        passed_through: 'passed_through',
+        processed: 'processed'
+    }
+
     return labels[status]
+}
+
+function getDiagnosticsReasonLabel(reason: DiagnosticsUnchangedReason) {
+    const labels: Record<DiagnosticsUnchangedReason, string> = {
+        format_unsupported: 'format unsupported',
+        group_disabled: 'group disabled',
+        no_active_node: 'no active node',
+        no_accessible_candidates: 'no accessible candidates',
+        no_selected_node: 'no selected node',
+        technicalHostName_mismatch: 'technicalHostName mismatch'
+    }
+
+    return labels[reason]
 }
 
 function getAssignmentModeLabel(mode?: string) {
@@ -455,6 +567,9 @@ export function ToporBalancerAdminPage() {
     const [runtimeHealth, setRuntimeHealth] = useState<null | RuntimeConfigHealth>(null)
     const [groups, setGroups] = useState<ToporBalancerGroup[]>([])
     const [nodes, setNodes] = useState<ToporBalancerNode[]>([])
+    const [groupNodes, setGroupNodes] = useState<ToporBalancerNode[]>([])
+    const [groupNodesGroupId, setGroupNodesGroupId] = useState<null | string>(null)
+    const [isGroupNodesLoading, setIsGroupNodesLoading] = useState(false)
     const [assignments, setAssignments] = useState<ToporBalancerAssignment[]>([])
     const [requests, setRequests] = useState<ToporBalancerRequest[]>([])
     const [discoveredHosts, setDiscoveredHosts] = useState<DiscoveredHost[]>([])
@@ -486,6 +601,8 @@ export function ToporBalancerAdminPage() {
         planCode: 'standard',
         publicHostCode: 'fi_standard',
         publicName: '🇫🇮 Финляндия',
+        squadScope: 'any_visible_to_user' as ToporBalancerGroupSquadScope,
+        internalSquadUuid: '',
         strategy: 'least_loaded' as ToporBalancerGroupStrategy
     })
     const [nodeForm, setNodeForm] = useState({
@@ -500,18 +617,37 @@ export function ToporBalancerAdminPage() {
         weight: 1
     })
     const [importGroupForm, setImportGroupForm] = useState({
+        internalSquadUuid: '',
         locationCode: 'FI',
         planCode: 'standard',
         publicHostCode: 'fi_standard',
+        squadScope: 'any_visible_to_user' as ToporBalancerGroupSquadScope,
         publicName: '🇫🇮 Финляндия'
     })
 
+    const [topology, setTopology] = useState<RemnawaveTopologySnapshot | null>(null)
+
     const isLoggedIn = Boolean(adminToken)
     const selectedGroup = groups.find((group) => group.id === selectedGroupId) ?? groups[0] ?? null
-    const selectedGroupNodes = useMemo(
+    const fallbackSelectedGroupNodes = useMemo(
         () => nodes.filter((node) => selectedGroup && node.groupId === selectedGroup.id),
         [nodes, selectedGroup]
     )
+    const selectedGroupNodes = useMemo(
+        () => {
+            if (!selectedGroup) {
+                return []
+            }
+
+            return groupNodesGroupId === selectedGroup.id ? groupNodes : fallbackSelectedGroupNodes
+        },
+        [fallbackSelectedGroupNodes, groupNodes, groupNodesGroupId, selectedGroup]
+    )
+    const selectedGroupNodeCounterMismatch =
+        !isGroupNodesLoading &&
+        Boolean(selectedGroup) &&
+        groupNodesGroupId === selectedGroup?.id &&
+        selectedGroupNodes.length !== selectedGroup?.nodesCount
     const selectedGroupAssignments = useMemo(() => {
         const selectedNodeIds = new Set(selectedGroupNodes.map((node) => node.id))
 
@@ -583,6 +719,36 @@ export function ToporBalancerAdminPage() {
         [adminToken]
     )
 
+    const refreshGroupEditorData = useCallback(
+        async (groupId: string) => {
+            setIsGroupNodesLoading(true)
+
+            try {
+                const [groupResponse, groupNodesResponse] = await Promise.all([
+                    fetchAdminJson<ToporBalancerGroup>(`${ADMIN_GROUPS_URL}/${groupId}`),
+                    fetchAdminJson<ToporBalancerNode[]>(`${ADMIN_GROUPS_URL}/${groupId}/nodes`)
+                ])
+                const nextGroupNodes = safeArray<ToporBalancerNode>(groupNodesResponse)
+
+                if (groupResponse) {
+                    setGroups((current) =>
+                        current.map((group) => (group.id === groupResponse.id ? groupResponse : group))
+                    )
+                }
+
+                setGroupNodesGroupId(groupId)
+                setGroupNodes(nextGroupNodes)
+                setNodes((current) => [
+                    ...current.filter((node) => node.groupId !== groupId),
+                    ...nextGroupNodes
+                ])
+            } finally {
+                setIsGroupNodesLoading(false)
+            }
+        },
+        [fetchAdminJson]
+    )
+
     const refreshAdminData = useCallback(async () => {
         if (!adminToken) {
             return
@@ -592,14 +758,15 @@ export function ToporBalancerAdminPage() {
         setErrorMessage('')
 
         try {
-            const [healthResponse, runtimeResponse, groupsResponse, nodesResponse, assignmentsResponse, requestsResponse] =
+            const [healthResponse, runtimeResponse, groupsResponse, nodesResponse, assignmentsResponse, requestsResponse, topologyResponse] =
                 await Promise.all([
                     fetchAdminJson<ToporBalancerHealth>(ADMIN_HEALTH_URL),
                     fetchAdminJson<RuntimeConfigHealth>(RUNTIME_CONFIG_HEALTH_URL),
                     fetchAdminJson<ToporBalancerGroup[]>(ADMIN_GROUPS_URL),
                     fetchAdminJson<ToporBalancerNode[]>(ADMIN_NODES_URL),
                     fetchAdminJson<ToporBalancerAssignment[]>(ADMIN_ASSIGNMENTS_URL),
-                    fetchAdminJson<ToporBalancerRequest[]>(ADMIN_REQUESTS_URL)
+                    fetchAdminJson<ToporBalancerRequest[]>(ADMIN_REQUESTS_URL),
+                    fetchAdminJson<RemnawaveTopologySnapshot>(REMNAWAVE_TOPOLOGY_URL)
                 ])
 
             if (healthResponse) {
@@ -616,6 +783,7 @@ export function ToporBalancerAdminPage() {
             setNodes(safeArray<ToporBalancerNode>(nodesResponse))
             setAssignments(safeArray<ToporBalancerAssignment>(assignmentsResponse).slice(0, 500))
             setRequests(safeArray<ToporBalancerRequest>(requestsResponse).slice(0, 500))
+            setTopology(topologyResponse)
             setSelectedGroupId((current) => current ?? nextGroups[0]?.id ?? null)
             setLastRefreshAt(new Date())
         } catch (error) {
@@ -652,8 +820,12 @@ export function ToporBalancerAdminPage() {
         setRuntimeHealth(null)
         setGroups([])
         setNodes([])
+        setGroupNodes([])
+        setGroupNodesGroupId(null)
+        setIsGroupNodesLoading(false)
         setAssignments([])
         setRequests([])
+        setTopology(null)
         setDiscoveredHosts([])
         setSelectedHosts([])
         setSelectedGroupId(null)
@@ -683,6 +855,11 @@ export function ToporBalancerAdminPage() {
                     planCode: groupForm.planCode.trim(),
                     publicHostCode: groupForm.publicHostCode.trim(),
                     publicName: groupForm.publicName.trim(),
+                    squadScope: groupForm.squadScope,
+                    internalSquadUuid:
+                        groupForm.squadScope === 'specific_internal_squad'
+                            ? groupForm.internalSquadUuid.trim()
+                            : undefined,
                     strategy: groupForm.strategy
                 }),
                 method: 'POST'
@@ -710,6 +887,7 @@ export function ToporBalancerAdminPage() {
                 method: 'PATCH'
             })
             await refreshAdminData()
+            await refreshGroupEditorData(group.id)
         } catch (error) {
             setErrorMessage(getAdminErrorMessage(error, texts.messages.groupUpdateFailed))
         } finally {
@@ -760,6 +938,7 @@ export function ToporBalancerAdminPage() {
             })
             setNodeForm((current) => ({ ...current, technicalHostName: '' }))
             await refreshAdminData()
+            await refreshGroupEditorData(selectedGroup.id)
             notifications.show({ color: 'green', message: texts.messages.nodeAdded, title: texts.common.ready })
         } catch (error) {
             setErrorMessage(getAdminErrorMessage(error, texts.messages.nodeAddFailed))
@@ -781,6 +960,7 @@ export function ToporBalancerAdminPage() {
                 method: 'PATCH'
             })
             await refreshAdminData()
+            await refreshGroupEditorData(node.groupId)
         } catch (error) {
             setErrorMessage(getAdminErrorMessage(error, texts.messages.nodeUpdateFailed))
         } finally {
@@ -800,6 +980,7 @@ export function ToporBalancerAdminPage() {
                 method: 'DELETE'
             })
             await refreshAdminData()
+            await refreshGroupEditorData(node.groupId)
             notifications.show({ color: 'green', message: texts.messages.nodeDeleted, title: texts.common.ready })
         } catch (error) {
             setErrorMessage(getAdminErrorMessage(error, texts.messages.nodeDeleteFailed))
@@ -814,10 +995,29 @@ export function ToporBalancerAdminPage() {
             return
         }
 
+        const incompatibleSelectedHosts = discoveredHosts.filter(
+            (host) =>
+                selectedHosts.includes(normalizeTechnicalHostName(host.technicalHostName)) &&
+                host.status === 'not_accessible_to_selected_squad'
+        )
+
+        if (incompatibleSelectedHosts.length > 0) {
+            notifications.show({
+                color: 'red',
+                message: `Nodes are not accessible to selected squad: ${incompatibleSelectedHosts.map((host) => host.technicalHostName).join(', ')}`,
+                title: texts.discovery.conflict
+            })
+            return
+        }
+
         setIsDiscoveryLoading(true)
         setErrorMessage('')
 
         try {
+            const topologyResponse = await fetchAdminJson<RemnawaveTopologySnapshot>(REMNAWAVE_TOPOLOGY_REFRESH_URL, {
+                method: 'POST'
+            })
+            setTopology(topologyResponse)
             const response = await fetchAdminJson<DiscoveryResponse>(groupDiscoveryRefreshUrl(selectedGroup.id), {
                 method: 'POST'
             })
@@ -895,8 +1095,11 @@ export function ToporBalancerAdminPage() {
         }
 
         setSelectedGroupId(group.id)
+        setGroupNodes([])
+        setGroupNodesGroupId(group.id)
         setGroupEditorTab(tab)
         setIsGroupEditorOpen(true)
+        void refreshGroupEditorData(group.id)
     }
 
     const openAddNodesFlow = () => {
@@ -907,6 +1110,9 @@ export function ToporBalancerAdminPage() {
 
         setGroupEditorTab('discovery')
         setIsGroupEditorOpen(true)
+        setGroupNodes([])
+        setGroupNodesGroupId(selectedGroup.id)
+        void refreshGroupEditorData(selectedGroup.id)
 
         if (discoveredHosts.length === 0) {
             void runApiDiscovery()
@@ -985,6 +1191,7 @@ export function ToporBalancerAdminPage() {
                 })
             )
             await refreshAdminData()
+            await refreshGroupEditorData(selectedGroup.id)
 
             if (lastDiscoverySource === 'subscription' && shortUuid.trim()) {
                 await runSubscriptionDiscovery()
@@ -1026,6 +1233,21 @@ export function ToporBalancerAdminPage() {
             return
         }
 
+        const incompatibleSelectedHosts = selected.filter(
+            (host) => host.status === 'not_accessible_to_selected_squad'
+        )
+
+        if (incompatibleSelectedHosts.length > 0) {
+            notifications.show({
+                color: 'red',
+                message: `Not accessible to selected squad: ${incompatibleSelectedHosts
+                    .map((host) => normalizeTechnicalHostName(host.technicalHostName))
+                    .join(', ')}`,
+                title: 'Incompatible squad scope'
+            })
+            return
+        }
+
         if (
             importMode === 'new' &&
             (!importGroupForm.publicHostCode.trim() ||
@@ -1035,6 +1257,19 @@ export function ToporBalancerAdminPage() {
             notifications.show({
                 color: 'red',
                 message: texts.messages.requiredGroupFields,
+                title: texts.messages.missingData
+            })
+            return
+        }
+
+        if (
+            importMode === 'new' &&
+            importGroupForm.squadScope === 'specific_internal_squad' &&
+            !importGroupForm.internalSquadUuid
+        ) {
+            notifications.show({
+                color: 'red',
+                message: 'Select an internal squad for this group.',
                 title: texts.messages.missingData
             })
             return
@@ -1051,10 +1286,15 @@ export function ToporBalancerAdminPage() {
                           }
                         : {
                               group: {
+                                  internalSquadUuid:
+                                      importGroupForm.squadScope === 'specific_internal_squad'
+                                          ? importGroupForm.internalSquadUuid
+                                          : undefined,
                                   locationCode: importGroupForm.locationCode.trim() || undefined,
                                   planCode: importGroupForm.planCode.trim(),
                                   publicHostCode: importGroupForm.publicHostCode.trim(),
-                                  publicName: importGroupForm.publicName.trim()
+                                  publicName: importGroupForm.publicName.trim(),
+                                  squadScope: importGroupForm.squadScope
                               }
                           }),
                     nodes: selected.map((host) => ({
@@ -1349,6 +1589,11 @@ export function ToporBalancerAdminPage() {
                                         Удалить группу
                                     </Button>
                                 </Group>
+                                {selectedGroupNodeCounterMismatch && (
+                                    <Alert color="red" variant="light">
+                                        Group counter regression: card shows {selectedGroup.nodesCount} nodes, modal loaded {selectedGroupNodes.length} rows from /groups/{selectedGroup.id}/nodes.
+                                    </Alert>
+                                )}
                                 <TechnicalNodesTable
                                     deleteNode={deleteNode}
                                     discoveredByTechnicalHostName={discoveredByTechnicalHostName}
@@ -1399,6 +1644,11 @@ export function ToporBalancerAdminPage() {
                                         <StatusLegend />
                                     </Stack>
                                 </Card>
+                                {selectedGroupNodeCounterMismatch && (
+                                    <Alert color="red" variant="light">
+                                        Group counter regression: card shows {selectedGroup.nodesCount} nodes, modal loaded {selectedGroupNodes.length} rows from /groups/{selectedGroup.id}/nodes.
+                                    </Alert>
+                                )}
                                 <TechnicalNodesTable
                                     deleteNode={deleteNode}
                                     discoveredByTechnicalHostName={discoveredByTechnicalHostName}
@@ -1454,8 +1704,8 @@ export function ToporBalancerAdminPage() {
                                         <Group justify="space-between">
                                             <Title order={4}>{texts.diagnostics.subscriptionTitle}</Title>
                                             {subscriptionDiagnostics && (
-                                                <Badge color={subscriptionDiagnostics.ok ? 'green' : subscriptionDiagnostics.errors.length > 0 ? 'red' : 'yellow'} variant="light">
-                                                    {subscriptionDiagnostics.ok ? texts.diagnostics.resultOk : texts.diagnostics.resultProblem}
+                                                <Badge color={getDiagnosticsOverallStatusColor(subscriptionDiagnostics.status)} variant="light">
+                                                    {getDiagnosticsOverallStatusLabel(subscriptionDiagnostics.status)}
                                                 </Badge>
                                             )}
                                         </Group>
@@ -1508,7 +1758,7 @@ export function ToporBalancerAdminPage() {
                         </Tabs.Panel>
 
                         <Tabs.Panel pt="md" value="settings">
-                            <GroupSettingsForm group={selectedGroup} isLoading={isLoading} patchGroup={patchGroup} />
+                            <GroupSettingsForm group={selectedGroup} isLoading={isLoading} patchGroup={patchGroup} topology={topology} />
                         </Tabs.Panel>
                     </Tabs>
                 )}
@@ -1571,6 +1821,40 @@ export function ToporBalancerAdminPage() {
                                         label={<FieldLabel help={tooltips.planCode} label={texts.fields.planCode} />}
                                         onChange={(event) => setImportGroupForm((current) => ({ ...current, planCode: event.currentTarget.value }))}
                                         value={importGroupForm.planCode}
+                                    />
+                                </Group>
+                                <Group grow>
+                                    <Select
+                                        data={[
+                                            { label: 'Any visible to user', value: 'any_visible_to_user' },
+                                            { label: 'Specific internal squad', value: 'specific_internal_squad' }
+                                        ]}
+                                        label="Squad scope"
+                                        onChange={(value) =>
+                                            setImportGroupForm((current) => ({
+                                                ...current,
+                                                squadScope:
+                                                    (value as ToporBalancerGroupSquadScope | null) ??
+                                                    'any_visible_to_user'
+                                            }))
+                                        }
+                                        value={importGroupForm.squadScope}
+                                    />
+                                    <Select
+                                        data={(topology?.squads ?? []).map((squad) => ({
+                                            label: squad.name,
+                                            value: squad.uuid
+                                        }))}
+                                        disabled={importGroupForm.squadScope !== 'specific_internal_squad'}
+                                        label="Internal squad"
+                                        onChange={(value) =>
+                                            setImportGroupForm((current) => ({
+                                                ...current,
+                                                internalSquadUuid: value ?? ''
+                                            }))
+                                        }
+                                        placeholder="Select squad"
+                                        value={importGroupForm.internalSquadUuid || null}
                                     />
                                 </Group>
                             </Stack>
@@ -1772,6 +2056,11 @@ export function ToporBalancerAdminPage() {
                                                 </Button>
                                             </Group>
 
+                                            {selectedGroupNodeCounterMismatch && (
+                                                <Alert color="red" variant="light">
+                                                    Group counter regression: card shows {selectedGroup.nodesCount} nodes, modal loaded {selectedGroupNodes.length} rows from /groups/{selectedGroup.id}/nodes.
+                                                </Alert>
+                                            )}
                                             <TechnicalNodesTable
                                                 deleteNode={deleteNode}
                                                 discoveredByTechnicalHostName={discoveredByTechnicalHostName}
@@ -1910,6 +2199,11 @@ export function ToporBalancerAdminPage() {
                                             setSelectedGroupId={setSelectedGroupId}
                                         />
 
+                                        {selectedGroupNodeCounterMismatch && selectedGroup && (
+                                            <Alert color="red" variant="light">
+                                                Group counter regression: card shows {selectedGroup.nodesCount} nodes, modal loaded {selectedGroupNodes.length} rows from /groups/{selectedGroup.id}/nodes.
+                                            </Alert>
+                                        )}
                                         <TechnicalNodesTable
                                             deleteNode={deleteNode}
                                             discoveredByTechnicalHostName={discoveredByTechnicalHostName}
@@ -1975,8 +2269,8 @@ export function ToporBalancerAdminPage() {
                                                 <Group justify="space-between">
                                                     <Title order={3}>{texts.diagnostics.subscriptionTitle}</Title>
                                                     {subscriptionDiagnostics && (
-                                                        <Badge color={subscriptionDiagnostics.ok ? 'green' : subscriptionDiagnostics.errors.length > 0 ? 'red' : 'yellow'} variant="light">
-                                                            {subscriptionDiagnostics.ok ? texts.diagnostics.resultOk : texts.diagnostics.resultProblem}
+                                                        <Badge color={getDiagnosticsOverallStatusColor(subscriptionDiagnostics.status)} variant="light">
+                                                            {getDiagnosticsOverallStatusLabel(subscriptionDiagnostics.status)}
                                                         </Badge>
                                                     )}
                                                 </Group>
@@ -2008,6 +2302,12 @@ export function ToporBalancerAdminPage() {
                                                     <Stack gap="md">
                                                         <SimpleGrid cols={{ base: 1, sm: 3 }} spacing="md">
                                                             <Card className={classes.statusCard} p="md" radius="md">
+                                                                <Text c="dimmed" size="sm">Status</Text>
+                                                                <Badge color={getDiagnosticsOverallStatusColor(subscriptionDiagnostics.status)} variant="light">
+                                                                    {getDiagnosticsOverallStatusLabel(subscriptionDiagnostics.status)}
+                                                                </Badge>
+                                                            </Card>
+                                                            <Card className={classes.statusCard} p="md" radius="md">
                                                                 <Text c="dimmed" size="sm">Формат</Text>
                                                                 <Text fw={700}>{subscriptionDiagnostics.format}</Text>
                                                             </Card>
@@ -2018,6 +2318,18 @@ export function ToporBalancerAdminPage() {
                                                             <Card className={classes.statusCard} p="md" radius="md">
                                                                 <Text c="dimmed" size="sm">Исходящих VLESS</Text>
                                                                 <Text fw={700}>{subscriptionDiagnostics.outputLinksCount}</Text>
+                                                            </Card>
+                                                            <Card className={classes.statusCard} p="md" radius="md">
+                                                                <Text c="dimmed" size="sm">Matched technical</Text>
+                                                                <Text fw={700}>{subscriptionDiagnostics.matchedTechnicalLinks}</Text>
+                                                            </Card>
+                                                            <Card className={classes.statusCard} p="md" radius="md">
+                                                                <Text c="dimmed" size="sm">Rewritten</Text>
+                                                                <Text fw={700}>{subscriptionDiagnostics.rewrittenLinksCount}</Text>
+                                                            </Card>
+                                                            <Card className={classes.statusCard} p="md" radius="md">
+                                                                <Text c="dimmed" size="sm">Unchanged</Text>
+                                                                <Text fw={700}>{subscriptionDiagnostics.unchangedLinksCount}</Text>
                                                             </Card>
                                                         </SimpleGrid>
                                                         <DiagnosticsSummary result={subscriptionDiagnostics} />
@@ -2050,28 +2362,34 @@ export function ToporBalancerAdminPage() {
 function GroupSettingsForm({
     group,
     isLoading,
-    patchGroup
+    patchGroup,
+    topology
 }: {
     group: ToporBalancerGroup
     isLoading: boolean
     patchGroup: (group: ToporBalancerGroup, patch: Partial<ToporBalancerGroup>) => void
+    topology: RemnawaveTopologySnapshot | null
 }) {
     const [form, setForm] = useState({
         enabled: group.enabled,
+        internalSquadUuid: group.internalSquadUuid ?? '',
         locationCode: group.locationCode ?? '',
         planCode: group.planCode,
         publicHostCode: group.publicHostCode,
         publicName: group.publicName,
+        squadScope: group.squadScope ?? 'any_visible_to_user',
         strategy: group.strategy
     })
 
     useEffect(() => {
         setForm({
             enabled: group.enabled,
+            internalSquadUuid: group.internalSquadUuid ?? '',
             locationCode: group.locationCode ?? '',
             planCode: group.planCode,
             publicHostCode: group.publicHostCode,
             publicName: group.publicName,
+            squadScope: group.squadScope ?? 'any_visible_to_user',
             strategy: group.strategy
         })
     }, [group])
@@ -2114,6 +2432,34 @@ function GroupSettingsForm({
                         value={form.strategy}
                     />
                 </Group>
+                <Group grow>
+                    <Select
+                        data={[
+                            { label: 'Any squad visible to user', value: 'any_visible_to_user' },
+                            { label: 'Specific internal squad', value: 'specific_internal_squad' }
+                        ]}
+                        label="Squad scope"
+                        onChange={(value) =>
+                            setForm((current) => ({
+                                ...current,
+                                squadScope: (value as ToporBalancerGroupSquadScope | null) ?? 'any_visible_to_user'
+                            }))
+                        }
+                        value={form.squadScope}
+                    />
+                    {form.squadScope === 'specific_internal_squad' && (
+                        <Select
+                            data={(topology?.squads ?? []).map((squad) => ({
+                                label: squad.name,
+                                value: squad.uuid
+                            }))}
+                            label="Internal squad"
+                            onChange={(value) => setForm((current) => ({ ...current, internalSquadUuid: value ?? '' }))}
+                            placeholder="Refresh Remnawave topology first"
+                            value={form.internalSquadUuid || null}
+                        />
+                    )}
+                </Group>
                 <StrategyLegend />
                 <Group justify="space-between">
                     <Switch
@@ -2130,6 +2476,11 @@ function GroupSettingsForm({
                                 planCode: form.planCode.trim(),
                                 publicHostCode: form.publicHostCode.trim(),
                                 publicName: form.publicName.trim(),
+                                squadScope: form.squadScope,
+                                internalSquadUuid:
+                                    form.squadScope === 'specific_internal_squad'
+                                        ? form.internalSquadUuid
+                                        : undefined,
                                 strategy: form.strategy
                             })
                         }
@@ -2186,6 +2537,93 @@ function DiagnosticsSummary({ result }: { result: SubscriptionDiagnosticsResult 
                         ))}
                     </Stack>
                 </Alert>
+            )}
+            <Alert color="blue" variant="light">
+                <Group gap="lg">
+                    <Text size="sm">User squads: {result.userSquads.map((squad) => squad.name).join(', ') || '-'}</Text>
+                    <Text size="sm">Accessible nodes: {result.accessibleNodesCount}</Text>
+                </Group>
+            </Alert>
+            {result.unmatchedRemarks.length > 0 && (
+                <Alert color="yellow" variant="light">
+                    <Stack gap={4}>
+                        <Text fw={700} size="sm">Unmatched original VLESS remarks</Text>
+                        <Text className={classes.wrapCell} size="sm">
+                            {result.unmatchedRemarks.join(', ')}
+                        </Text>
+                        <Text size="sm">Add these values as Balancer technicalHostName when they should be managed.</Text>
+                    </Stack>
+                </Alert>
+            )}
+            {result.unchangedReasons.length > 0 && (
+                <Card className={classes.tableCard} p={0} radius="md">
+                    <ScrollArea>
+                        <Table highlightOnHover>
+                            <Table.Thead>
+                                <Table.Tr>
+                                    <Table.Th>Reason</Table.Th>
+                                    <Table.Th>Group</Table.Th>
+                                    <Table.Th>Remark</Table.Th>
+                                    <Table.Th>Details</Table.Th>
+                                </Table.Tr>
+                            </Table.Thead>
+                            <Table.Tbody>
+                                {result.unchangedReasons.map((reason, index) => (
+                                    <Table.Tr key={`${reason.reason}-${reason.remark ?? index}`}>
+                                        <Table.Td>
+                                            <Badge color="yellow" variant="light">
+                                                {getDiagnosticsReasonLabel(reason.reason)}
+                                            </Badge>
+                                        </Table.Td>
+                                        <Table.Td>{reason.publicHostCode ? `${reason.publicHostCode}:${reason.planCode ?? '-'}` : '-'}</Table.Td>
+                                        <Table.Td>{reason.remark ?? '-'}</Table.Td>
+                                        <Table.Td className={classes.wrapCell}>{reason.message}</Table.Td>
+                                    </Table.Tr>
+                                ))}
+                            </Table.Tbody>
+                        </Table>
+                    </ScrollArea>
+                </Card>
+            )}
+            {result.matchedGroups.length > 0 && (
+                <Card className={classes.tableCard} p={0} radius="md">
+                    <ScrollArea>
+                        <Table highlightOnHover>
+                            <Table.Thead>
+                                <Table.Tr>
+                                    <Table.Th>Group</Table.Th>
+                                    <Table.Th>Public name in output</Table.Th>
+                                    <Table.Th>Matched remarks</Table.Th>
+                                    <Table.Th>User squads</Table.Th>
+                                    <Table.Th>Pool</Table.Th>
+                                    <Table.Th>Effective candidates</Table.Th>
+                                    <Table.Th>Selected</Table.Th>
+                                    <Table.Th>Output remarks</Table.Th>
+                                    <Table.Th>Rewrite</Table.Th>
+                                </Table.Tr>
+                            </Table.Thead>
+                            <Table.Tbody>
+                                {result.matchedGroups.map((group) => (
+                                    <Table.Tr key={`${group.publicHostCode}:${group.planCode}`}>
+                                        <Table.Td>{group.publicHostCode}:{group.planCode}</Table.Td>
+                                        <Table.Td>
+                                            <Badge color={group.outputContainsPublicName ? 'green' : 'yellow'} variant="light">
+                                                {group.outputContainsPublicName ? group.publicName : 'missing'}
+                                            </Badge>
+                                        </Table.Td>
+                                        <Table.Td className={classes.wrapCell}>{group.matchedRemarks.join(', ') || '-'}</Table.Td>
+                                        <Table.Td className={classes.wrapCell}>{group.userSquads.map((squad) => squad.name).join(', ') || '-'}</Table.Td>
+                                        <Table.Td>{group.effectiveCandidateNodes.length}/{group.groupNodesCount}</Table.Td>
+                                        <Table.Td className={classes.wrapCell}>{group.effectiveCandidateNodes.join(', ') || '-'}</Table.Td>
+                                        <Table.Td>{group.selectedTechnicalHostName ?? '-'}</Table.Td>
+                                        <Table.Td className={classes.wrapCell}>{group.outputRemarks.join(', ') || '-'}</Table.Td>
+                                        <Table.Td>{group.rewrittenLinksCount} / {group.unchangedLinksCount}</Table.Td>
+                                    </Table.Tr>
+                                ))}
+                            </Table.Tbody>
+                        </Table>
+                    </ScrollArea>
+                </Card>
             )}
             <Card className={classes.tableCard} p={0} radius="md">
                 <ScrollArea>
@@ -2498,6 +2936,10 @@ function getDiscoveredHostStatusBadge({
         return { color: 'gray', label: texts.discovery.canImport, tooltip: texts.tooltips.discovered }
     }
 
+    if (host.status === 'not_accessible_to_selected_squad') {
+        return { color: 'red', label: 'not accessible to selected squad', tooltip: 'This Remnawave host is not visible in the group squad scope.' }
+    }
+
     if (host.status === 'in_this_group') {
         return { color: 'green', label: texts.discovery.alreadyInGroup, tooltip: host.currentGroupName ?? texts.tooltips.imported }
     }
@@ -2560,6 +3002,10 @@ function DiscoveredHostsTable({
                     <Table.Thead>
                         <Table.Tr>
                             <Table.Th />
+                            <Table.Th>Remnawave host</Table.Th>
+                            <Table.Th>Node</Table.Th>
+                            <Table.Th>Inbound / profile</Table.Th>
+                            <Table.Th>Squads</Table.Th>
                             <Table.Th>
                                 <HeaderWithHelp help={tooltips.technicalHostName}>Техническая нода</HeaderWithHelp>
                             </Table.Th>
@@ -2600,6 +3046,14 @@ function DiscoveredHostsTable({
                                             disabled={!canAdd}
                                             onChange={() => toggleSelectedHost(technicalHostName)}
                                         />
+                                    </Table.Td>
+                                    <Table.Td>{host.rawRemark ?? technicalHostName}</Table.Td>
+                                    <Table.Td>{host.remnawaveNodeName ?? '-'}</Table.Td>
+                                    <Table.Td className={classes.wrapCell}>
+                                        {[host.remnawaveInboundName, host.remnawaveProfileName].filter(Boolean).join(' / ') || '-'}
+                                    </Table.Td>
+                                    <Table.Td className={classes.wrapCell}>
+                                        {host.accessibleSquads?.map((squad) => squad.name).join(', ') || '-'}
                                     </Table.Td>
                                     <Table.Td>{technicalHostName}</Table.Td>
                                     <Table.Td>

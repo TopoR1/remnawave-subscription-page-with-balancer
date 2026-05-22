@@ -30,6 +30,7 @@ import type {
     ToporBalancerGroupStrategy,
     ToporBalancerNode,
     ToporBalancerNodeStatus,
+    ToporRemnawaveTopologySnapshot,
 } from './types';
 
 import {
@@ -156,6 +157,37 @@ function buildStrategyConfig(
                 nodes,
             },
         ],
+    };
+}
+
+function buildRuntimeTopology(): ToporRemnawaveTopologySnapshot {
+    return {
+        hosts: [
+            {
+                uuid: 'standard-host',
+                remark: 'FI-STD-01',
+                nodeUuid: 'standard-node',
+                nodeName: 'Standard node',
+                accessibleSquads: [{ uuid: 'standard-squad', name: 'Standard' }],
+            },
+            {
+                uuid: 'game-host',
+                remark: 'FI-GAME-01',
+                nodeUuid: 'game-node',
+                nodeName: 'Game node',
+                accessibleSquads: [{ uuid: 'game-squad', name: 'Game' }],
+            },
+        ],
+        inbounds: [],
+        nodes: [
+            { uuid: 'standard-node', name: 'Standard node' },
+            { uuid: 'game-node', name: 'Game node' },
+        ],
+        squads: [
+            { uuid: 'standard-squad', name: 'Standard' },
+            { uuid: 'game-squad', name: 'Game' },
+        ],
+        warnings: [],
     };
 }
 
@@ -843,6 +875,29 @@ test('subscription diagnostics validates generated VLESS links without exposing 
     );
 
     setServiceRepository(service, repository);
+    await repository.replaceRemnawaveTopologyCache({
+        hosts: [
+            {
+                uuid: 'fi-host',
+                remark: 'FI-STD-01',
+                nodeUuid: 'fi-node',
+                accessibleSquads: [{ uuid: 'standard-squad', name: 'Standard' }],
+            },
+            {
+                uuid: 'de-host',
+                remark: 'DE-STD-01',
+                nodeUuid: 'de-node',
+                accessibleSquads: [{ uuid: 'standard-squad', name: 'Standard' }],
+            },
+        ],
+        inbounds: [],
+        nodes: [
+            { uuid: 'fi-node', name: 'FI' },
+            { uuid: 'de-node', name: 'DE' },
+        ],
+        squads: [{ uuid: 'standard-squad', name: 'Standard' }],
+        warnings: [],
+    });
 
     const result = await service.diagnoseSubscription({
         shortUuid: 'diagnostic-user',
@@ -905,6 +960,67 @@ test('database balancer creates a new assignment', async () => {
     assert.equal(Object.keys(result.debugInfo.selectedNodes).length, 1);
     assert.equal(repository.assignments.size, 1);
     assert.equal(parseSubscription(result.body).links.length, 1);
+});
+
+test('database balancer excludes nodes not accessible to the runtime user squad', async () => {
+    const config = buildStrategyConfig('least_loaded', [
+        { technicalHostName: 'FI-STD-01', weight: 1, maxUsers: 300, status: 'active' },
+        { technicalHostName: 'FI-GAME-01', weight: 1, maxUsers: 300, status: 'active' },
+    ]);
+    const repository = InMemoryToporBalancerRepository.fromConfig(config);
+    const body = [buildVlessLink('FI-STD-01'), buildVlessLink('FI-GAME-01')].join('\n');
+    const result = await processSubscriptionWithDatabaseBalancer({
+        shortUuid: 'standard-user',
+        body,
+        config,
+        repository,
+        topology: buildRuntimeTopology(),
+        userAccess: {
+            squads: [{ uuid: 'standard-squad', name: 'Standard' }],
+            accessibleNodeUuids: ['standard-node'],
+        },
+    });
+    const outputRemarks = parseSubscription(result.body).links.map((link) => link.remark);
+
+    assert.deepEqual(outputRemarks, ['\u{1F1EB}\u{1F1EE} Finland']);
+    assert.equal(result.debugInfo.selectedNodes['fi_standard:standard'], 'FI-STD-01');
+    assert.deepEqual(
+        result.debugInfo.groupCandidateDiagnostics?.[0]?.effectiveCandidateNodes,
+        ['FI-STD-01'],
+    );
+    assert.ok(
+        result.debugInfo.warnings?.some((warning) =>
+            warning.includes('FI-GAME-01 is not accessible'),
+        ),
+    );
+});
+
+test('database balancer passes through a group when user has no accessible candidates', async () => {
+    const config = buildStrategyConfig('least_loaded', [
+        { technicalHostName: 'FI-GAME-01', weight: 1, maxUsers: 300, status: 'active' },
+    ]);
+    const repository = InMemoryToporBalancerRepository.fromConfig(config);
+    const body = buildVlessLink('FI-GAME-01');
+    const result = await processSubscriptionWithDatabaseBalancer({
+        shortUuid: 'standard-user-no-game',
+        body,
+        config,
+        repository,
+        topology: buildRuntimeTopology(),
+        userAccess: {
+            squads: [{ uuid: 'standard-squad', name: 'Standard' }],
+            accessibleNodeUuids: ['standard-node'],
+        },
+    });
+
+    assert.equal(result.body, body);
+    assert.deepEqual(result.debugInfo.selectedNodes, {});
+    assert.deepEqual(result.debugInfo.groupCandidateDiagnostics?.[0]?.effectiveCandidateNodes, []);
+    assert.ok(
+        result.debugInfo.warnings?.some((warning) =>
+            warning.includes('No accessible TopoR balancer candidates'),
+        ),
+    );
 });
 
 test('database balancer processes same publicHostCode with different planCode independently', async () => {
@@ -1846,6 +1962,59 @@ test('admin service creates technical nodes inside a group', async () => {
     assert.equal(node.planCode, 'standard');
 });
 
+test('admin group counters match group node rows by group relation', async () => {
+    const repository = new InMemoryToporBalancerRepository();
+    const service = new ToporBalancerService(
+        createConfigServiceStub({
+            TOPOR_BALANCER_DATABASE_URL: 'postgres://unit-test',
+        }),
+    );
+
+    setServiceRepository(service, repository);
+
+    const group = await service.createAdminGroup({
+        enabled: true,
+        locationCode: 'FI',
+        planCode: 'standard',
+        publicHostCode: 'fi_standard',
+        publicName: 'Finland',
+        strategy: 'least_loaded',
+    });
+
+    await service.createAdminGroupNode(group.id, {
+        maxUsers: 300,
+        status: 'active',
+        technicalHostName: 'FI-STD-01',
+        weight: 1,
+    });
+
+    let listedGroup = (await service.listAdminGroups()).find((item) => item.id === group.id);
+    let groupNodes = await service.listAdminGroupNodes(group.id);
+
+    assert.ok(listedGroup);
+    assert.ok(groupNodes);
+    assert.equal(listedGroup.nodesCount, 1);
+    assert.equal(listedGroup.activeNodesCount, 1);
+    assert.equal(listedGroup.nodesCountSource, 'db_group_id');
+    assert.equal(groupNodes.length, 1);
+
+    await service.createAdminGroupNode(group.id, {
+        maxUsers: 300,
+        status: 'active',
+        technicalHostName: 'FI-STD-02',
+        weight: 1,
+    });
+
+    listedGroup = (await service.listAdminGroups()).find((item) => item.id === group.id);
+    groupNodes = await service.listAdminGroupNodes(group.id);
+
+    assert.ok(listedGroup);
+    assert.ok(groupNodes);
+    assert.equal(listedGroup.nodesCount, 2);
+    assert.equal(listedGroup.activeNodesCount, 2);
+    assert.equal(groupNodes.length, 2);
+});
+
 test('admin service creates and fetches public groups with all supported strategies', async () => {
     const repository = new InMemoryToporBalancerRepository();
     const service = new ToporBalancerService(
@@ -2385,6 +2554,13 @@ class InMemoryToporBalancerRepository implements ToporBalancerAssignmentReposito
     public readonly requests: ToporBalancerRequestLogInput[] = [];
     private readonly groups = new Map<string, ToporBalancerAdminGroup>();
     private readonly nodes = new Map<string, ToporBalancerDbNode>();
+    private topologyCache: ToporRemnawaveTopologySnapshot = {
+        hosts: [],
+        inbounds: [],
+        nodes: [],
+        squads: [],
+        warnings: [],
+    };
 
     public static fromConfig(config: ToporBalancerConfig): InMemoryToporBalancerRepository {
         const repository = new InMemoryToporBalancerRepository();
@@ -2398,9 +2574,11 @@ class InMemoryToporBalancerRepository implements ToporBalancerAssignmentReposito
                 enabled: true,
                 locationCode: location.locationCode,
                 nodesCount: location.nodes.length,
+                nodesCountSource: 'db_group_id',
                 planCode: location.planCode,
                 publicHostCode: location.publicHostCode,
                 publicName: location.publicName,
+                squadScope: 'any_visible_to_user',
                 strategy: location.strategy ?? 'least_loaded',
             });
 
@@ -2468,6 +2646,7 @@ class InMemoryToporBalancerRepository implements ToporBalancerAssignmentReposito
                     0,
                 ),
                 nodesCount: groupNodes.length,
+                nodesCountSource: 'db_group_id',
             };
         });
     }
@@ -2492,9 +2671,12 @@ class InMemoryToporBalancerRepository implements ToporBalancerAssignmentReposito
             enabled: input.enabled,
             locationCode: input.locationCode,
             nodesCount: 0,
+            nodesCountSource: 'db_group_id',
             planCode: input.planCode,
             publicHostCode: input.publicHostCode,
             publicName: input.publicName,
+            internalSquadUuid: input.internalSquadUuid,
+            squadScope: input.squadScope ?? 'any_visible_to_user',
             strategy: input.strategy,
         };
 
@@ -2519,6 +2701,11 @@ class InMemoryToporBalancerRepository implements ToporBalancerAssignmentReposito
             planCode: input.planCode ?? group.planCode,
             publicHostCode: input.publicHostCode ?? group.publicHostCode,
             publicName: input.publicName ?? group.publicName,
+            internalSquadUuid:
+                input.internalSquadUuid === undefined
+                    ? group.internalSquadUuid
+                    : input.internalSquadUuid,
+            squadScope: input.squadScope ?? group.squadScope,
             strategy: input.strategy ?? group.strategy,
         });
 
@@ -2858,6 +3045,16 @@ class InMemoryToporBalancerRepository implements ToporBalancerAssignmentReposito
                 createdAt: new Date(0).toISOString(),
             }))
             .filter((request) => !filters.shortUuid || request.shortUuid === filters.shortUuid);
+    }
+
+    public async replaceRemnawaveTopologyCache(
+        input: ToporRemnawaveTopologySnapshot,
+    ): Promise<void> {
+        this.topologyCache = input;
+    }
+
+    public async getRemnawaveTopologyCache(): Promise<ToporRemnawaveTopologySnapshot> {
+        return this.topologyCache;
     }
 
     public async getOrCreateAssignment(

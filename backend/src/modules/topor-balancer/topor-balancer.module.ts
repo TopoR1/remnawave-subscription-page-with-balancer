@@ -9,11 +9,17 @@ import {
 import { ToporBalancerAdminGuard } from './topor-balancer-admin.guard';
 import { ToporBalancerDiscoveryService } from './topor-balancer-discovery.service';
 import { ToporBalancerService } from './topor-balancer.service';
+import { ToporRemnawaveTopologyService } from './topor-remnawave-topology.service';
 
 @Module({
     imports: [AxiosModule],
     controllers: [ToporBalancerBootstrapController, ToporBalancerAdminController],
-    providers: [ToporBalancerService, ToporBalancerDiscoveryService, ToporBalancerAdminGuard],
+    providers: [
+        ToporBalancerService,
+        ToporBalancerDiscoveryService,
+        ToporRemnawaveTopologyService,
+        ToporBalancerAdminGuard,
+    ],
     exports: [ToporBalancerService, ToporBalancerAdminGuard],
 })
 export class ToporBalancerModule {}
