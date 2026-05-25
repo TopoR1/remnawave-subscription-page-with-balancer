@@ -241,7 +241,7 @@ interface DiscoveryImportStatusState {
 interface SubscriptionDiagnosticsResult {
     ok: boolean
     status: 'failed_open' | 'partially_processed' | 'passed_through' | 'processed'
-    format: 'base64' | 'plain' | 'unknown'
+    format: 'base64_links' | 'plain_links' | 'unknown'
     totalVlessLinks: number
     matchedTechnicalLinks: number
     userSquads: Array<{ name: string; uuid: string }>
@@ -257,7 +257,18 @@ interface SubscriptionDiagnosticsResult {
         userSquads: Array<{ name: string; uuid: string }>
         accessibleNodesCount: number
         groupNodesCount: number
+        subscriptionCandidateNodes: string[]
         effectiveCandidateNodes: string[]
+        excludedNodes: Array<{
+            technicalHostName: string
+            reason:
+                | 'missing_topology'
+                | 'not_accessible_to_group_squad'
+                | 'not_accessible_to_user_squad'
+                | 'not_in_subscription'
+                | 'user_not_in_group_squad'
+            message: string
+        }>
         outputRemarks: string[]
         outputContainsPublicName: boolean
         rewrittenLinksCount: number
@@ -273,6 +284,14 @@ interface SubscriptionDiagnosticsResult {
     rewrittenLinksCount: number
     unchangedLinksCount: number
     unchangedReasons: Array<{
+        publicHostCode?: string
+        planCode?: string
+        reason: DiagnosticsUnchangedReason
+        remark?: string
+        technicalHostName?: string
+        message: string
+    }>
+    reasons: Array<{
         publicHostCode?: string
         planCode?: string
         reason: DiagnosticsUnchangedReason
@@ -529,10 +548,10 @@ function getDiagnosticsOverallStatusColor(status: SubscriptionDiagnosticsResult[
 
 function getDiagnosticsOverallStatusLabel(status: SubscriptionDiagnosticsResult['status']) {
     const labels: Record<SubscriptionDiagnosticsResult['status'], string> = {
-        failed_open: 'failed_open',
-        partially_processed: 'partially_processed',
-        passed_through: 'passed_through',
-        processed: 'processed'
+        failed_open: 'Ошибка, отдана исходная подписка',
+        partially_processed: 'Подписка обработана частично',
+        passed_through: 'Подписка прошла без изменений',
+        processed: 'Balancer обработал подписку'
     }
 
     return labels[status]
@@ -540,12 +559,12 @@ function getDiagnosticsOverallStatusLabel(status: SubscriptionDiagnosticsResult[
 
 function getDiagnosticsReasonLabel(reason: DiagnosticsUnchangedReason) {
     const labels: Record<DiagnosticsUnchangedReason, string> = {
-        format_unsupported: 'format unsupported',
-        group_disabled: 'group disabled',
-        no_active_node: 'no active node',
-        no_accessible_candidates: 'no accessible candidates',
-        no_selected_node: 'no selected node',
-        technicalHostName_mismatch: 'technicalHostName mismatch'
+        format_unsupported: 'Формат не поддерживается',
+        group_disabled: 'Группа отключена',
+        no_active_node: 'Нет активных нод',
+        no_accessible_candidates: 'Нода недоступна пользователю по squad',
+        no_selected_node: 'Нода не выбрана',
+        technicalHostName_mismatch: 'Не найдено совпадений technicalHostName'
     }
 
     return labels[reason]
@@ -2520,8 +2539,30 @@ function ImportResultSummary({ result }: { result: ImportResult }) {
 }
 
 function DiagnosticsSummary({ result }: { result: SubscriptionDiagnosticsResult }) {
+    const reasons = result.reasons ?? result.unchangedReasons
+    const hasNoTechnicalHostNameMatches = result.totalVlessLinks > 0 && result.matchedTechnicalLinks === 0
+    const hasNoActiveNodes = reasons.some((reason) => reason.reason === 'no_active_node')
+    const hasSquadUnavailableNodes = reasons.some((reason) => reason.reason === 'no_accessible_candidates')
+    const partiallyVisibleGroups = result.matchedGroups.filter(
+        (group) =>
+            group.groupNodesCount > 0 &&
+            group.effectiveCandidateNodes.length < group.groupNodesCount
+    )
+
     return (
         <Stack gap="md">
+            <Alert color={getDiagnosticsOverallStatusColor(result.status)} variant="light">
+                <Stack gap={4}>
+                    <Text fw={700}>{getDiagnosticsOverallStatusLabel(result.status)}</Text>
+                    {hasNoTechnicalHostNameMatches && (
+                        <Text size="sm">Не найдено совпадений technicalHostName</Text>
+                    )}
+                    {hasNoActiveNodes && <Text size="sm">Нет активных нод</Text>}
+                    {hasSquadUnavailableNodes && (
+                        <Text size="sm">Нода недоступна пользователю по squad</Text>
+                    )}
+                </Stack>
+            </Alert>
             {(result.warnings.length > 0 || result.errors.length > 0) && (
                 <Alert color={result.errors.length > 0 ? 'red' : 'yellow'} variant="light">
                     <Stack gap={4}>
@@ -2544,6 +2585,23 @@ function DiagnosticsSummary({ result }: { result: SubscriptionDiagnosticsResult 
                     <Text size="sm">Accessible nodes: {result.accessibleNodesCount}</Text>
                 </Group>
             </Alert>
+            {partiallyVisibleGroups.map((group) => (
+                <Alert color="yellow" key={`${group.publicHostCode}:${group.planCode}:visibility`} variant="light">
+                    <Stack gap={4}>
+                        <Text fw={700} size="sm">
+                            Для этой подписки доступна {group.effectiveCandidateNodes.length} из {group.groupNodesCount} нод группы.
+                        </Text>
+                        <Text className={classes.wrapCell} size="sm">
+                            Группа {group.publicHostCode}:{group.planCode}. Видимые в подписке: {group.subscriptionCandidateNodes.join(', ') || '-'}.
+                        </Text>
+                        {group.excludedNodes.length > 0 && (
+                            <Text className={classes.wrapCell} size="sm">
+                                Исключены: {group.excludedNodes.map((node) => `${node.technicalHostName} (${node.reason})`).join(', ')}
+                            </Text>
+                        )}
+                    </Stack>
+                </Alert>
+            ))}
             {result.unmatchedRemarks.length > 0 && (
                 <Alert color="yellow" variant="light">
                     <Stack gap={4}>
@@ -2555,7 +2613,7 @@ function DiagnosticsSummary({ result }: { result: SubscriptionDiagnosticsResult 
                     </Stack>
                 </Alert>
             )}
-            {result.unchangedReasons.length > 0 && (
+            {reasons.length > 0 && (
                 <Card className={classes.tableCard} p={0} radius="md">
                     <ScrollArea>
                         <Table highlightOnHover>
@@ -2568,7 +2626,7 @@ function DiagnosticsSummary({ result }: { result: SubscriptionDiagnosticsResult 
                                 </Table.Tr>
                             </Table.Thead>
                             <Table.Tbody>
-                                {result.unchangedReasons.map((reason, index) => (
+                                {reasons.map((reason, index) => (
                                     <Table.Tr key={`${reason.reason}-${reason.remark ?? index}`}>
                                         <Table.Td>
                                             <Badge color="yellow" variant="light">
@@ -2596,7 +2654,9 @@ function DiagnosticsSummary({ result }: { result: SubscriptionDiagnosticsResult 
                                     <Table.Th>Matched remarks</Table.Th>
                                     <Table.Th>User squads</Table.Th>
                                     <Table.Th>Pool</Table.Th>
+                                    <Table.Th>Subscription candidates</Table.Th>
                                     <Table.Th>Effective candidates</Table.Th>
+                                    <Table.Th>Excluded</Table.Th>
                                     <Table.Th>Selected</Table.Th>
                                     <Table.Th>Output remarks</Table.Th>
                                     <Table.Th>Rewrite</Table.Th>
@@ -2614,7 +2674,11 @@ function DiagnosticsSummary({ result }: { result: SubscriptionDiagnosticsResult 
                                         <Table.Td className={classes.wrapCell}>{group.matchedRemarks.join(', ') || '-'}</Table.Td>
                                         <Table.Td className={classes.wrapCell}>{group.userSquads.map((squad) => squad.name).join(', ') || '-'}</Table.Td>
                                         <Table.Td>{group.effectiveCandidateNodes.length}/{group.groupNodesCount}</Table.Td>
+                                        <Table.Td className={classes.wrapCell}>{group.subscriptionCandidateNodes.join(', ') || '-'}</Table.Td>
                                         <Table.Td className={classes.wrapCell}>{group.effectiveCandidateNodes.join(', ') || '-'}</Table.Td>
+                                        <Table.Td className={classes.wrapCell}>
+                                            {group.excludedNodes.map((node) => `${node.technicalHostName}: ${node.reason}`).join('; ') || '-'}
+                                        </Table.Td>
                                         <Table.Td>{group.selectedTechnicalHostName ?? '-'}</Table.Td>
                                         <Table.Td className={classes.wrapCell}>{group.outputRemarks.join(', ') || '-'}</Table.Td>
                                         <Table.Td>{group.rewrittenLinksCount} / {group.unchangedLinksCount}</Table.Td>

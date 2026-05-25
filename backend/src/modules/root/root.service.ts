@@ -14,6 +14,12 @@ import { IGNORED_HEADERS } from '@common/constants';
 import { sanitizeUsername } from '@common/utils';
 
 import { ToporBalancerService } from '@modules/topor-balancer';
+import {
+    decodeSubscriptionBody,
+    detectSubscriptionFormat,
+    extractVlessLinks,
+} from '@modules/topor-balancer/topor-balancer-subscription.parser';
+import type { ToporBalancerProcessResult } from '@modules/topor-balancer/types';
 
 import { SubpageConfigService } from './subpage-config.service';
 
@@ -234,7 +240,18 @@ export class RootService {
 
             const subscriptionData = subscriptionDataResponse.response;
 
-            if (!baseSettings.showConnectionKeys) {
+            if (baseSettings.showConnectionKeys) {
+                await this.processBrowserPanelSubscriptionLinks(subscriptionData, shortUuid, req);
+            } else {
+                this.logToporBalancerBrowserDebug({
+                    browserFlowProcessed: false,
+                    inputLinksCount: 0,
+                    outputLinksCount: 0,
+                    matchedTechnicalLinks: 0,
+                    selectedNodes: {},
+                    rewrittenLinksCount: 0,
+                    reason: 'showConnectionKeys=false',
+                });
                 subscriptionData.response.links = [];
                 subscriptionData.response.ssConfLinks = {};
             }
@@ -273,6 +290,184 @@ export class RootService {
             res.socket?.destroy();
             return;
         }
+    }
+
+    private async processBrowserPanelSubscriptionLinks(
+        subscriptionData: {
+            response?: {
+                links?: unknown;
+            };
+        },
+        shortUuid: string,
+        req: Request,
+    ): Promise<void> {
+        const links = subscriptionData.response?.links;
+        const subscriptionResponse = subscriptionData.response;
+        const browserDebug = {
+            browserFlowProcessed: false,
+            inputLinksCount: this.countPanelLinks(links),
+            outputLinksCount: this.countPanelLinks(links),
+            matchedTechnicalLinks: 0,
+            selectedNodes: {} as Record<string, string>,
+            rewrittenLinksCount: 0,
+        };
+
+        if (links === undefined || links === null) {
+            this.logToporBalancerBrowserDebug(browserDebug);
+            return;
+        }
+
+        if (!subscriptionResponse) {
+            this.logToporBalancerBrowserDebug({
+                ...browserDebug,
+                reason: 'missing-subscription-response',
+            });
+            return;
+        }
+
+        try {
+            if (Array.isArray(links)) {
+                const stringLinks = links.filter((link): link is string => typeof link === 'string');
+                const inputBody = stringLinks.join('\n');
+                const result = await this.toporBalancerService.processWithDebug({
+                    shortUuid,
+                    body: inputBody,
+                    contentType: 'text/plain',
+                    requestPath: req.path,
+                    userAgent: this.formatUserAgent(req.headers['user-agent']),
+                });
+
+                if (!result) {
+                    this.logToporBalancerBrowserDebug(browserDebug);
+                    return;
+                }
+
+                const outputLinks = result.body.split(/\r?\n/).filter((line) => line.trim());
+
+                subscriptionResponse.links = outputLinks;
+                this.logToporBalancerBrowserDebug(
+                    this.buildBrowserPanelDebugInfo({
+                        browserFlowProcessed: true,
+                        inputBody,
+                        outputBody: result.body,
+                        result,
+                    }),
+                );
+                return;
+            }
+
+            if (typeof links === 'string' || Buffer.isBuffer(links)) {
+                const inputBody = Buffer.isBuffer(links) ? links.toString('utf8') : links;
+                const result = await this.toporBalancerService.processWithDebug({
+                    shortUuid,
+                    body: links,
+                    requestPath: req.path,
+                    userAgent: this.formatUserAgent(req.headers['user-agent']),
+                });
+
+                if (!result) {
+                    this.logToporBalancerBrowserDebug(browserDebug);
+                    return;
+                }
+
+                subscriptionResponse.links = result.body;
+                this.logToporBalancerBrowserDebug(
+                    this.buildBrowserPanelDebugInfo({
+                        browserFlowProcessed: true,
+                        inputBody,
+                        outputBody: result.body,
+                        result,
+                    }),
+                );
+                return;
+            }
+
+            this.logToporBalancerBrowserDebug({
+                ...browserDebug,
+                reason: 'unsupported-links-shape',
+            });
+        } catch (error) {
+            this.logger.warn(`TopoR browser panel balancing failed open: ${error}`);
+            this.logToporBalancerBrowserDebug({
+                ...browserDebug,
+                reason: 'balancer-failed-open',
+            });
+        }
+    }
+
+    private buildBrowserPanelDebugInfo(input: {
+        browserFlowProcessed: boolean;
+        inputBody: string;
+        outputBody: string;
+        result: ToporBalancerProcessResult;
+    }): {
+        browserFlowProcessed: boolean;
+        inputLinksCount: number;
+        outputLinksCount: number;
+        matchedTechnicalLinks: number;
+        selectedNodes: Record<string, string>;
+        rewrittenLinksCount: number;
+    } {
+        return {
+            browserFlowProcessed: input.browserFlowProcessed,
+            inputLinksCount: this.countSubscriptionBodyVlessLinks(input.inputBody),
+            outputLinksCount: this.countSubscriptionBodyVlessLinks(input.outputBody),
+            matchedTechnicalLinks: input.result.debugInfo.matchedTechnicalLinks,
+            selectedNodes: input.result.debugInfo.selectedNodes,
+            rewrittenLinksCount: this.countRewrittenSubscriptionLinks(input.inputBody, input.outputBody),
+        };
+    }
+
+    private countPanelLinks(links: unknown): number {
+        if (Array.isArray(links)) {
+            return links.filter((link) => typeof link === 'string' && link.startsWith('vless://')).length;
+        }
+
+        if (typeof links === 'string' || Buffer.isBuffer(links)) {
+            return this.countSubscriptionBodyVlessLinks(
+                Buffer.isBuffer(links) ? links.toString('utf8') : links,
+            );
+        }
+
+        return 0;
+    }
+
+    private countSubscriptionBodyVlessLinks(body: string): number {
+        const format = detectSubscriptionFormat(body);
+
+        return extractVlessLinks(decodeSubscriptionBody(body, format)).length;
+    }
+
+    private countRewrittenSubscriptionLinks(inputBody: string, outputBody: string): number {
+        const inputFormat = detectSubscriptionFormat(inputBody);
+        const outputFormat = detectSubscriptionFormat(outputBody);
+        const inputLinks = extractVlessLinks(decodeSubscriptionBody(inputBody, inputFormat));
+        const outputLinksByStableKey = new Map(
+            extractVlessLinks(decodeSubscriptionBody(outputBody, outputFormat)).map((link) => [
+                [link.protocol, link.uuid, link.host, link.port ?? '', link.rawQuery].join('|'),
+                link,
+            ]),
+        );
+
+        return inputLinks.filter((link) => {
+            const outputLink = outputLinksByStableKey.get(
+                [link.protocol, link.uuid, link.host, link.port ?? '', link.rawQuery].join('|'),
+            );
+
+            return outputLink !== undefined && outputLink.remark !== link.remark;
+        }).length;
+    }
+
+    private formatUserAgent(userAgent: Request['headers']['user-agent']): string | undefined {
+        return Array.isArray(userAgent) ? userAgent.join(', ') : userAgent;
+    }
+
+    private logToporBalancerBrowserDebug(debugInfo: Record<string, unknown>): void {
+        if (!this.isToporBalancerDebugEnabled) {
+            return;
+        }
+
+        this.logger.log(`[TOPOR_BALANCER_BROWSER_DEBUG] ${JSON.stringify(debugInfo)}`);
     }
 
     private async tryDecodeMarzbanLink(shortUuid: string): Promise<{

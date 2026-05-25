@@ -56,8 +56,22 @@ interface GroupCandidateDiagnostic {
     groupNodesCount: number;
     subscriptionCandidateNodes: string[];
     effectiveCandidateNodes: string[];
+    excludedNodes: ExcludedCandidateNode[];
     selectedTechnicalHostName?: string;
     warnings: string[];
+}
+
+type ExcludedCandidateNodeReason =
+    | 'missing_topology'
+    | 'not_accessible_to_group_squad'
+    | 'not_accessible_to_user_squad'
+    | 'not_in_subscription'
+    | 'user_not_in_group_squad';
+
+interface ExcludedCandidateNode {
+    technicalHostName: string;
+    reason: ExcludedCandidateNodeReason;
+    message: string;
 }
 
 function getPublicGroupKey(location: ToporBalancerLocation): string {
@@ -207,6 +221,12 @@ async function selectNodesByPublicGroupKey(
             input,
             location,
         });
+        const excludedNodes = buildExcludedCandidateNodes({
+            accessExcludedNodes: accessResult.excludedNodes,
+            effectiveCandidateTechnicalHostNames: accessResult.effectiveCandidateTechnicalHostNames,
+            location,
+            subscriptionCandidateTechnicalHostNames,
+        });
         const warnings = [...accessResult.warnings];
 
         if (accessResult.effectiveCandidateTechnicalHostNames.length === 0) {
@@ -221,6 +241,7 @@ async function selectNodesByPublicGroupKey(
                 groupNodesCount: location.nodes.length,
                 subscriptionCandidateNodes: subscriptionCandidateTechnicalHostNames,
                 effectiveCandidateNodes: [],
+                excludedNodes,
                 warnings,
             });
             continue;
@@ -244,6 +265,7 @@ async function selectNodesByPublicGroupKey(
             groupNodesCount: location.nodes.length,
             subscriptionCandidateNodes: subscriptionCandidateTechnicalHostNames,
             effectiveCandidateNodes: accessResult.effectiveCandidateTechnicalHostNames,
+            excludedNodes,
             ...(selectedNode ? { selectedTechnicalHostName: selectedNode.technicalHostName } : {}),
             warnings,
         });
@@ -261,11 +283,18 @@ function filterCandidatesByUserAccess(input: {
     location: ToporBalancerLocation;
 }): {
     effectiveCandidateTechnicalHostNames: string[];
+    excludedNodes: ExcludedCandidateNode[];
     warnings: string[];
 } {
-    if (!input.input.topology && !input.input.userAccess) {
+    if (
+        (!input.input.topology || input.input.topology.hosts.length === 0) &&
+        (!input.input.userAccess ||
+            (input.input.userAccess.squads.length === 0 &&
+                input.input.userAccess.accessibleNodeUuids.length === 0))
+    ) {
         return {
             effectiveCandidateTechnicalHostNames: input.candidateTechnicalHostNames,
+            excludedNodes: [],
             warnings: [],
         };
     }
@@ -277,14 +306,20 @@ function filterCandidatesByUserAccess(input: {
     );
     const warnings: string[] = [];
     const effectiveCandidateTechnicalHostNames: string[] = [];
+    const excludedNodes: ExcludedCandidateNode[] = [];
 
     for (const technicalHostName of input.candidateTechnicalHostNames) {
         const host = hostByRemark.get(technicalHostName);
 
         if (!host) {
-            warnings.push(
-                `Candidate ${technicalHostName} has no Remnawave topology host; excluded for user-aware balancing.`,
-            );
+            const message = `Candidate ${technicalHostName} has no Remnawave topology host; excluded for user-aware balancing.`;
+
+            warnings.push(message);
+            excludedNodes.push({
+                technicalHostName,
+                reason: 'missing_topology',
+                message,
+            });
             continue;
         }
 
@@ -301,24 +336,39 @@ function filterCandidatesByUserAccess(input: {
                 userSquadUuids.size > 0 &&
                 !userSquadUuids.has(input.location.internalSquadUuid)
             ) {
-                warnings.push(
-                    `User is not in required squad ${input.location.internalSquadUuid} for ${getPublicGroupKey(input.location)}.`,
-                );
+                const message = `User is not in required squad ${input.location.internalSquadUuid} for ${getPublicGroupKey(input.location)}.`;
+
+                warnings.push(message);
+                excludedNodes.push({
+                    technicalHostName,
+                    reason: 'user_not_in_group_squad',
+                    message,
+                });
                 continue;
             }
 
             if (!hostSquadUuids.has(input.location.internalSquadUuid)) {
-                warnings.push(
-                    `Candidate ${technicalHostName} is not accessible to required squad ${input.location.internalSquadUuid}; excluded.`,
-                );
+                const message = `Candidate ${technicalHostName} is not accessible to required squad ${input.location.internalSquadUuid}; excluded.`;
+
+                warnings.push(message);
+                excludedNodes.push({
+                    technicalHostName,
+                    reason: 'not_accessible_to_group_squad',
+                    message,
+                });
                 continue;
             }
         }
 
         if (!isUserNodeAccessible) {
-            warnings.push(
-                `Candidate ${technicalHostName} is not accessible to this user's squads; excluded.`,
-            );
+            const message = `Candidate ${technicalHostName} is not accessible to this user's squads; excluded.`;
+
+            warnings.push(message);
+            excludedNodes.push({
+                technicalHostName,
+                reason: 'not_accessible_to_user_squad',
+                message,
+            });
             continue;
         }
 
@@ -327,8 +377,42 @@ function filterCandidatesByUserAccess(input: {
 
     return {
         effectiveCandidateTechnicalHostNames,
+        excludedNodes,
         warnings,
     };
+}
+
+function buildExcludedCandidateNodes(input: {
+    accessExcludedNodes: ExcludedCandidateNode[];
+    effectiveCandidateTechnicalHostNames: string[];
+    location: ToporBalancerLocation;
+    subscriptionCandidateTechnicalHostNames: string[];
+}): ExcludedCandidateNode[] {
+    const excludedByName = new Map(
+        input.accessExcludedNodes.map((node) => [node.technicalHostName, node]),
+    );
+    const subscriptionCandidateNames = new Set(input.subscriptionCandidateTechnicalHostNames);
+    const effectiveCandidateNames = new Set(input.effectiveCandidateTechnicalHostNames);
+
+    for (const node of input.location.nodes) {
+        if (effectiveCandidateNames.has(node.technicalHostName)) {
+            continue;
+        }
+
+        if (excludedByName.has(node.technicalHostName)) {
+            continue;
+        }
+
+        if (!subscriptionCandidateNames.has(node.technicalHostName)) {
+            excludedByName.set(node.technicalHostName, {
+                technicalHostName: node.technicalHostName,
+                reason: 'not_in_subscription',
+                message: `Node ${node.technicalHostName} is in the Balancer group but is not present in this user's subscription response.`,
+            });
+        }
+    }
+
+    return Array.from(excludedByName.values());
 }
 
 function filterSubscriptionBody(

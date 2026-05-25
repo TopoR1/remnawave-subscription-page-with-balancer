@@ -117,7 +117,6 @@ const ADMIN_GROUP_SQUAD_SCOPES = new Set([
 export class ToporBalancerService implements OnModuleDestroy, OnModuleInit {
     private readonly logger = new Logger(ToporBalancerService.name);
     private repository: ToporBalancerAssignmentRepository | null = null;
-    private startupConfig: ToporBalancerConfig | null = null;
 
     constructor(
         private readonly configService: ConfigService,
@@ -139,8 +138,9 @@ export class ToporBalancerService implements OnModuleDestroy, OnModuleInit {
 
                 if (config) {
                     await repository.upsertConfiguredNodes(config);
-                    this.startupConfig = config;
-                    this.logger.log('TopoR balancer config imported into database.');
+                    this.logger.log(
+                        'TopoR balancer config imported into database as bootstrap seed.',
+                    );
                 } else {
                     this.logger.log('TopoR balancer config import skipped: config file not found.');
                 }
@@ -191,33 +191,17 @@ export class ToporBalancerService implements OnModuleDestroy, OnModuleInit {
     }
 
     public async process(input: ToporBalancerProcessInput): Promise<unknown> {
-        if (!this.isEnabled()) {
-            return input.body;
-        }
-
-        const bodyText = this.stringifySupportedBody(input.body);
-
-        if (bodyText === null) {
-            return input.body;
-        }
-
         try {
-            const result =
-                this.getAssignmentMode() === 'database'
-                    ? await this.processWithDatabase(input, bodyText)
-                    : processSubscriptionWithHashBalancer({
-                          shortUuid: input.shortUuid,
-                          body: bodyText,
-                          contentType: input.contentType,
-                          requestPath: input.requestPath,
-                          userAgent: input.userAgent,
-                          config: await this.loadConfig(),
-                          debug: this.configService.getOrThrow<boolean>('TOPOR_BALANCER_DEBUG'),
-                          logger: (message) => this.logger.log(message),
-                      });
+            const result = await this.processWithDebug(input);
+
+            if (!result) {
+                return input.body;
+            }
 
             if (Buffer.isBuffer(input.body)) {
-                return result.body === bodyText ? input.body : Buffer.from(result.body, 'utf8');
+                return result.body === input.body.toString('utf8')
+                    ? input.body
+                    : Buffer.from(result.body, 'utf8');
             }
 
             return result.body;
@@ -229,6 +213,33 @@ export class ToporBalancerService implements OnModuleDestroy, OnModuleInit {
 
             return input.body;
         }
+    }
+
+    public async processWithDebug(
+        input: ToporBalancerProcessInput,
+    ): Promise<ToporBalancerProcessResult | null> {
+        if (!this.isEnabled()) {
+            return null;
+        }
+
+        const bodyText = this.stringifySupportedBody(input.body);
+
+        if (bodyText === null) {
+            return null;
+        }
+
+        return this.getAssignmentMode() === 'database'
+            ? ((await this.processWithDatabase(input, bodyText)) as ToporBalancerProcessResult)
+            : processSubscriptionWithHashBalancer({
+                  shortUuid: input.shortUuid,
+                  body: bodyText,
+                  contentType: input.contentType,
+                  requestPath: input.requestPath,
+                  userAgent: input.userAgent,
+                  config: await this.loadConfig(),
+                  debug: this.configService.getOrThrow<boolean>('TOPOR_BALANCER_DEBUG'),
+                  logger: (message) => this.logger.log(message),
+              });
     }
 
     public isAdminTokenConfigured(): boolean {
@@ -894,6 +905,12 @@ export class ToporBalancerService implements OnModuleDestroy, OnModuleInit {
                         message: 'Subscription body is not a string or Buffer.',
                     },
                 ],
+                reasons: [
+                    {
+                        reason: 'format_unsupported',
+                        message: 'Subscription body is not a string or Buffer.',
+                    },
+                ],
                 inputLinksCount: 0,
                 outputLinksCount: 0,
                 groups: [],
@@ -1014,7 +1031,7 @@ export class ToporBalancerService implements OnModuleDestroy, OnModuleInit {
         return {
             ok: errors.length === 0 && processingProof.status === 'processed',
             status: processingProof.status,
-            format: this.mapDiagnosticsFormat(outputFormat),
+            format: this.mapDiagnosticsFormat(inputFormat),
             totalVlessLinks: inputLinksCount,
             matchedTechnicalLinks: processingProof.matchedTechnicalLinks,
             unmatchedRemarks: processingProof.unmatchedRemarks,
@@ -1025,6 +1042,7 @@ export class ToporBalancerService implements OnModuleDestroy, OnModuleInit {
             rewrittenLinksCount: processingProof.rewrittenLinksCount,
             unchangedLinksCount: processingProof.unchangedLinksCount,
             unchangedReasons: processingProof.unchangedReasons,
+            reasons: processingProof.unchangedReasons,
             inputLinksCount,
             outputLinksCount,
             groups: this.buildDiagnosticsGroups(
@@ -1043,11 +1061,11 @@ export class ToporBalancerService implements OnModuleDestroy, OnModuleInit {
         format: ReturnType<typeof detectSubscriptionFormat>,
     ): ToporBalancerSubscriptionDiagnosticsFormat {
         if (format === 'base64_links') {
-            return 'base64';
+            return 'base64_links';
         }
 
         if (format === 'plain_links') {
-            return 'plain';
+            return 'plain_links';
         }
 
         return 'unknown';
@@ -1246,7 +1264,9 @@ export class ToporBalancerService implements OnModuleDestroy, OnModuleInit {
                     userSquads: groupCandidateDiagnostic?.userSquads ?? [],
                     accessibleNodesCount: groupCandidateDiagnostic?.accessibleNodesCount ?? 0,
                     groupNodesCount: groupCandidateDiagnostic?.groupNodesCount ?? group.nodes.length,
+                    subscriptionCandidateNodes: groupCandidateDiagnostic?.subscriptionCandidateNodes ?? [],
                     effectiveCandidateNodes: groupCandidateDiagnostic?.effectiveCandidateNodes ?? [],
+                    excludedNodes: groupCandidateDiagnostic?.excludedNodes ?? [],
                     outputRemarks: Array.from(
                         new Set(
                             outputLinks
@@ -1509,6 +1529,34 @@ export class ToporBalancerService implements OnModuleDestroy, OnModuleInit {
 
         if (message === 'Processing failed; original subscription was used for diagnostics.') {
             return 'Обработка не удалась; для диагностики использована исходная подписка.';
+        }
+
+        if (message.startsWith('No VLESS remarks matched Balancer technicalHostName.')) {
+            return message
+                .replace(
+                    'No VLESS remarks matched Balancer technicalHostName.',
+                    'Не найдено совпадений technicalHostName.',
+                )
+                .replace(
+                    'Add these remarks as technicalHostName:',
+                    'Добавьте эти remarks как technicalHostName:',
+                );
+        }
+
+        const inaccessibleCandidateMatch = message.match(
+            /^Candidate (.+) is not accessible to this user's squads; excluded\.$/,
+        );
+
+        if (inaccessibleCandidateMatch) {
+            return `Нода недоступна пользователю по squad: ${inaccessibleCandidateMatch[1]}.`;
+        }
+
+        const inaccessibleRequiredSquadMatch = message.match(
+            /^Candidate (.+) is not accessible to required squad (.+); excluded\.$/,
+        );
+
+        if (inaccessibleRequiredSquadMatch) {
+            return `Нода недоступна пользователю по squad: ${inaccessibleRequiredSquadMatch[1]} не доступна squad ${inaccessibleRequiredSquadMatch[2]}.`;
         }
 
         return message;
@@ -2012,15 +2060,13 @@ export class ToporBalancerService implements OnModuleDestroy, OnModuleInit {
     private async getDatabaseProcessingConfig(
         repository: ToporBalancerAssignmentRepository,
     ): Promise<ToporBalancerConfig> {
-        if (this.startupConfig) {
-            return this.startupConfig;
-        }
-
         const groups = await repository.listGroups();
         const locations: ToporBalancerConfig['locations'] = [];
+        let nodesCount = 0;
 
         for (const group of groups.filter((item) => item.enabled)) {
             const nodes = (await repository.listGroupNodes(group.id)) ?? [];
+            nodesCount += nodes.length;
 
             locations.push({
                 locationCode: group.locationCode,
@@ -2039,6 +2085,10 @@ export class ToporBalancerService implements OnModuleDestroy, OnModuleInit {
                 internalSquadUuid: group.internalSquadUuid,
             });
         }
+
+        this.logger.log(
+            `[ToporBalancerRuntimeConfig] source=database nodes=${nodesCount} groups=${locations.length}`,
+        );
 
         return {
             enabled: true,

@@ -95,6 +95,16 @@ export interface ToporBalancerDebugInfo {
         groupNodesCount: number;
         subscriptionCandidateNodes: string[];
         effectiveCandidateNodes: string[];
+        excludedNodes: Array<{
+            technicalHostName: string;
+            reason:
+                | 'not_in_subscription'
+                | 'not_accessible_to_user_squad'
+                | 'not_accessible_to_group_squad'
+                | 'missing_topology'
+                | 'user_not_in_group_squad';
+            message: string;
+        }>;
         selectedTechnicalHostName?: string;
         warnings: string[];
     }>;
@@ -142,7 +152,10 @@ export interface ToporBalancerDebugProcessSubscriptionResult {
     maskedDiff: ToporBalancerMaskedLinkDiff[];
 }
 
-export type ToporBalancerSubscriptionDiagnosticsFormat = 'base64' | 'plain' | 'unknown';
+export type ToporBalancerSubscriptionDiagnosticsFormat =
+    | 'base64_links'
+    | 'plain_links'
+    | 'unknown';
 
 export type ToporBalancerSubscriptionDiagnosticsStatus =
     | 'failed_open'
@@ -184,7 +197,18 @@ export interface ToporBalancerSubscriptionDiagnosticsResult {
         userSquads: Array<{ name: string; uuid: string }>;
         accessibleNodesCount: number;
         groupNodesCount: number;
+        subscriptionCandidateNodes: string[];
         effectiveCandidateNodes: string[];
+        excludedNodes: Array<{
+            technicalHostName: string;
+            reason:
+                | 'not_in_subscription'
+                | 'not_accessible_to_user_squad'
+                | 'not_accessible_to_group_squad'
+                | 'missing_topology'
+                | 'user_not_in_group_squad';
+            message: string;
+        }>;
         outputRemarks: string[];
         outputContainsPublicName: boolean;
         rewrittenLinksCount: number;
@@ -200,6 +224,14 @@ export interface ToporBalancerSubscriptionDiagnosticsResult {
     rewrittenLinksCount: number;
     unchangedLinksCount: number;
     unchangedReasons: Array<{
+        publicHostCode?: string;
+        planCode?: string;
+        reason: ToporBalancerSubscriptionDiagnosticsUnchangedReason;
+        remark?: string;
+        technicalHostName?: string;
+        message: string;
+    }>;
+    reasons: Array<{
         publicHostCode?: string;
         planCode?: string;
         reason: ToporBalancerSubscriptionDiagnosticsUnchangedReason;

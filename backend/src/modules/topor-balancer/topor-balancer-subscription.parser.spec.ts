@@ -906,7 +906,7 @@ test('subscription diagnostics validates generated VLESS links without exposing 
     const serializedResult = JSON.stringify(result);
 
     assert.equal(result.ok, true);
-    assert.equal(result.format, 'base64');
+    assert.equal(result.format, 'base64_links');
     assert.equal(result.inputLinksCount, 2);
     assert.equal(result.outputLinksCount, 2);
     assert.equal(result.groups.find((group) => group.publicHostCode === 'fi_standard')?.status, 'ok');
@@ -945,6 +945,47 @@ test('subscription diagnostics reports invalid generated VLESS links', async () 
     assert.equal(result.vlessValidation[0].valid, false);
     assert.ok(result.vlessValidation[0].warnings.some((warning) => warning.includes('fp')));
     assert.ok(result.errors.some((error) => error.includes('Некорректная VLESS-ссылка')));
+});
+
+test('subscription diagnostics reports passed through when technicalHostName does not match', async () => {
+    const repository = InMemoryToporBalancerRepository.fromConfig(balancerConfig);
+    const service = new ToporBalancerService(
+        createConfigServiceStub({
+            TOPOR_BALANCER_ASSIGNMENT_MODE: 'database',
+            TOPOR_BALANCER_DATABASE_URL: 'postgres://unit-test',
+            TOPOR_BALANCER_DEBUG: false,
+        }),
+        ({
+            getSubscription: async () => ({
+                response: buildVlessLink('REMNAWAVE-OLD-REMARK'),
+                headers: {
+                    'content-type': 'text/plain',
+                },
+            }),
+        } as unknown) as AxiosService,
+    );
+
+    setServiceRepository(service, repository);
+
+    const result = await service.diagnoseSubscription({
+        shortUuid: 'diagnostic-unmatched-user',
+        userAgent: 'v2rayNG/1.9.0',
+    });
+
+    assert.equal(result.ok, false);
+    assert.equal(result.status, 'passed_through');
+    assert.equal(result.format, 'plain_links');
+    assert.equal(result.totalVlessLinks, 1);
+    assert.equal(result.matchedTechnicalLinks, 0);
+    assert.equal(result.rewrittenLinksCount, 0);
+    assert.equal(result.unchangedLinksCount, 1);
+    assert.deepEqual(result.unmatchedRemarks, ['REMNAWAVE-OLD-REMARK']);
+    assert.equal(result.reasons[0].reason, 'technicalHostName_mismatch');
+    assert.ok(
+        result.warnings.some((warning) =>
+            warning.includes('Не найдено совпадений technicalHostName'),
+        ),
+    );
 });
 
 test('database balancer creates a new assignment', async () => {
@@ -993,6 +1034,32 @@ test('database balancer excludes nodes not accessible to the runtime user squad'
             warning.includes('FI-GAME-01 is not accessible'),
         ),
     );
+});
+
+test('database balancer diagnostics show group nodes excluded from this subscription', async () => {
+    const config = buildStrategyConfig('least_loaded', [
+        { technicalHostName: 'FI-STD-01', weight: 1, maxUsers: 300, status: 'active' },
+        { technicalHostName: 'FI-STD-02', weight: 1, maxUsers: 300, status: 'active' },
+    ]);
+    const repository = InMemoryToporBalancerRepository.fromConfig(config);
+    const result = await processSubscriptionWithDatabaseBalancer({
+        shortUuid: 'one-visible-node-user',
+        body: buildVlessLink('FI-STD-01'),
+        config,
+        repository,
+    });
+    const diagnostic = result.debugInfo.groupCandidateDiagnostics?.[0];
+
+    assert.deepEqual(diagnostic?.subscriptionCandidateNodes, ['FI-STD-01']);
+    assert.deepEqual(diagnostic?.effectiveCandidateNodes, ['FI-STD-01']);
+    assert.equal(diagnostic?.groupNodesCount, 2);
+    assert.deepEqual(diagnostic?.excludedNodes, [
+        {
+            technicalHostName: 'FI-STD-02',
+            reason: 'not_in_subscription',
+            message: "Node FI-STD-02 is in the Balancer group but is not present in this user's subscription response.",
+        },
+    ]);
 });
 
 test('database balancer passes through a group when user has no accessible candidates', async () => {
@@ -1859,6 +1926,35 @@ test('database mode starts without a JSON config and exposes an empty nodes list
     assert.equal(health.databaseConnected, true);
     assert.equal(health.configLoaded, false);
     assert.equal(nodes.length, 0);
+});
+
+test('database runtime processing uses current DB group settings after UI updates', async () => {
+    const repository = InMemoryToporBalancerRepository.fromConfig(balancerConfig);
+    const service = new ToporBalancerService(
+        createConfigServiceStub({
+            TOPOR_BALANCER_ENABLED: true,
+            TOPOR_BALANCER_ASSIGNMENT_MODE: 'database',
+            TOPOR_BALANCER_DATABASE_URL: 'postgres://unit-test',
+            TOPOR_BALANCER_DEBUG: false,
+        }),
+    );
+
+    setServiceRepository(service, repository);
+
+    await service.updateAdminGroup(groupKey('fi_standard', 'standard'), {
+        publicName: 'Fresh DB Finland',
+    });
+
+    const result = await service.processWithDebug({
+        shortUuid: 'fresh-db-user',
+        body: [buildVlessLink('FI-STD-01'), buildVlessLink('FI-STD-02')].join('\n'),
+        contentType: 'text/plain',
+        requestPath: '/fresh-db-user',
+        userAgent: 'UnitTest/1.0',
+    });
+    const outputRemarks = parseSubscription(result?.body ?? '').links.map((link) => link.remark);
+
+    assert.deepEqual(outputRemarks, ['Fresh DB Finland']);
 });
 
 test('admin service creates nodes from UI payloads', async () => {
