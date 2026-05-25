@@ -412,6 +412,76 @@ export interface ToporBalancerAdminRequest {
     createdAt?: string;
 }
 
+export interface ToporBalancerSubscriptionRequestTrace {
+    timestamp: string;
+    shortUuid: string;
+    requestPath?: string;
+    queryString?: string;
+    method?: string;
+    host?: string;
+    userAgent?: string;
+    accept?: string;
+    acceptLanguage?: string;
+    secFetchMode?: string;
+    xForwardedProto?: string;
+    xForwardedHost?: string;
+    xRealIp?: string;
+    clientIp?: string;
+    flow: 'browser' | 'raw';
+    returnWebpageUsed: boolean;
+    rawSubscriptionUsed: boolean;
+}
+
+export interface ToporBalancerSubscriptionUpstreamTrace {
+    endpointType: 'getSubpageConfig' | 'getSubscription' | 'getSubscriptionInfo' | 'originalSubscription';
+    outgoingUserAgent?: string;
+    contentType?: string;
+    bodyLength: number;
+    detectedFormat: SubscriptionFormat;
+    vlessLinksCount: number;
+    firstRemarks: string[];
+    unsupportedAppFallback: boolean;
+}
+
+export interface ToporBalancerSubscriptionBalancerTrace {
+    inputLinksCount: number;
+    matchedTechnicalLinks: number;
+    unmatchedRemarks: string[];
+    selectedNodes: Record<string, string>;
+    rewrittenLinksCount: number;
+    outputLinksCount: number;
+    outputBodyLength: number;
+    finalContentType?: string;
+    status: ToporBalancerSubscriptionDiagnosticsStatus;
+    unsupportedAppFallback: boolean;
+}
+
+export interface ToporBalancerRecentSubscriptionTrace {
+    id: string;
+    request: ToporBalancerSubscriptionRequestTrace;
+    upstream: ToporBalancerSubscriptionUpstreamTrace;
+    balancer: ToporBalancerSubscriptionBalancerTrace;
+}
+
+export interface ToporBalancerTraceSubscriptionResult {
+    upstream: ToporBalancerSubscriptionUpstreamTrace;
+    balancer: ToporBalancerSubscriptionBalancerTrace;
+    output: {
+        contentType?: string;
+        bodyLength: number;
+        detectedFormat: SubscriptionFormat;
+        vlessLinksCount: number;
+        firstRemarks: string[];
+        unsupportedAppFallback: boolean;
+    };
+    comparison?: {
+        original?: ToporBalancerSubscriptionUpstreamTrace;
+        balancerOutputVlessLinksCount: number;
+        originalVlessLinksCount?: number;
+        unsupportedAppFallbackDiffers?: boolean;
+    };
+}
+
 export interface ToporBalancerBootstrap {
     version: string;
     locale: 'ru' | 'en';

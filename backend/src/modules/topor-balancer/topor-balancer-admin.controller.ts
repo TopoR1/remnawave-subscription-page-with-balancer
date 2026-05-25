@@ -286,6 +286,11 @@ export class ToporBalancerAdminController {
         });
     }
 
+    @Get('diagnostics/traces')
+    public traces() {
+        return this.toporBalancerService.listRecentSubscriptionTraces();
+    }
+
     @Post('reassign')
     public async reassign(
         @Body()
@@ -361,6 +366,20 @@ export class ToporBalancerAdminController {
         return this.toporBalancerService.diagnoseSubscription({
             shortUuid: body.shortUuid,
             userAgent: body.userAgent,
+        });
+    }
+
+    @Post('diagnostics/trace-subscription')
+    public async traceSubscription(
+        @Body()
+        body: {
+            headers?: Record<string, string>;
+            shortUuid: string;
+        },
+    ) {
+        return this.toporBalancerService.traceSubscription({
+            headers: body.headers,
+            shortUuid: body.shortUuid,
         });
     }
 }

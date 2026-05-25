@@ -9,6 +9,7 @@ import {
     ServiceUnavailableException,
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
+import axios from 'axios';
 
 import { AxiosService } from '../../common/axios';
 
@@ -40,10 +41,15 @@ import type {
     ToporBalancerGroupNodeImportResult,
     ToporBalancerNodeStatus,
     ToporBalancerProcessResult,
+    ToporBalancerRecentSubscriptionTrace,
+    ToporBalancerSubscriptionBalancerTrace,
     ToporBalancerSubscriptionDiagnosticsFormat,
     ToporBalancerSubscriptionDiagnosticsResult,
     ToporBalancerSubscriptionDiagnosticsStatus,
     ToporBalancerSubscriptionDiagnosticsUnchangedReason,
+    ToporBalancerSubscriptionRequestTrace,
+    ToporBalancerSubscriptionUpstreamTrace,
+    ToporBalancerTraceSubscriptionResult,
     ToporRemnawaveTopologySnapshot,
 } from './types';
 
@@ -123,6 +129,7 @@ const ADMIN_GROUP_SQUAD_SCOPES = new Set([
 export class ToporBalancerService implements OnModuleDestroy, OnModuleInit {
     private readonly logger = new Logger(ToporBalancerService.name);
     private repository: ToporBalancerAssignmentRepository | null = null;
+    private readonly recentSubscriptionTraces: ToporBalancerRecentSubscriptionTrace[] = [];
 
     constructor(
         private readonly configService: ConfigService,
@@ -671,6 +678,141 @@ export class ToporBalancerService implements OnModuleDestroy, OnModuleInit {
         filters: ToporBalancerRequestFilters,
     ): Promise<ToporBalancerAdminRequest[]> {
         return this.getAdminRepository().listRequests(filters);
+    }
+
+    public listRecentSubscriptionTraces(): ToporBalancerRecentSubscriptionTrace[] {
+        return this.recentSubscriptionTraces;
+    }
+
+    public recordSubscriptionTrace(trace: ToporBalancerRecentSubscriptionTrace): void {
+        this.recentSubscriptionTraces.unshift(trace);
+        this.recentSubscriptionTraces.splice(50);
+
+        if (this.configService.getOrThrow<boolean>('TOPOR_BALANCER_DEBUG')) {
+            this.logger.log(`[TOPOR_BALANCER_REQUEST_TRACE] ${JSON.stringify(trace)}`);
+        }
+    }
+
+    public analyzeSubscriptionBody(
+        endpointType: ToporBalancerSubscriptionUpstreamTrace['endpointType'],
+        body: unknown,
+        contentType?: string,
+        outgoingUserAgent?: string,
+    ): ToporBalancerSubscriptionUpstreamTrace {
+        const bodyText = this.stringifySupportedBody(body) ?? JSON.stringify(body ?? '');
+        const format = detectSubscriptionFormat(bodyText, contentType);
+        const plainBody = decodeSubscriptionBody(bodyText, format);
+        const links = extractVlessLinks(plainBody);
+
+        return {
+            endpointType,
+            outgoingUserAgent,
+            contentType,
+            bodyLength: Buffer.byteLength(bodyText),
+            detectedFormat: format,
+            vlessLinksCount: links.length,
+            firstRemarks: links.slice(0, 5).map((link) => link.remark ?? '-'),
+            unsupportedAppFallback: isUnsupportedAppFallback(links),
+        };
+    }
+
+    public buildBalancerTrace(input: {
+        contentType?: string;
+        inputBody: unknown;
+        outputBody: unknown;
+        result?: ToporBalancerProcessResult | null;
+    }): ToporBalancerSubscriptionBalancerTrace {
+        const inputBodyText = this.stringifySupportedBody(input.inputBody) ?? '';
+        const outputBodyText = this.stringifySupportedBody(input.outputBody) ?? '';
+        const inputFormat = detectSubscriptionFormat(inputBodyText, input.contentType);
+        const outputFormat = detectSubscriptionFormat(outputBodyText, input.contentType);
+        const inputLinks = extractVlessLinks(decodeSubscriptionBody(inputBodyText, inputFormat));
+        const outputLinks = extractVlessLinks(decodeSubscriptionBody(outputBodyText, outputFormat));
+        const unsupportedAppFallback = isUnsupportedAppFallback(inputLinks);
+        const rewrittenLinksCount = this.countRewrittenLinks(inputLinks, outputLinks);
+
+        return {
+            inputLinksCount: inputLinks.length,
+            matchedTechnicalLinks: input.result?.debugInfo.matchedTechnicalLinks ?? 0,
+            unmatchedRemarks: this.collectUnmatchedRemarks(inputLinks, input.result),
+            selectedNodes: input.result?.debugInfo.selectedNodes ?? {},
+            rewrittenLinksCount,
+            outputLinksCount: outputLinks.length,
+            outputBodyLength: Buffer.byteLength(outputBodyText),
+            finalContentType: input.contentType,
+            status: unsupportedAppFallback
+                ? 'unsupported_app'
+                : rewrittenLinksCount > 0
+                  ? 'processed'
+                  : 'passed_through',
+            unsupportedAppFallback,
+        };
+    }
+
+    public async traceSubscription(input: {
+        headers?: Record<string, string>;
+        shortUuid: string;
+    }): Promise<ToporBalancerTraceSubscriptionResult> {
+        this.validateNonEmptyString(input.shortUuid, 'shortUuid');
+
+        if (!this.axiosService) {
+            throw new ServiceUnavailableException('Remnawave API service is not available');
+        }
+
+        const shortUuid = input.shortUuid.trim();
+        const headers = input.headers ?? {};
+        const upstreamResponse = await this.axiosService.getSubscriptionWithTrace(
+            '127.0.0.1',
+            shortUuid,
+            headers,
+        );
+
+        if (!upstreamResponse) {
+            throw new NotFoundException('Subscription was not found in Remnawave');
+        }
+
+        const contentType = this.extractHeader(upstreamResponse.headers, 'content-type');
+        const upstream = this.analyzeSubscriptionBody(
+            'getSubscription',
+            upstreamResponse.response,
+            contentType,
+            upstreamResponse.trace.outgoingUserAgent,
+        );
+        const result = await this.processWithDebug({
+            shortUuid,
+            body: upstreamResponse.response,
+            contentType,
+            requestPath: '/api/topor-balancer/diagnostics/trace-subscription',
+            userAgent: headers['user-agent'],
+        });
+        const outputBody = result?.body ?? this.stringifySupportedBody(upstreamResponse.response) ?? '';
+        const balancer = this.buildBalancerTrace({
+            contentType,
+            inputBody: upstreamResponse.response,
+            outputBody,
+            result,
+        });
+        const output = this.analyzeSubscriptionBody(
+            'getSubscription',
+            outputBody,
+            contentType,
+            headers['user-agent'],
+        );
+        const comparison = await this.buildOriginalSubscriptionComparison(shortUuid, headers, output);
+
+        return {
+            upstream,
+            balancer,
+            output: {
+                contentType: output.contentType,
+                bodyLength: output.bodyLength,
+                detectedFormat: output.detectedFormat,
+                vlessLinksCount: output.vlessLinksCount,
+                firstRemarks: output.firstRemarks,
+                unsupportedAppFallback: output.unsupportedAppFallback,
+            },
+            ...(comparison ? { comparison } : {}),
+        };
     }
 
     public async replaceRemnawaveTopologyCache(
@@ -1568,6 +1710,82 @@ export class ToporBalancerService implements OnModuleDestroy, OnModuleInit {
             link.port ?? '',
             link.rawQuery,
         ].join('|');
+    }
+
+    private collectUnmatchedRemarks(
+        inputLinks: ReturnType<typeof extractVlessLinks>,
+        result?: ToporBalancerProcessResult | null,
+    ): string[] {
+        const selectedTechnicalHostNames = new Set(
+            Object.values(result?.debugInfo.selectedNodes ?? {}).map(normalizeTechnicalHostName),
+        );
+
+        if (selectedTechnicalHostNames.size === 0) {
+            return [];
+        }
+
+        return inputLinks
+            .map((link) => link.remark)
+            .filter((remark): remark is string => Boolean(remark))
+            .filter((remark) => !selectedTechnicalHostNames.has(normalizeTechnicalHostName(remark)));
+    }
+
+    private countRewrittenLinks(
+        inputLinks: ReturnType<typeof extractVlessLinks>,
+        outputLinks: ReturnType<typeof extractVlessLinks>,
+    ): number {
+        const outputLinksByStableKey = new Map(
+            outputLinks.map((link) => [this.buildDiagnosticsStableLinkKey(link), link]),
+        );
+
+        return inputLinks.filter((link) => {
+            const outputLink = outputLinksByStableKey.get(this.buildDiagnosticsStableLinkKey(link));
+
+            return outputLink !== undefined && outputLink.remark !== link.remark;
+        }).length;
+    }
+
+    private async buildOriginalSubscriptionComparison(
+        shortUuid: string,
+        headers: Record<string, string>,
+        output: ToporBalancerSubscriptionUpstreamTrace,
+    ): Promise<ToporBalancerTraceSubscriptionResult['comparison'] | undefined> {
+        const baseUrl = this.configService.get<string | undefined>(
+            'TOPOR_BALANCER_ORIGINAL_SUBSCRIPTION_URL',
+        );
+
+        if (!baseUrl) {
+            return undefined;
+        }
+
+        try {
+            const url = `${baseUrl.replace(/\/+$/, '')}/${encodeURIComponent(shortUuid)}`;
+            const response = await axios.get(url, {
+                headers,
+                responseType: 'text',
+                timeout: 10_000,
+            });
+            const original = this.analyzeSubscriptionBody(
+                'originalSubscription',
+                response.data,
+                response.headers['content-type']?.toString(),
+                headers['user-agent'],
+            );
+
+            return {
+                original,
+                balancerOutputVlessLinksCount: output.vlessLinksCount,
+                originalVlessLinksCount: original.vlessLinksCount,
+                unsupportedAppFallbackDiffers:
+                    original.unsupportedAppFallback !== output.unsupportedAppFallback,
+            };
+        } catch (error) {
+            this.logger.warn(`Original subscription comparison failed: ${error}`);
+
+            return {
+                balancerOutputVlessLinksCount: output.vlessLinksCount,
+            };
+        }
     }
 
     private buildDiagnosticsGroups(

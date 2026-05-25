@@ -369,6 +369,37 @@ export class AxiosService implements OnModuleInit {
         response: unknown;
         headers: RawAxiosResponseHeaders | AxiosResponseHeaders;
     } | null> {
+        const result = await this.getSubscriptionWithTrace(
+            clientIp,
+            shortUuid,
+            headers,
+            withClientType,
+            clientType,
+        );
+
+        return result
+            ? {
+                  response: result.response,
+                  headers: result.headers,
+              }
+            : null;
+    }
+
+    public async getSubscriptionWithTrace(
+        clientIp: string,
+        shortUuid: string,
+        headers: NodeJS.Dict<string | string[]>,
+        withClientType: boolean = false,
+        clientType?: TRequestTemplateTypeKeys,
+    ): Promise<{
+        response: unknown;
+        headers: RawAxiosResponseHeaders | AxiosResponseHeaders;
+        trace: {
+            endpointType: 'getSubscription';
+            outgoingUserAgent?: string;
+            path: string;
+        };
+    } | null> {
         try {
             let basePath = 'api/sub/' + shortUuid;
 
@@ -379,23 +410,29 @@ export class AxiosService implements OnModuleInit {
             const safeHeaders = Object.fromEntries(
                 Object.entries(headers).filter(([key]) => !IGNORED_HEADERS.has(key.toLowerCase())),
             );
+            const outgoingHeaders: NodeJS.Dict<string | string[]> = {
+                ...safeHeaders,
+                Accept: '*/*',
+                'Cache-Control': 'no-cache, no-store, must-revalidate, private, max-age=0',
+                Pragma: 'no-cache',
+                Expires: '0',
+                [REMNAWAVE_REAL_IP_HEADER]: clientIp,
+            };
 
             const response = await this.axiosInstance.request<unknown>({
                 method: 'GET',
                 url: basePath,
-                headers: {
-                    ...safeHeaders,
-                    Accept: '*/*',
-                    'Cache-Control': 'no-cache, no-store, must-revalidate, private, max-age=0',
-                    Pragma: 'no-cache',
-                    Expires: '0',
-                    [REMNAWAVE_REAL_IP_HEADER]: clientIp,
-                },
+                headers: outgoingHeaders,
             });
 
             return {
                 response: response.data,
                 headers: response.headers,
+                trace: {
+                    endpointType: 'getSubscription',
+                    outgoingUserAgent: this.formatHeaderValue(outgoingHeaders['user-agent']),
+                    path: basePath,
+                },
             };
         } catch (error) {
             if (error instanceof AxiosError) {
@@ -412,5 +449,9 @@ export class AxiosService implements OnModuleInit {
 
             return null;
         }
+    }
+
+    private formatHeaderValue(value: string | string[] | undefined): string | undefined {
+        return Array.isArray(value) ? value.join(', ') : value;
     }
 }

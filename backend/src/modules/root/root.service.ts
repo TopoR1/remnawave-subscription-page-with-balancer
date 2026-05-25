@@ -111,7 +111,7 @@ export class RootService {
                 return this.returnWebpage(clientIp, req, res, shortUuidLocal);
             }
 
-            const subscriptionDataResponse = await this.axiosService.getSubscription(
+            const subscriptionDataResponse = await this.axiosService.getSubscriptionWithTrace(
                 clientIp,
                 shortUuidLocal,
                 req.headers,
@@ -136,17 +136,42 @@ export class RootService {
             const contentType = Array.isArray(contentTypeHeader)
                 ? contentTypeHeader.join(', ')
                 : contentTypeHeader?.toString();
-            const balancedResponse = await this.toporBalancerService.process({
+            const result = await this.toporBalancerService.processWithDebug({
                 shortUuid: shortUuidLocal,
                 body: subscriptionDataResponse.response,
                 contentType,
                 requestPath: req.path,
                 userAgent: Array.isArray(userAgent) ? userAgent.join(', ') : userAgent,
             });
+            const finalResponse = result?.body ?? subscriptionDataResponse.response;
 
-            this.logToporBalancerDebug(req, res, balancedResponse, clientType);
+            this.toporBalancerService.recordSubscriptionTrace({
+                id: `${Date.now()}-${shortUuidLocal.slice(0, 4)}`,
+                request: this.buildRequestTrace({
+                    clientIp,
+                    flow: 'raw',
+                    rawSubscriptionUsed: true,
+                    req,
+                    returnWebpageUsed: false,
+                    shortUuid: shortUuidLocal,
+                }),
+                upstream: this.toporBalancerService.analyzeSubscriptionBody(
+                    subscriptionDataResponse.trace.endpointType,
+                    subscriptionDataResponse.response,
+                    contentType,
+                    subscriptionDataResponse.trace.outgoingUserAgent,
+                ),
+                balancer: this.toporBalancerService.buildBalancerTrace({
+                    contentType,
+                    inputBody: subscriptionDataResponse.response,
+                    outputBody: finalResponse,
+                    result,
+                }),
+            });
 
-            res.status(200).send(balancedResponse);
+            this.logToporBalancerDebug(req, res, finalResponse, clientType);
+
+            res.status(200).send(finalResponse);
             return;
         } catch (error) {
             this.logger.error('Error in serveSubscriptionPage', error);
@@ -267,6 +292,30 @@ export class RootService {
                 metaDescription: baseSettings.metaDescription,
                 panelData: Buffer.from(JSON.stringify(subscriptionData)).toString('base64'),
             };
+
+            this.toporBalancerService.recordSubscriptionTrace({
+                id: `${Date.now()}-${shortUuid.slice(0, 4)}`,
+                request: this.buildRequestTrace({
+                    clientIp,
+                    flow: 'browser',
+                    rawSubscriptionUsed: false,
+                    req,
+                    returnWebpageUsed: true,
+                    shortUuid,
+                }),
+                upstream: this.toporBalancerService.analyzeSubscriptionBody(
+                    'getSubscriptionInfo',
+                    subscriptionDataResponse.response,
+                    'application/json',
+                    undefined,
+                ),
+                balancer: this.toporBalancerService.buildBalancerTrace({
+                    contentType: 'application/json',
+                    inputBody: JSON.stringify(subscriptionDataResponse.response),
+                    outputBody: JSON.stringify(subscriptionData),
+                    result: null,
+                }),
+            });
 
             if (!this.isToporBalancerDebugEnabled) {
                 res.render('index', viewModel);
@@ -458,8 +507,54 @@ export class RootService {
         }).length;
     }
 
-    private formatUserAgent(userAgent: Request['headers']['user-agent']): string | undefined {
+    private formatUserAgent(userAgent: string | string[] | undefined): string | undefined {
         return Array.isArray(userAgent) ? userAgent.join(', ') : userAgent;
+    }
+
+    private buildRequestTrace(input: {
+        clientIp: string;
+        flow: 'browser' | 'raw';
+        rawSubscriptionUsed: boolean;
+        req: Request;
+        returnWebpageUsed: boolean;
+        shortUuid: string;
+    }) {
+        return {
+            timestamp: new Date().toISOString(),
+            shortUuid: this.maskSecret(input.shortUuid),
+            requestPath: input.req.path,
+            queryString: input.req.url.includes('?') ? input.req.url.slice(input.req.url.indexOf('?') + 1) : '',
+            method: input.req.method,
+            host: this.formatUserAgent(input.req.headers.host),
+            userAgent: this.formatUserAgent(input.req.headers['user-agent']),
+            accept: this.formatUserAgent(input.req.headers.accept),
+            acceptLanguage: this.formatUserAgent(input.req.headers['accept-language']),
+            secFetchMode: this.formatUserAgent(input.req.headers['sec-fetch-mode']),
+            xForwardedProto: this.formatUserAgent(input.req.headers['x-forwarded-proto']),
+            xForwardedHost: this.formatUserAgent(input.req.headers['x-forwarded-host']),
+            xRealIp: this.maskSecret(this.formatUserAgent(input.req.headers['x-real-ip']) ?? ''),
+            clientIp: this.maskIp(input.clientIp),
+            flow: input.flow,
+            returnWebpageUsed: input.returnWebpageUsed,
+            rawSubscriptionUsed: input.rawSubscriptionUsed,
+        };
+    }
+
+    private maskSecret(value: string): string {
+        if (value.length <= 8) {
+            return value ? `${value.slice(0, 2)}***` : '';
+        }
+
+        return `${value.slice(0, 4)}...${value.slice(-4)}`;
+    }
+
+    private maskIp(value: string): string {
+        if (value.includes(':')) {
+            return `${value.split(':').slice(0, 2).join(':')}:***`;
+        }
+
+        const parts = value.split('.');
+        return parts.length === 4 ? `${parts[0]}.${parts[1]}.x.x` : this.maskSecret(value);
     }
 
     private logToporBalancerBrowserDebug(debugInfo: Record<string, unknown>): void {

@@ -56,6 +56,7 @@ export const configSchema = z
             .default('false')
             .transform((val) => val === 'true'),
         TOPOR_BALANCER_ADMIN_TOKEN: z.optional(z.string()),
+        TOPOR_BALANCER_ORIGINAL_SUBSCRIPTION_URL: z.optional(z.string()),
         INTERNAL_JWT_SECRET: z.string(),
         EGAMES_COOKIE: z.optional(z.string()),
     })

@@ -47,6 +47,7 @@ const ADMIN_GROUPS_URL = '/api/topor-balancer/groups'
 const ADMIN_NODES_URL = '/api/topor-balancer/nodes'
 const ADMIN_ASSIGNMENTS_URL = '/api/topor-balancer/assignments'
 const ADMIN_REQUESTS_URL = '/api/topor-balancer/requests'
+const ADMIN_TRACES_URL = '/api/topor-balancer/diagnostics/traces'
 const DISCOVERY_API_URL = '/api/topor-balancer/discovery/remnawave'
 const DISCOVERY_SUBSCRIPTION_URL = '/api/topor-balancer/discovery/subscription'
 const DISCOVERY_IMPORT_URL = '/api/topor-balancer/discovery/import'
@@ -144,6 +145,26 @@ interface ToporBalancerRequest {
     responseFormat?: string
     shortUuid: string
     status?: string
+}
+
+interface SubscriptionTrace {
+    id: string
+    request: {
+        timestamp: string
+        shortUuid: string
+        userAgent?: string
+        flow: 'browser' | 'raw'
+    }
+    upstream: {
+        vlessLinksCount: number
+        unsupportedAppFallback: boolean
+    }
+    balancer: {
+        matchedTechnicalLinks: number
+        rewrittenLinksCount: number
+        status: string
+        unsupportedAppFallback: boolean
+    }
 }
 
 interface DiscoveredHost {
@@ -654,6 +675,7 @@ export function ToporBalancerAdminPage() {
     const [isGroupNodesLoading, setIsGroupNodesLoading] = useState(false)
     const [assignments, setAssignments] = useState<ToporBalancerAssignment[]>([])
     const [requests, setRequests] = useState<ToporBalancerRequest[]>([])
+    const [subscriptionTraces, setSubscriptionTraces] = useState<SubscriptionTrace[]>([])
     const [discoveredHosts, setDiscoveredHosts] = useState<DiscoveredHost[]>([])
     const [selectedHosts, setSelectedHosts] = useState<string[]>([])
     const [selectedGroupId, setSelectedGroupId] = useState<string | null>(null)
@@ -840,7 +862,7 @@ export function ToporBalancerAdminPage() {
         setErrorMessage('')
 
         try {
-            const [healthResponse, runtimeResponse, groupsResponse, nodesResponse, assignmentsResponse, requestsResponse, topologyResponse] =
+            const [healthResponse, runtimeResponse, groupsResponse, nodesResponse, assignmentsResponse, requestsResponse, tracesResponse, topologyResponse] =
                 await Promise.all([
                     fetchAdminJson<ToporBalancerHealth>(ADMIN_HEALTH_URL),
                     fetchAdminJson<RuntimeConfigHealth>(RUNTIME_CONFIG_HEALTH_URL),
@@ -848,6 +870,7 @@ export function ToporBalancerAdminPage() {
                     fetchAdminJson<ToporBalancerNode[]>(ADMIN_NODES_URL),
                     fetchAdminJson<ToporBalancerAssignment[]>(ADMIN_ASSIGNMENTS_URL),
                     fetchAdminJson<ToporBalancerRequest[]>(ADMIN_REQUESTS_URL),
+                    fetchAdminJson<SubscriptionTrace[]>(ADMIN_TRACES_URL),
                     fetchAdminJson<RemnawaveTopologySnapshot>(REMNAWAVE_TOPOLOGY_URL)
                 ])
 
@@ -865,6 +888,7 @@ export function ToporBalancerAdminPage() {
             setNodes(safeArray<ToporBalancerNode>(nodesResponse))
             setAssignments(safeArray<ToporBalancerAssignment>(assignmentsResponse).slice(0, 500))
             setRequests(safeArray<ToporBalancerRequest>(requestsResponse).slice(0, 500))
+            setSubscriptionTraces(safeArray<SubscriptionTrace>(tracesResponse).slice(0, 50))
             setTopology(topologyResponse)
             setSelectedGroupId((current) => current ?? nextGroups[0]?.id ?? null)
             setLastRefreshAt(new Date())
@@ -1825,6 +1849,7 @@ export function ToporBalancerAdminPage() {
                                                     <Badge variant="light">Исходящих VLESS: {subscriptionDiagnostics.outputLinksCount}</Badge>
                                                 </Group>
                                                 <DiagnosticsSummary result={subscriptionDiagnostics} />
+                                                <RecentSubscriptionTraces traces={subscriptionTraces} />
                                                 <Group justify="flex-end">
                                                     <Button leftSection={<IconDownload size={16} />} onClick={downloadSubscriptionDiagnostics} variant="light">
                                                         Скачать отчёт
@@ -2421,6 +2446,7 @@ export function ToporBalancerAdminPage() {
                                                             </Card>
                                                         </SimpleGrid>
                                                         <DiagnosticsSummary result={subscriptionDiagnostics} />
+                                                        <RecentSubscriptionTraces traces={subscriptionTraces} />
                                                         <Group justify="flex-end">
                                                             <Button leftSection={<IconDownload size={16} />} onClick={downloadSubscriptionDiagnostics} variant="light">
                                                                 Скачать отчёт
@@ -2959,6 +2985,53 @@ function GroupsTable({
                                             {texts.actions.delete}
                                         </Button>
                                     </Group>
+                                </Table.Td>
+                            </Table.Tr>
+                        ))}
+                    </Table.Tbody>
+                </Table>
+            </ScrollArea>
+        </Card>
+    )
+}
+
+function RecentSubscriptionTraces({ traces }: { traces: SubscriptionTrace[] }) {
+    if (traces.length === 0) {
+        return null
+    }
+
+    return (
+        <Card className={classes.tableCard} p={0} radius="md">
+            <ScrollArea>
+                <Table highlightOnHover>
+                    <Table.Thead>
+                        <Table.Tr>
+                            <Table.Th>Time</Table.Th>
+                            <Table.Th>shortUuid</Table.Th>
+                            <Table.Th>User-Agent</Table.Th>
+                            <Table.Th>Flow</Table.Th>
+                            <Table.Th>Upstream links</Table.Th>
+                            <Table.Th>Matched</Table.Th>
+                            <Table.Th>Rewritten</Table.Th>
+                            <Table.Th>Status</Table.Th>
+                            <Table.Th>Unsupported fallback</Table.Th>
+                        </Table.Tr>
+                    </Table.Thead>
+                    <Table.Tbody>
+                        {traces.map((trace) => (
+                            <Table.Tr key={trace.id}>
+                                <Table.Td>{formatDate(trace.request.timestamp)}</Table.Td>
+                                <Table.Td>{trace.request.shortUuid}</Table.Td>
+                                <Table.Td className={classes.wrapCell}>{trace.request.userAgent ?? '-'}</Table.Td>
+                                <Table.Td>{trace.request.flow}</Table.Td>
+                                <Table.Td>{trace.upstream.vlessLinksCount}</Table.Td>
+                                <Table.Td>{trace.balancer.matchedTechnicalLinks}</Table.Td>
+                                <Table.Td>{trace.balancer.rewrittenLinksCount}</Table.Td>
+                                <Table.Td>{trace.balancer.status}</Table.Td>
+                                <Table.Td>
+                                    <Badge color={trace.upstream.unsupportedAppFallback || trace.balancer.unsupportedAppFallback ? 'red' : 'green'} variant="light">
+                                        {trace.upstream.unsupportedAppFallback || trace.balancer.unsupportedAppFallback ? 'true' : 'false'}
+                                    </Badge>
                                 </Table.Td>
                             </Table.Tr>
                         ))}
