@@ -5,6 +5,7 @@ import type {
     ToporBalancerNode,
     ToporBalancerNodeStatus,
 } from './types';
+import { normalizeTechnicalHostName } from './topor-balancer-technical-host-name';
 
 const DEFAULT_NODE_WEIGHT = 1;
 const DEFAULT_NODE_MAX_USERS = 300;
@@ -117,7 +118,9 @@ function normalizeNode(
     }
 
     return {
-        technicalHostName: readRequiredString(node, 'technicalHostName', path, issues),
+        technicalHostName: normalizeTechnicalHostName(
+            readRequiredString(node, 'technicalHostName', path, issues),
+        ),
         weight: readOptionalPositiveInteger(
             node.weight,
             DEFAULT_NODE_WEIGHT,
@@ -265,7 +268,8 @@ function validateUniqueTechnicalHostNames(
                 return;
             }
 
-            const previousPath = seenTechnicalHostNames.get(node.technicalHostName);
+            const normalizedTechnicalHostName = normalizeTechnicalHostName(node.technicalHostName);
+            const previousPath = seenTechnicalHostNames.get(normalizedTechnicalHostName);
             const currentPath = `locations[${locationIndex}].nodes[${nodeIndex}].technicalHostName`;
 
             if (previousPath) {
@@ -273,7 +277,7 @@ function validateUniqueTechnicalHostNames(
                 return;
             }
 
-            seenTechnicalHostNames.set(node.technicalHostName, currentPath);
+            seenTechnicalHostNames.set(normalizedTechnicalHostName, currentPath);
         });
     });
 }

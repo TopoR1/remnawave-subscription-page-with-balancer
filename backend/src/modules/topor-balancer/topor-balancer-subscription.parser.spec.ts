@@ -137,6 +137,20 @@ function buildVlessLink(remark: string): string {
     );
 }
 
+function buildRemarkVlessLink(remark: string, index = 1): string {
+    return (
+        `vless://44444444-4444-4444-8444-${String(index).padStart(12, '0')}@node-${index}.example.com:443` +
+        `?security=reality&type=tcp&sni=example.com&pbk=key&sid=sid#${encodeURIComponent(remark)}`
+    );
+}
+
+function buildUnsupportedAppFallbackLink(): string {
+    return (
+        'vless://44444444-4444-4444-8444-444444444444@0.0.0.0:1' +
+        '?security=reality&type=tcp&sni=example.com&pbk=key&sid=sid#App%20not%20supported'
+    );
+}
+
 function buildStrategyConfig(
     strategy: ToporBalancerGroupStrategy,
     nodes: ToporBalancerNode[] = [
@@ -438,6 +452,128 @@ test('hash balancer processes same publicHostCode with different planCode indepe
     assert.equal(outputRemarks.includes('Finland Standard'), true);
     assert.equal(outputRemarks.includes('Finland Game'), true);
     assert.equal(outputRemarks.length, 2);
+});
+
+test('technicalHostName matching normalizes emoji, NFC, trailing and non-breaking spaces', () => {
+    const config: ToporBalancerConfig = {
+        enabled: true,
+        locations: [
+            {
+                publicHostCode: 'fi_standard',
+                publicName: 'Finland Standard Public',
+                locationCode: 'FI',
+                planCode: 'standard',
+                nodes: [
+                    {
+                        technicalHostName: '🇫🇮 Финляндия',
+                        weight: 1,
+                        maxUsers: 300,
+                        status: 'active',
+                    },
+                ],
+            },
+            {
+                publicHostCode: 'accent_standard',
+                publicName: 'Cafe Public',
+                locationCode: 'FI',
+                planCode: 'standard',
+                nodes: [
+                    {
+                        technicalHostName: 'Café',
+                        weight: 1,
+                        maxUsers: 300,
+                        status: 'active',
+                    },
+                ],
+            },
+            {
+                publicHostCode: 'space_standard',
+                publicName: 'Space Public',
+                locationCode: 'FI',
+                planCode: 'standard',
+                nodes: [
+                    {
+                        technicalHostName: 'Node Name',
+                        weight: 1,
+                        maxUsers: 300,
+                        status: 'active',
+                    },
+                ],
+            },
+        ],
+    };
+    const body = [
+        buildRemarkVlessLink('🇫🇮 Финляндия', 1),
+        buildRemarkVlessLink('Cafe\u0301', 2),
+        buildRemarkVlessLink('🇫🇮 Финляндия ', 3),
+        buildRemarkVlessLink('Node\u00A0Name', 4),
+        buildRemarkVlessLink('🇷🇺 Россия', 5),
+    ].join('\n');
+    const result = processSubscriptionWithHashBalancer({
+        shortUuid: 'unicode-user',
+        body,
+        config,
+    });
+    const outputRemarks = parseSubscription(result.body).links.map((link) => link.remark);
+
+    assert.equal(result.debugInfo.matchedTechnicalLinks, 4);
+    assert.equal(outputRemarks.includes('Finland Standard Public'), true);
+    assert.equal(outputRemarks.includes('Cafe Public'), true);
+    assert.equal(outputRemarks.includes('Space Public'), true);
+    assert.equal(outputRemarks.includes('🇷🇺 Россия'), true);
+});
+
+test('technicalHostName matching keeps Finland standard and game distinct', () => {
+    const config: ToporBalancerConfig = {
+        enabled: true,
+        locations: [
+            {
+                publicHostCode: 'fi_standard',
+                publicName: 'Finland Standard Public',
+                locationCode: 'FI',
+                planCode: 'standard',
+                nodes: [
+                    {
+                        technicalHostName: '🇫🇮 Финляндия',
+                        weight: 1,
+                        maxUsers: 300,
+                        status: 'active',
+                    },
+                ],
+            },
+            {
+                publicHostCode: 'fi_game',
+                publicName: 'Finland Game Public',
+                locationCode: 'FI',
+                planCode: 'game',
+                nodes: [
+                    {
+                        technicalHostName: '🇫🇮 Финляндия (Game)',
+                        weight: 1,
+                        maxUsers: 300,
+                        status: 'active',
+                    },
+                ],
+            },
+        ],
+    };
+    const body = [
+        buildRemarkVlessLink('🇫🇮 Финляндия', 1),
+        buildRemarkVlessLink('🇫🇮 Финляндия (Game)', 2),
+    ].join('\n');
+    const result = processSubscriptionWithHashBalancer({
+        shortUuid: 'distinct-user',
+        body,
+        config,
+    });
+    const outputRemarks = parseSubscription(result.body).links.map((link) => link.remark);
+
+    assert.deepEqual(result.debugInfo.selectedNodes, {
+        'fi_standard:standard': '🇫🇮 Финляндия',
+        'fi_game:game': '🇫🇮 Финляндия (Game)',
+    });
+    assert.equal(outputRemarks.includes('Finland Standard Public'), true);
+    assert.equal(outputRemarks.includes('Finland Game Public'), true);
 });
 
 test('hash balancer preserves original links when no active node exists', () => {
@@ -916,6 +1052,108 @@ test('subscription diagnostics validates generated VLESS links without exposing 
     assert.ok(!serializedResult.includes('sid=abcd'));
 });
 
+test('subscription diagnostics explains unmatched remarks and normalized technicalHostName comparison', async () => {
+    const config: ToporBalancerConfig = {
+        enabled: true,
+        locations: [
+            {
+                publicHostCode: 'de_standard',
+                publicName: '🇩🇪 Германия',
+                locationCode: 'DE',
+                planCode: 'standard',
+                nodes: [
+                    {
+                        technicalHostName: '🇩🇪 Германия',
+                        weight: 1,
+                        maxUsers: 300,
+                        status: 'active',
+                    },
+                ],
+            },
+            {
+                publicHostCode: 'fi_standard',
+                publicName: '🇫🇮 ФинляндияРРРР',
+                locationCode: 'FI',
+                planCode: 'standard',
+                nodes: [
+                    {
+                        technicalHostName: '🇫🇮 Финляндия',
+                        weight: 1,
+                        maxUsers: 300,
+                        status: 'active',
+                    },
+                ],
+            },
+            {
+                publicHostCode: 'nl_standard',
+                publicName: '🇳🇱 Нидерланды',
+                locationCode: 'NL',
+                planCode: 'standard',
+                nodes: [
+                    {
+                        technicalHostName: '🇳🇱 Нидерланды',
+                        weight: 1,
+                        maxUsers: 300,
+                        status: 'active',
+                    },
+                ],
+            },
+        ],
+    };
+    const repository = InMemoryToporBalancerRepository.fromConfig(config);
+    const diagnosticBody = [
+        buildRemarkVlessLink('🇩🇪 Германия', 1),
+        buildRemarkVlessLink('🇫🇮 Финляндия', 2),
+        buildRemarkVlessLink('🇳🇱 Нидерланды', 3),
+        buildRemarkVlessLink('🇷🇺 Россия', 4),
+    ].join('\n');
+    const service = new ToporBalancerService(
+        createConfigServiceStub({
+            TOPOR_BALANCER_ASSIGNMENT_MODE: 'database',
+            TOPOR_BALANCER_DATABASE_URL: 'postgres://unit-test',
+            TOPOR_BALANCER_DEBUG: false,
+        }),
+        ({
+            getSubscription: async () => ({
+                response: diagnosticBody,
+                headers: {
+                    'content-type': 'text/plain',
+                },
+            }),
+        } as unknown) as AxiosService,
+    );
+
+    setServiceRepository(service, repository);
+
+    const result = await service.diagnoseSubscription({
+        shortUuid: 'diagnostic-russian-user',
+        userAgent: 'v2raytun/windows',
+    });
+    const outputRemarks = result.matchedGroups.flatMap((group) => group.outputRemarks);
+    const russiaDiagnostic = result.linkDiagnostics.find(
+        (diagnostic) => diagnostic.visibleRemark === '🇷🇺 Россия',
+    );
+    const finlandGroup = result.matchedGroups.find(
+        (group) => group.publicHostCode === 'fi_standard',
+    );
+
+    assert.equal(result.totalVlessLinks, 4);
+    assert.equal(result.matchedTechnicalLinks, 3);
+    assert.deepEqual(result.unmatchedRemarks, ['🇷🇺 Россия']);
+    assert.equal(result.matchedGroups.length, 3);
+    assert.ok(finlandGroup);
+    assert.equal(finlandGroup.outputContainsPublicName, true);
+    assert.equal(outputRemarks.includes('🇫🇮 ФинляндияРРРР'), true);
+    assert.ok(russiaDiagnostic);
+    assert.equal(russiaDiagnostic.matchesTechnicalHostName, false);
+    assert.equal(russiaDiagnostic.normalizedRemark, '🇷🇺 Россия');
+    assert.equal(russiaDiagnostic.reason, 'exact_mismatch');
+    assert.equal(
+        russiaDiagnostic.closestTechnicalHostNameCandidates.includes('🇫🇮 Финляндия'),
+        true,
+    );
+});
+
 test('subscription diagnostics reports invalid generated VLESS links', async () => {
     const repository = InMemoryToporBalancerRepository.fromConfig(balancerConfig);
     const service = new ToporBalancerService(
@@ -980,11 +1218,60 @@ test('subscription diagnostics reports passed through when technicalHostName doe
     assert.equal(result.rewrittenLinksCount, 0);
     assert.equal(result.unchangedLinksCount, 1);
     assert.deepEqual(result.unmatchedRemarks, ['REMNAWAVE-OLD-REMARK']);
-    assert.equal(result.reasons[0].reason, 'technicalHostName_mismatch');
+    assert.equal(result.reasons[0].reason, 'exact_mismatch');
+    assert.equal(result.linkDiagnostics[0].reason, 'exact_mismatch');
     assert.ok(
         result.warnings.some((warning) =>
             warning.includes('Не найдено совпадений technicalHostName'),
         ),
+    );
+});
+
+test('subscription diagnostics detects unsupported app fallback without technicalHostName suggestions', async () => {
+    const repository = InMemoryToporBalancerRepository.fromConfig(balancerConfig);
+    const service = new ToporBalancerService(
+        createConfigServiceStub({
+            TOPOR_BALANCER_ASSIGNMENT_MODE: 'database',
+            TOPOR_BALANCER_DATABASE_URL: 'postgres://unit-test',
+            TOPOR_BALANCER_DEBUG: false,
+        }),
+        ({
+            getSubscription: async () => ({
+                response: buildUnsupportedAppFallbackLink(),
+                headers: {
+                    'content-type': 'text/plain',
+                },
+            }),
+        } as unknown) as AxiosService,
+    );
+
+    setServiceRepository(service, repository);
+
+    const result = await service.diagnoseSubscription({
+        shortUuid: 'unsupported-app-user',
+        userAgent: 'UnknownClient/1.0',
+    });
+
+    assert.equal(result.ok, false);
+    assert.equal(result.status, 'unsupported_app');
+    assert.equal(result.totalVlessLinks, 1);
+    assert.equal(result.matchedTechnicalLinks, 0);
+    assert.deepEqual(result.unmatchedRemarks, []);
+    assert.equal(result.linkDiagnostics[0].visibleRemark, 'App not supported');
+    assert.equal(result.linkDiagnostics[0].reason, 'unsupported_app');
+    assert.equal(result.linkDiagnostics[0].closestTechnicalHostNameCandidates.length, 0);
+    assert.equal(repository.assignments.size, 0);
+    assert.equal(
+        result.warnings.some((warning) =>
+            warning.includes('Добавьте') || warning.includes('Add these remarks'),
+        ),
+        false,
+    );
+    assert.equal(
+        result.warnings.some((warning) =>
+            warning.includes('Remnawave вернул заглушку App not supported'),
+        ),
+        true,
     );
 });
 

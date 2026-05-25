@@ -15,9 +15,11 @@ import {
     detectSubscriptionFormat,
     encodeSubscriptionBody,
     extractVlessLinks,
+    isUnsupportedAppFallback,
     parseVlessLink,
     replaceVlessRemark,
 } from './topor-balancer-subscription.parser';
+import { normalizeTechnicalHostName } from './topor-balancer-technical-host-name';
 
 export interface ProcessSubscriptionWithDatabaseBalancerInput {
     shortUuid: string;
@@ -40,6 +42,7 @@ export interface ToporBalancerRuntimeUserAccess {
 
 interface TechnicalNodeRef {
     location: ToporBalancerLocation;
+    node: ToporBalancerLocation['nodes'][number];
 }
 
 interface MatchingLine {
@@ -88,6 +91,12 @@ export async function processSubscriptionWithDatabaseBalancer(
     }
 
     const plainBody = decodeSubscriptionBody(input.body, format);
+    const inputLinks = extractVlessLinks(plainBody);
+
+    if (isUnsupportedAppFallback(inputLinks)) {
+        return buildUnsupportedAppResult(input, format, plainBody);
+    }
+
     const technicalNodeMap = buildTechnicalNodeMap(input.config);
     const matchingLines = collectMatchingLines(plainBody, technicalNodeMap);
     const selection = await selectNodesByPublicGroupKey(input, matchingLines);
@@ -123,6 +132,40 @@ export async function processSubscriptionWithDatabaseBalancer(
     };
 }
 
+async function buildUnsupportedAppResult(
+    input: ProcessSubscriptionWithDatabaseBalancerInput,
+    format: SubscriptionFormat,
+    plainBody: string,
+): Promise<ToporBalancerProcessResult> {
+    const debugInfo: ToporBalancerDebugInfo = {
+        shortUuid: input.shortUuid,
+        requestPath: input.requestPath,
+        userAgent: input.userAgent,
+        detectedFormat: format,
+        totalVlessLinks: extractVlessLinks(plainBody).length,
+        matchedTechnicalLinks: 0,
+        selectedNodes: {},
+        outputLinkCount: extractVlessLinks(plainBody).length,
+        warnings: ['Remnawave returned App not supported fallback.'],
+    };
+
+    await input.repository.recordRequest({
+        shortUuid: input.shortUuid,
+        userAgent: input.userAgent,
+        responseFormat: format,
+        inputLinksCount: debugInfo.totalVlessLinks,
+        outputLinksCount: debugInfo.outputLinkCount,
+        status: 'unsupported_app',
+    });
+
+    logDebugInfo(input, debugInfo);
+
+    return {
+        body: input.body,
+        debugInfo,
+    };
+}
+
 function buildUnchangedResult(
     input: ProcessSubscriptionWithDatabaseBalancerInput,
     format: SubscriptionFormat,
@@ -151,8 +194,9 @@ function buildTechnicalNodeMap(config: ToporBalancerConfig): Map<string, Technic
 
     for (const location of config.locations) {
         for (const node of location.nodes) {
-            technicalNodeMap.set(node.technicalHostName, {
+            technicalNodeMap.set(normalizeTechnicalHostName(node.technicalHostName), {
                 location,
+                node,
             });
         }
     }
@@ -173,7 +217,7 @@ function collectMatchingLines(
             continue;
         }
 
-        const nodeRef = technicalNodeMap.get(parsedLink.remark);
+        const nodeRef = technicalNodeMap.get(normalizeTechnicalHostName(parsedLink.remark));
 
         if (!nodeRef) {
             continue;
@@ -212,8 +256,8 @@ async function selectNodesByPublicGroupKey(
         const subscriptionCandidateTechnicalHostNames = Array.from(
             new Set(
                 group
-                    .map((matchingLine) => matchingLine.parsedLink.remark)
-                    .filter((remark): remark is string => Boolean(remark)),
+                    .map((matchingLine) => matchingLine.nodeRef.node.technicalHostName)
+                    .filter((technicalHostName) => Boolean(technicalHostName)),
             ),
         );
         const accessResult = filterCandidatesByUserAccess({
@@ -302,14 +346,17 @@ function filterCandidatesByUserAccess(input: {
     const userSquadUuids = new Set(input.input.userAccess?.squads.map((squad) => squad.uuid) ?? []);
     const userAccessibleNodeUuids = new Set(input.input.userAccess?.accessibleNodeUuids ?? []);
     const hostByRemark = new Map(
-        (input.input.topology?.hosts ?? []).map((host) => [host.remark, host]),
+        (input.input.topology?.hosts ?? []).map((host) => [
+            normalizeTechnicalHostName(host.remark),
+            host,
+        ]),
     );
     const warnings: string[] = [];
     const effectiveCandidateTechnicalHostNames: string[] = [];
     const excludedNodes: ExcludedCandidateNode[] = [];
 
     for (const technicalHostName of input.candidateTechnicalHostNames) {
-        const host = hostByRemark.get(technicalHostName);
+        const host = hostByRemark.get(normalizeTechnicalHostName(technicalHostName));
 
         if (!host) {
             const message = `Candidate ${technicalHostName} has no Remnawave topology host; excluded for user-aware balancing.`;
@@ -391,11 +438,17 @@ function buildExcludedCandidateNodes(input: {
     const excludedByName = new Map(
         input.accessExcludedNodes.map((node) => [node.technicalHostName, node]),
     );
-    const subscriptionCandidateNames = new Set(input.subscriptionCandidateTechnicalHostNames);
-    const effectiveCandidateNames = new Set(input.effectiveCandidateTechnicalHostNames);
+    const subscriptionCandidateNames = new Set(
+        input.subscriptionCandidateTechnicalHostNames.map(normalizeTechnicalHostName),
+    );
+    const effectiveCandidateNames = new Set(
+        input.effectiveCandidateTechnicalHostNames.map(normalizeTechnicalHostName),
+    );
 
     for (const node of input.location.nodes) {
-        if (effectiveCandidateNames.has(node.technicalHostName)) {
+        const normalizedTechnicalHostName = normalizeTechnicalHostName(node.technicalHostName);
+
+        if (effectiveCandidateNames.has(normalizedTechnicalHostName)) {
             continue;
         }
 
@@ -403,7 +456,7 @@ function buildExcludedCandidateNodes(input: {
             continue;
         }
 
-        if (!subscriptionCandidateNames.has(node.technicalHostName)) {
+        if (!subscriptionCandidateNames.has(normalizedTechnicalHostName)) {
             excludedByName.set(node.technicalHostName, {
                 technicalHostName: node.technicalHostName,
                 reason: 'not_in_subscription',
@@ -432,7 +485,7 @@ function filterSubscriptionBody(
             continue;
         }
 
-        const nodeRef = technicalNodeMap.get(parsedLink.remark);
+        const nodeRef = technicalNodeMap.get(normalizeTechnicalHostName(parsedLink.remark));
 
         if (!nodeRef) {
             outputLines.push(line);
@@ -447,7 +500,10 @@ function filterSubscriptionBody(
             continue;
         }
 
-        if (parsedLink.remark !== selectedNode.technicalHostName) {
+        if (
+            normalizeTechnicalHostName(parsedLink.remark) !==
+            normalizeTechnicalHostName(selectedNode.technicalHostName)
+        ) {
             continue;
         }
 

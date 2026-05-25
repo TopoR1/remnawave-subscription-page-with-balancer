@@ -15,9 +15,11 @@ import {
     detectSubscriptionFormat,
     encodeSubscriptionBody,
     extractVlessLinks,
+    isUnsupportedAppFallback,
     parseVlessLink,
     replaceVlessRemark,
 } from './topor-balancer-subscription.parser';
+import { normalizeTechnicalHostName } from './topor-balancer-technical-host-name';
 
 export interface ProcessSubscriptionWithHashBalancerInput {
     shortUuid: string;
@@ -84,6 +86,12 @@ export function processSubscriptionWithHashBalancer(
     }
 
     const plainBody = decodeSubscriptionBody(input.body, format);
+    const inputLinks = extractVlessLinks(plainBody);
+
+    if (isUnsupportedAppFallback(inputLinks)) {
+        return buildUnsupportedAppResult(input, format, plainBody);
+    }
+
     const technicalNodeMap = buildTechnicalNodeMap(input.config);
     const matchingLines = collectMatchingLines(plainBody, technicalNodeMap);
     const selectedByPublicGroupKey = selectNodesByPublicGroupKey(input.shortUuid, matchingLines);
@@ -108,6 +116,31 @@ export function processSubscriptionWithHashBalancer(
 
     return {
         body: outputBody,
+        debugInfo,
+    };
+}
+
+function buildUnsupportedAppResult(
+    input: ProcessSubscriptionWithHashBalancerInput,
+    format: SubscriptionFormat,
+    plainBody: string,
+): ToporBalancerProcessResult {
+    const debugInfo: ToporBalancerDebugInfo = {
+        shortUuid: input.shortUuid,
+        requestPath: input.requestPath,
+        userAgent: input.userAgent,
+        detectedFormat: format,
+        totalVlessLinks: extractVlessLinks(plainBody).length,
+        matchedTechnicalLinks: 0,
+        selectedNodes: {},
+        outputLinkCount: extractVlessLinks(plainBody).length,
+        warnings: ['Remnawave returned App not supported fallback.'],
+    };
+
+    logDebugInfo(input, debugInfo);
+
+    return {
+        body: input.body,
         debugInfo,
     };
 }
@@ -140,7 +173,7 @@ function buildTechnicalNodeMap(config: ToporBalancerConfig): Map<string, Technic
 
     for (const location of config.locations) {
         for (const node of location.nodes) {
-            technicalNodeMap.set(node.technicalHostName, {
+            technicalNodeMap.set(normalizeTechnicalHostName(node.technicalHostName), {
                 location,
                 node,
             });
@@ -163,7 +196,7 @@ function collectMatchingLines(
             continue;
         }
 
-        const nodeRef = technicalNodeMap.get(parsedLink.remark);
+        const nodeRef = technicalNodeMap.get(normalizeTechnicalHostName(parsedLink.remark));
 
         if (!nodeRef) {
             continue;
@@ -313,7 +346,7 @@ function filterSubscriptionBody(
             continue;
         }
 
-        const nodeRef = technicalNodeMap.get(parsedLink.remark);
+        const nodeRef = technicalNodeMap.get(normalizeTechnicalHostName(parsedLink.remark));
 
         if (!nodeRef) {
             outputLines.push(line);
@@ -328,7 +361,10 @@ function filterSubscriptionBody(
             continue;
         }
 
-        if (parsedLink.remark !== selectedNodeRef.node.technicalHostName) {
+        if (
+            normalizeTechnicalHostName(parsedLink.remark) !==
+            normalizeTechnicalHostName(selectedNodeRef.node.technicalHostName)
+        ) {
             continue;
         }
 

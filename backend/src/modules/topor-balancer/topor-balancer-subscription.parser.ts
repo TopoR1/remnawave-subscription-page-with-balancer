@@ -80,6 +80,15 @@ export function extractVlessLinks(subscriptionBody: string): ParsedVlessLink[] {
         .filter((link): link is ParsedVlessLink => link !== null);
 }
 
+export function isUnsupportedAppFallback(links: ParsedVlessLink[]): boolean {
+    return (
+        links.length === 1 &&
+        links[0].host === '0.0.0.0' &&
+        links[0].port === 1 &&
+        links[0].remark === 'App not supported'
+    );
+}
+
 export function parseVlessLink(link: string): ParsedVlessLink | null {
     if (!link.startsWith('vless://')) {
         return null;

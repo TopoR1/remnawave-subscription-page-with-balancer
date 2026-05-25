@@ -161,7 +161,8 @@ export type ToporBalancerSubscriptionDiagnosticsStatus =
     | 'failed_open'
     | 'partially_processed'
     | 'passed_through'
-    | 'processed';
+    | 'processed'
+    | 'unsupported_app';
 
 export type ToporBalancerSubscriptionDiagnosticsGroupStatus =
     | 'fail-open'
@@ -171,12 +172,41 @@ export type ToporBalancerSubscriptionDiagnosticsGroupStatus =
     | 'partial';
 
 export type ToporBalancerSubscriptionDiagnosticsUnchangedReason =
+    | 'exact_mismatch'
     | 'format_unsupported'
     | 'group_disabled'
+    | 'invisible_characters'
+    | 'leading_trailing_whitespace'
     | 'no_active_node'
     | 'no_accessible_candidates'
     | 'no_selected_node'
-    | 'technicalHostName_mismatch';
+    | 'node_inactive'
+    | 'not_configured'
+    | 'technicalHostName_mismatch'
+    | 'unsupported_app'
+    | 'unicode_normalization_mismatch';
+
+export interface ToporBalancerSubscriptionLinkDiagnostic {
+    visibleRemark?: string;
+    normalizedRemark?: string;
+    remarkLength: number;
+    matchesTechnicalHostName: boolean;
+    matchedTechnicalHostName?: string;
+    matchedPublicHostCode?: string;
+    matchedPlanCode?: string;
+    configuredTechnicalHostNames: string[];
+    closestTechnicalHostNameCandidates: string[];
+    reason?:
+        | 'exact_mismatch'
+        | 'group_disabled'
+        | 'invisible_characters'
+        | 'leading_trailing_whitespace'
+        | 'node_inactive'
+        | 'not_configured'
+        | 'unsupported_app'
+        | 'unicode_normalization_mismatch';
+    normalizedComparisonResult: 'matched' | 'not_matched';
+}
 
 export interface ToporBalancerSubscriptionDiagnosticsResult {
     ok: boolean;
@@ -187,6 +217,7 @@ export interface ToporBalancerSubscriptionDiagnosticsResult {
     userSquads: Array<{ name: string; uuid: string }>;
     accessibleNodesCount: number;
     unmatchedRemarks: string[];
+    linkDiagnostics: ToporBalancerSubscriptionLinkDiagnostic[];
     matchedGroups: Array<{
         publicHostCode: string;
         planCode: string;

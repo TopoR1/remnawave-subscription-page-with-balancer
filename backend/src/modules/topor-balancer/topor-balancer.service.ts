@@ -58,9 +58,15 @@ import {
     decodeSubscriptionBody,
     detectSubscriptionFormat,
     extractVlessLinks,
+    isUnsupportedAppFallback,
     parseVlessLink,
 } from './topor-balancer-subscription.parser';
 import { buildMaskedVlessDiff } from './topor-balancer-subscription.diagnostics';
+import {
+    getClosestTechnicalHostNameCandidates,
+    getTechnicalHostNameMismatchReason,
+    normalizeTechnicalHostName,
+} from './topor-balancer-technical-host-name';
 
 interface ToporBalancerProcessInput {
     shortUuid: string;
@@ -421,7 +427,7 @@ export class ToporBalancerService implements OnModuleDestroy, OnModuleInit {
             maxUsers: input.maxUsers ?? 300,
             priority: input.priority ?? 100,
             status: input.status ?? 'active',
-            technicalHostName: input.technicalHostName.trim(),
+            technicalHostName: this.normalizeTechnicalHostName(input.technicalHostName),
             weight: input.weight ?? 1,
         });
 
@@ -447,7 +453,13 @@ export class ToporBalancerService implements OnModuleDestroy, OnModuleInit {
             weight: input.weight,
         });
 
-        const node = await this.getAdminRepository().updateGroupNode(groupId, nodeId, input);
+        const node = await this.getAdminRepository().updateGroupNode(groupId, nodeId, {
+            ...input,
+            technicalHostName:
+                input.technicalHostName === undefined
+                    ? undefined
+                    : this.normalizeTechnicalHostName(input.technicalHostName),
+        });
 
         if (!node) {
             throw new NotFoundException('TopoR balancer group node not found');
@@ -577,7 +589,7 @@ export class ToporBalancerService implements OnModuleDestroy, OnModuleInit {
 
         const node = await this.getAdminRepository().createNode({
             ...input,
-            technicalHostName: input.technicalHostName.trim(),
+            technicalHostName: this.normalizeTechnicalHostName(input.technicalHostName),
             publicHostCode: input.publicHostCode.trim(),
             publicName: input.publicName.trim(),
             locationCode: this.normalizeOptionalString(input.locationCode),
@@ -599,7 +611,10 @@ export class ToporBalancerService implements OnModuleDestroy, OnModuleInit {
 
         const node = await this.getAdminRepository().updateNode(id, {
             ...input,
-            technicalHostName: this.normalizeOptionalString(input.technicalHostName),
+            technicalHostName:
+                input.technicalHostName === undefined
+                    ? undefined
+                    : this.normalizeTechnicalHostName(input.technicalHostName),
             publicHostCode: this.normalizeOptionalString(input.publicHostCode),
             publicName: this.normalizeOptionalString(input.publicName),
             locationCode:
@@ -695,7 +710,7 @@ export class ToporBalancerService implements OnModuleDestroy, OnModuleInit {
         const errors: ToporBalancerDiscoveryImportResult['errors'] = [];
         const conflicts: ToporBalancerDiscoveryImportResult['conflicts'] = [];
         const normalizedNodes = input.nodes.map((node) => ({
-            technicalHostName: node.technicalHostName.trim(),
+            technicalHostName: this.normalizeTechnicalHostName(node.technicalHostName),
             weight: node.weight,
             maxUsers: node.maxUsers,
             priority: node.priority ?? 100,
@@ -895,6 +910,7 @@ export class ToporBalancerService implements OnModuleDestroy, OnModuleInit {
                 userSquads: [],
                 accessibleNodesCount: 0,
                 unmatchedRemarks: [],
+                linkDiagnostics: [],
                 matchedGroups: [],
                 selectedNodes: {},
                 rewrittenLinksCount: 0,
@@ -995,6 +1011,7 @@ export class ToporBalancerService implements OnModuleDestroy, OnModuleInit {
         const outputLinks = extractVlessLinks(outputPlainBody);
         const inputLinksCount = inputLinks.length;
         const outputLinksCount = outputLinks.length;
+        const unsupportedAppFallback = isUnsupportedAppFallback(inputLinks);
         const vlessValidation = this.validateGeneratedVlessLinks(outputPlainBody);
         const maskedDiff = buildMaskedVlessDiff(inputPlainBody, outputPlainBody);
         const processingProof = this.buildSubscriptionProcessingProof({
@@ -1002,6 +1019,7 @@ export class ToporBalancerService implements OnModuleDestroy, OnModuleInit {
             groupCandidateDiagnostics: result.debugInfo.groupCandidateDiagnostics ?? [],
             inputFormat,
             inputLinks,
+            unsupportedAppFallback,
             outputLinks,
             processingFailed,
             selectedNodes: result.debugInfo.selectedNodes,
@@ -1009,6 +1027,12 @@ export class ToporBalancerService implements OnModuleDestroy, OnModuleInit {
 
         warnings.push(...(result.debugInfo.warnings ?? []));
         warnings.push(...processingProof.warnings);
+
+        if (unsupportedAppFallback) {
+            warnings.push(
+                'Remnawave вернул заглушку App not supported. Проверьте User-Agent клиента и настройки приложений в Subscription Page.',
+            );
+        }
 
         if (inputFormat === 'base64_links' && outputFormat !== 'base64_links') {
             errors.push('Base64-ответ подписки не удалось корректно декодировать.');
@@ -1035,6 +1059,7 @@ export class ToporBalancerService implements OnModuleDestroy, OnModuleInit {
             totalVlessLinks: inputLinksCount,
             matchedTechnicalLinks: processingProof.matchedTechnicalLinks,
             unmatchedRemarks: processingProof.unmatchedRemarks,
+            linkDiagnostics: processingProof.linkDiagnostics,
             matchedGroups: processingProof.matchedGroups,
             selectedNodes: result.debugInfo.selectedNodes,
             userSquads: result.debugInfo.userSquads ?? [],
@@ -1138,11 +1163,13 @@ export class ToporBalancerService implements OnModuleDestroy, OnModuleInit {
         groupCandidateDiagnostics: NonNullable<ToporBalancerDebugInfo['groupCandidateDiagnostics']>;
         inputFormat: ReturnType<typeof detectSubscriptionFormat>;
         inputLinks: ReturnType<typeof extractVlessLinks>;
+        unsupportedAppFallback: boolean;
         outputLinks: ReturnType<typeof extractVlessLinks>;
         processingFailed: boolean;
         selectedNodes: Record<string, string>;
     }): {
         matchedGroups: ToporBalancerSubscriptionDiagnosticsResult['matchedGroups'];
+        linkDiagnostics: ToporBalancerSubscriptionDiagnosticsResult['linkDiagnostics'];
         matchedTechnicalLinks: number;
         status: ToporBalancerSubscriptionDiagnosticsStatus;
         unchangedLinksCount: number;
@@ -1155,11 +1182,67 @@ export class ToporBalancerService implements OnModuleDestroy, OnModuleInit {
             input.outputLinks.map((link) => [this.buildDiagnosticsStableLinkKey(link), link]),
         );
         const technicalGroupByName = new Map<string, ToporBalancerDiagnosticsGroupSource>();
+        const technicalNodeByName = new Map<
+            string,
+            {
+                group: ToporBalancerDiagnosticsGroupSource;
+                technicalHostName: string;
+                status: ToporBalancerNodeStatus;
+            }
+        >();
         const unchangedReasons: ToporBalancerDiagnosticsUnchangedReasonDetail[] = [];
+        const configuredTechnicalHostNames = input.groups.flatMap((group) =>
+            group.nodes.map((node) => node.technicalHostName),
+        );
+
+        if (input.unsupportedAppFallback) {
+            const fallbackLink = input.inputLinks[0];
+
+            return {
+                matchedGroups: [],
+                linkDiagnostics: [
+                    {
+                        visibleRemark: fallbackLink.remark,
+                        normalizedRemark: fallbackLink.remark,
+                        remarkLength: fallbackLink.remark?.length ?? 0,
+                        matchesTechnicalHostName: false,
+                        configuredTechnicalHostNames,
+                        closestTechnicalHostNameCandidates: [],
+                        reason: 'unsupported_app',
+                        normalizedComparisonResult: 'not_matched',
+                    },
+                ],
+                matchedTechnicalLinks: 0,
+                status: 'unsupported_app',
+                unchangedLinksCount: 1,
+                unchangedReasons: [
+                    {
+                        reason: 'unsupported_app',
+                        remark: fallbackLink.remark,
+                        message:
+                            'Remnawave returned App not supported fallback; check client User-Agent and Subscription Page app settings.',
+                    },
+                ],
+                unmatchedRemarks: [],
+                warnings: [
+                    'Remnawave returned App not supported fallback; check client User-Agent and Subscription Page app settings.',
+                ],
+                rewrittenLinksCount: 0,
+            };
+        }
 
         for (const group of input.groups) {
             for (const node of group.nodes) {
-                technicalGroupByName.set(node.technicalHostName, group);
+                const normalizedTechnicalHostName = normalizeTechnicalHostName(
+                    node.technicalHostName,
+                );
+
+                technicalGroupByName.set(normalizedTechnicalHostName, group);
+                technicalNodeByName.set(normalizedTechnicalHostName, {
+                    group,
+                    status: node.status,
+                    technicalHostName: node.technicalHostName,
+                });
             }
         }
 
@@ -1168,11 +1251,18 @@ export class ToporBalancerService implements OnModuleDestroy, OnModuleInit {
         let matchedTechnicalLinks = 0;
 
         const unmatchedRemarks = new Set<string>();
+        const linkDiagnostics: ToporBalancerSubscriptionDiagnosticsResult['linkDiagnostics'] = [];
 
         for (const inputLink of input.inputLinks) {
             const outputLink = outputByStableKey.get(this.buildDiagnosticsStableLinkKey(inputLink));
             const remark = inputLink.remark;
-            const matchingGroup = remark ? technicalGroupByName.get(remark) : undefined;
+            const normalizedRemark = remark ? normalizeTechnicalHostName(remark) : undefined;
+            const matchingNode = normalizedRemark
+                ? technicalNodeByName.get(normalizedRemark)
+                : undefined;
+            const matchingGroup = normalizedRemark
+                ? technicalGroupByName.get(normalizedRemark)
+                : undefined;
 
             if (outputLink?.remark === inputLink.remark) {
                 unchangedLinksCount += 1;
@@ -1182,15 +1272,57 @@ export class ToporBalancerService implements OnModuleDestroy, OnModuleInit {
 
             if (matchingGroup) {
                 matchedTechnicalLinks += 1;
+                linkDiagnostics.push({
+                    ...(remark ? { visibleRemark: remark, normalizedRemark } : {}),
+                    remarkLength: remark?.length ?? 0,
+                    matchesTechnicalHostName: true,
+                    matchedTechnicalHostName: matchingNode?.technicalHostName,
+                    matchedPublicHostCode: matchingGroup.publicHostCode,
+                    matchedPlanCode: matchingGroup.planCode,
+                    configuredTechnicalHostNames,
+                    closestTechnicalHostNameCandidates: [],
+                    normalizedComparisonResult: 'matched',
+                    ...(!matchingGroup.enabled
+                        ? { reason: 'group_disabled' as const }
+                        : matchingNode?.status !== 'active'
+                          ? { reason: 'node_inactive' as const }
+                          : {}),
+                });
                 continue;
             }
 
             if (remark) {
+                const closestTechnicalHostNameCandidates =
+                    getClosestTechnicalHostNameCandidates(remark, configuredTechnicalHostNames);
+                const reason = getTechnicalHostNameMismatchReason(
+                    remark,
+                    configuredTechnicalHostNames,
+                );
+
                 unmatchedRemarks.add(remark);
                 unchangedReasons.push({
-                    reason: 'technicalHostName_mismatch',
+                    reason,
                     remark,
-                    message: `VLESS remark "${remark}" does not match any Balancer technicalHostName.`,
+                    message: `VLESS remark "${remark}" normalized as "${normalizedRemark}" does not match any Balancer technicalHostName. Configured technicalHostNames: ${configuredTechnicalHostNames.join(', ') || '-'}. Closest candidates: ${closestTechnicalHostNameCandidates.join(', ') || '-'}.`,
+                });
+                linkDiagnostics.push({
+                    visibleRemark: remark,
+                    normalizedRemark,
+                    remarkLength: remark.length,
+                    matchesTechnicalHostName: false,
+                    configuredTechnicalHostNames,
+                    closestTechnicalHostNameCandidates,
+                    reason,
+                    normalizedComparisonResult: 'not_matched',
+                });
+            } else {
+                linkDiagnostics.push({
+                    remarkLength: 0,
+                    matchesTechnicalHostName: false,
+                    configuredTechnicalHostNames,
+                    closestTechnicalHostNameCandidates: configuredTechnicalHostNames.slice(0, 3),
+                    reason: 'not_configured',
+                    normalizedComparisonResult: 'not_matched',
                 });
             }
         }
@@ -1206,7 +1338,13 @@ export class ToporBalancerService implements OnModuleDestroy, OnModuleInit {
             .map((group) => {
                 const technicalHostNames = group.nodes.map((node) => node.technicalHostName);
                 const matchedInputLinks = input.inputLinks.filter(
-                    (link) => link.remark !== undefined && technicalHostNames.includes(link.remark),
+                    (link) =>
+                        link.remark !== undefined &&
+                        technicalHostNames.some(
+                            (technicalHostName) =>
+                                normalizeTechnicalHostName(technicalHostName) ===
+                                normalizeTechnicalHostName(link.remark ?? ''),
+                        ),
                 );
 
                 if (matchedInputLinks.length === 0) {
@@ -1304,6 +1442,7 @@ export class ToporBalancerService implements OnModuleDestroy, OnModuleInit {
 
         return {
             matchedGroups,
+            linkDiagnostics,
             matchedTechnicalLinks,
             status: this.resolveDiagnosticsStatus({
                 matchedGroups,
@@ -1335,10 +1474,15 @@ export class ToporBalancerService implements OnModuleDestroy, OnModuleInit {
         }
 
         const nodeByTechnicalHostName = new Map(
-            input.group.nodes.map((node) => [node.technicalHostName, node]),
+            input.group.nodes.map((node) => [
+                normalizeTechnicalHostName(node.technicalHostName),
+                node,
+            ]),
         );
         const matchedActiveLinks = input.matchedInputLinks.filter((link) => {
-            const node = link.remark ? nodeByTechnicalHostName.get(link.remark) : undefined;
+            const node = link.remark
+                ? nodeByTechnicalHostName.get(normalizeTechnicalHostName(link.remark))
+                : undefined;
 
             return node?.status === 'active';
         });
@@ -1435,7 +1579,8 @@ export class ToporBalancerService implements OnModuleDestroy, OnModuleInit {
         const inputRemarks = new Set(
             extractVlessLinks(inputPlainBody)
                 .map((link) => link.remark)
-                .filter((remark): remark is string => Boolean(remark)),
+                .filter((remark): remark is string => Boolean(remark))
+                .map((remark) => normalizeTechnicalHostName(remark)),
         );
         const matchedGroupByKey = new Map(
             matchedGroups.map((group) => [`${group.publicHostCode}:${group.planCode}`, group]),
@@ -1445,7 +1590,7 @@ export class ToporBalancerService implements OnModuleDestroy, OnModuleInit {
             const groupKey = `${location.publicHostCode}:${location.planCode}`;
             const selectedTechnicalHostName = selectedNodes[groupKey];
             const hasMatchingInputNode = location.nodes.some((node) =>
-                inputRemarks.has(node.technicalHostName),
+                inputRemarks.has(normalizeTechnicalHostName(node.technicalHostName)),
             );
             const hasActiveNode = location.nodes.some((node) => node.status === 'active');
             const matchedGroup = matchedGroupByKey.get(groupKey);
@@ -2247,7 +2392,9 @@ export class ToporBalancerService implements OnModuleDestroy, OnModuleInit {
                 weight: node.weight,
             });
 
-            const normalizedTechnicalHostName = node.technicalHostName.trim();
+            const normalizedTechnicalHostName = this.normalizeTechnicalHostName(
+                node.technicalHostName,
+            );
 
             if (seenTechnicalHostNames.has(normalizedTechnicalHostName)) {
                 throw new BadRequestException(
@@ -2316,7 +2463,7 @@ export class ToporBalancerService implements OnModuleDestroy, OnModuleInit {
     }
 
     private normalizeTechnicalHostName(value: string): string {
-        return value.trim();
+        return normalizeTechnicalHostName(value);
     }
 
     private getErrorMessage(error: unknown): string {

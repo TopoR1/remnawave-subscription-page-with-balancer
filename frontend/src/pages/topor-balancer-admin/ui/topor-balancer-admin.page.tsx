@@ -240,13 +240,34 @@ interface DiscoveryImportStatusState {
 
 interface SubscriptionDiagnosticsResult {
     ok: boolean
-    status: 'failed_open' | 'partially_processed' | 'passed_through' | 'processed'
+    status: 'failed_open' | 'partially_processed' | 'passed_through' | 'processed' | 'unsupported_app'
     format: 'base64_links' | 'plain_links' | 'unknown'
     totalVlessLinks: number
     matchedTechnicalLinks: number
     userSquads: Array<{ name: string; uuid: string }>
     accessibleNodesCount: number
     unmatchedRemarks: string[]
+    linkDiagnostics: Array<{
+        visibleRemark?: string
+        normalizedRemark?: string
+        remarkLength: number
+        matchesTechnicalHostName: boolean
+        matchedTechnicalHostName?: string
+        matchedPublicHostCode?: string
+        matchedPlanCode?: string
+        configuredTechnicalHostNames: string[]
+        closestTechnicalHostNameCandidates: string[]
+        reason?:
+            | 'exact_mismatch'
+            | 'group_disabled'
+            | 'invisible_characters'
+            | 'leading_trailing_whitespace'
+            | 'node_inactive'
+            | 'not_configured'
+            | 'unsupported_app'
+            | 'unicode_normalization_mismatch'
+        normalizedComparisonResult: 'matched' | 'not_matched'
+    }>
     matchedGroups: Array<{
         publicHostCode: string
         planCode: string
@@ -319,12 +340,19 @@ interface SubscriptionDiagnosticsResult {
 }
 
 type DiagnosticsUnchangedReason =
+    | 'exact_mismatch'
     | 'format_unsupported'
     | 'group_disabled'
+    | 'invisible_characters'
+    | 'leading_trailing_whitespace'
     | 'no_active_node'
     | 'no_accessible_candidates'
     | 'no_selected_node'
+    | 'node_inactive'
+    | 'not_configured'
     | 'technicalHostName_mismatch'
+    | 'unsupported_app'
+    | 'unicode_normalization_mismatch'
 
 const statusLabels: Record<ToporBalancerNodeStatus, string> = {
     active: texts.status.active,
@@ -510,7 +538,27 @@ function StatusLegend() {
 }
 
 function normalizeTechnicalHostName(value: string) {
-    return value.trim()
+    return value.replace(/[\u00A0\u202F\u2007]/g, ' ').normalize('NFC').trim()
+}
+
+function getPublicHostCodeWarning(value: string) {
+    const normalizedValue = value.trim().toLowerCase()
+
+    if (normalizedValue === 'fl_standart') {
+        return '"fl_standart" looks like typo, expected "fi_standard"'
+    }
+
+    if (normalizedValue.includes('standart')) {
+        return '"standart" looks like typo, expected "standard"'
+    }
+
+    return undefined
+}
+
+function getPlanCodeWarning(value: string) {
+    return value.trim().toLowerCase() === 'standart'
+        ? '"standart" looks like typo, expected "standard"'
+        : undefined
 }
 
 function getDiagnosticsStatusColor(status: SubscriptionDiagnosticsResult['groups'][number]['status']) {
@@ -540,34 +588,49 @@ function getDiagnosticsOverallStatusColor(status: SubscriptionDiagnosticsResult[
         failed_open: 'red',
         partially_processed: 'yellow',
         passed_through: 'yellow',
-        processed: 'green'
+        processed: 'green',
+        unsupported_app: 'red'
     }
 
     return colors[status]
 }
 
 function getDiagnosticsOverallStatusLabel(status: SubscriptionDiagnosticsResult['status']) {
-    const labels: Record<SubscriptionDiagnosticsResult['status'], string> = {
+    if (status === 'unsupported_app') {
+        return 'App not supported'
+    }
+
+    const labels: Partial<Record<SubscriptionDiagnosticsResult['status'], string>> = {
         failed_open: 'Ошибка, отдана исходная подписка',
         partially_processed: 'Подписка обработана частично',
         passed_through: 'Подписка прошла без изменений',
         processed: 'Balancer обработал подписку'
     }
 
-    return labels[status]
+    return labels[status] ?? status
 }
 
 function getDiagnosticsReasonLabel(reason: DiagnosticsUnchangedReason) {
-    const labels: Record<DiagnosticsUnchangedReason, string> = {
+    if (reason === 'unsupported_app') {
+        return 'App not supported'
+    }
+
+    const labels: Partial<Record<DiagnosticsUnchangedReason, string>> = {
+        exact_mismatch: 'Точное совпадение не найдено',
         format_unsupported: 'Формат не поддерживается',
         group_disabled: 'Группа отключена',
+        invisible_characters: 'Есть невидимые символы',
+        leading_trailing_whitespace: 'Пробелы по краям',
         no_active_node: 'Нет активных нод',
         no_accessible_candidates: 'Нода недоступна пользователю по squad',
         no_selected_node: 'Нода не выбрана',
-        technicalHostName_mismatch: 'Не найдено совпадений technicalHostName'
+        node_inactive: 'Нода не активна',
+        not_configured: 'Не настроено',
+        technicalHostName_mismatch: 'Не найдено совпадений technicalHostName',
+        unicode_normalization_mismatch: 'Unicode отличается после нормализации'
     }
 
-    return labels[reason]
+    return labels[reason] ?? reason
 }
 
 function getAssignmentModeLabel(mode?: string) {
@@ -1498,6 +1561,7 @@ export function ToporBalancerAdminPage() {
                             value={groupForm.publicName}
                         />
                         <TextInput
+                            error={getPublicHostCodeWarning(groupForm.publicHostCode)}
                             label={<FieldLabel help={tooltips.publicHostCode} label={texts.fields.publicHostCode} />}
                             onChange={(event) => setGroupForm((current) => ({ ...current, publicHostCode: event.currentTarget.value }))}
                             value={groupForm.publicHostCode}
@@ -1510,6 +1574,7 @@ export function ToporBalancerAdminPage() {
                             value={groupForm.locationCode}
                         />
                         <TextInput
+                            error={getPlanCodeWarning(groupForm.planCode)}
                             label={<FieldLabel help={tooltips.planCode} label={texts.fields.planCode} />}
                             onChange={(event) => setGroupForm((current) => ({ ...current, planCode: event.currentTarget.value }))}
                             value={groupForm.planCode}
@@ -1825,6 +1890,7 @@ export function ToporBalancerAdminPage() {
                                         value={importGroupForm.publicName}
                                     />
                                     <TextInput
+                                        error={getPublicHostCodeWarning(importGroupForm.publicHostCode)}
                                         label={<FieldLabel help={tooltips.publicHostCode} label={texts.fields.publicHostCode} />}
                                         onChange={(event) => setImportGroupForm((current) => ({ ...current, publicHostCode: event.currentTarget.value }))}
                                         value={importGroupForm.publicHostCode}
@@ -1837,6 +1903,7 @@ export function ToporBalancerAdminPage() {
                                         value={importGroupForm.locationCode}
                                     />
                                     <TextInput
+                                        error={getPlanCodeWarning(importGroupForm.planCode)}
                                         label={<FieldLabel help={tooltips.planCode} label={texts.fields.planCode} />}
                                         onChange={(event) => setImportGroupForm((current) => ({ ...current, planCode: event.currentTarget.value }))}
                                         value={importGroupForm.planCode}
@@ -2138,6 +2205,7 @@ export function ToporBalancerAdminPage() {
                                                             value={groupForm.publicName}
                                                         />
                                                         <TextInput
+                                                            error={getPublicHostCodeWarning(groupForm.publicHostCode)}
                                                             label={<FieldLabel help={tooltips.publicHostCode} label={texts.fields.publicHostCode} />}
                                                             onChange={(event) => setGroupForm((current) => ({ ...current, publicHostCode: event.currentTarget.value }))}
                                                             value={groupForm.publicHostCode}
@@ -2150,6 +2218,7 @@ export function ToporBalancerAdminPage() {
                                                             value={groupForm.locationCode}
                                                         />
                                                         <TextInput
+                                                            error={getPlanCodeWarning(groupForm.planCode)}
                                                             label={<FieldLabel help={tooltips.planCode} label={texts.fields.planCode} />}
                                                             onChange={(event) => setGroupForm((current) => ({ ...current, planCode: event.currentTarget.value }))}
                                                             value={groupForm.planCode}
@@ -2423,6 +2492,7 @@ function GroupSettingsForm({
                         value={form.publicName}
                     />
                     <TextInput
+                        error={getPublicHostCodeWarning(form.publicHostCode)}
                         label={<FieldLabel help={tooltips.publicHostCode} label={texts.fields.publicHostCode} />}
                         onChange={(event) => setForm((current) => ({ ...current, publicHostCode: event.currentTarget.value }))}
                         value={form.publicHostCode}
@@ -2435,6 +2505,7 @@ function GroupSettingsForm({
                         value={form.locationCode}
                     />
                     <TextInput
+                        error={getPlanCodeWarning(form.planCode)}
                         label={<FieldLabel help={tooltips.planCode} label={texts.fields.planCode} />}
                         onChange={(event) => setForm((current) => ({ ...current, planCode: event.currentTarget.value }))}
                         value={form.planCode}
@@ -2554,6 +2625,11 @@ function DiagnosticsSummary({ result }: { result: SubscriptionDiagnosticsResult 
             <Alert color={getDiagnosticsOverallStatusColor(result.status)} variant="light">
                 <Stack gap={4}>
                     <Text fw={700}>{getDiagnosticsOverallStatusLabel(result.status)}</Text>
+                    {result.status === 'unsupported_app' && (
+                        <Text size="sm">
+                            Remnawave вернул заглушку App not supported. Проверьте User-Agent клиента и настройки приложений в Subscription Page.
+                        </Text>
+                    )}
                     {hasNoTechnicalHostNameMatches && (
                         <Text size="sm">Не найдено совпадений technicalHostName</Text>
                     )}
@@ -2612,6 +2688,44 @@ function DiagnosticsSummary({ result }: { result: SubscriptionDiagnosticsResult 
                         <Text size="sm">Add these values as Balancer technicalHostName when they should be managed.</Text>
                     </Stack>
                 </Alert>
+            )}
+            {result.linkDiagnostics?.length > 0 && (
+                <Card className={classes.tableCard} p={0} radius="md">
+                    <ScrollArea>
+                        <Table highlightOnHover>
+                            <Table.Thead>
+                                <Table.Tr>
+                                    <Table.Th>Remark</Table.Th>
+                                    <Table.Th>Normalized</Table.Th>
+                                    <Table.Th>Length</Table.Th>
+                                    <Table.Th>Match</Table.Th>
+                                    <Table.Th>Configured technicalHostNames</Table.Th>
+                                    <Table.Th>Closest candidates</Table.Th>
+                                    <Table.Th>Reason</Table.Th>
+                                </Table.Tr>
+                            </Table.Thead>
+                            <Table.Tbody>
+                                {result.linkDiagnostics.map((diagnostic, index) => (
+                                    <Table.Tr key={`${diagnostic.visibleRemark ?? 'empty'}-${index}`}>
+                                        <Table.Td className={classes.wrapCell}>{diagnostic.visibleRemark ?? '-'}</Table.Td>
+                                        <Table.Td className={classes.wrapCell}>{diagnostic.normalizedRemark ?? '-'}</Table.Td>
+                                        <Table.Td>{diagnostic.remarkLength}</Table.Td>
+                                        <Table.Td>
+                                            <Badge color={diagnostic.matchesTechnicalHostName ? 'green' : 'yellow'} variant="light">
+                                                {diagnostic.matchesTechnicalHostName
+                                                    ? diagnostic.matchedTechnicalHostName ?? 'matched'
+                                                    : 'not matched'}
+                                            </Badge>
+                                        </Table.Td>
+                                        <Table.Td className={classes.wrapCell}>{diagnostic.configuredTechnicalHostNames.join(', ') || '-'}</Table.Td>
+                                        <Table.Td className={classes.wrapCell}>{diagnostic.closestTechnicalHostNameCandidates.join(', ') || '-'}</Table.Td>
+                                        <Table.Td>{diagnostic.reason ? getDiagnosticsReasonLabel(diagnostic.reason) : diagnostic.normalizedComparisonResult}</Table.Td>
+                                    </Table.Tr>
+                                ))}
+                            </Table.Tbody>
+                        </Table>
+                    </ScrollArea>
+                </Card>
             )}
             {reasons.length > 0 && (
                 <Card className={classes.tableCard} p={0} radius="md">

@@ -13,6 +13,7 @@ import type {
 } from './types';
 
 import { parseSubscription } from './topor-balancer-subscription.parser';
+import { normalizeTechnicalHostName } from './topor-balancer-technical-host-name';
 import { ToporBalancerService } from './topor-balancer.service';
 import { ToporRemnawaveTopologyService } from './topor-remnawave-topology.service';
 
@@ -51,11 +52,13 @@ export class ToporBalancerDiscoveryService {
             }
         }
 
-        const topologyByRemark = new Map(topology.hosts.map((host) => [host.remark, host]));
+        const topologyByRemark = new Map(
+            topology.hosts.map((host) => [normalizeTechnicalHostName(host.remark), host]),
+        );
         const items = hostsResponse.response.response
-            .filter((host) => this.normalizeTechnicalHostName(host.remark).length > 0)
+            .filter((host) => normalizeTechnicalHostName(host.remark).length > 0)
             .map((host): ToporBalancerDiscoveredHost => {
-                const technicalHostName = this.normalizeTechnicalHostName(host.remark);
+                const technicalHostName = normalizeTechnicalHostName(host.remark);
                 const matchedNode = importedNodes.get(technicalHostName);
                 const firstRemnawaveNodeUuid = host.nodes[0];
                 const topologyHost = topologyByRemark.get(technicalHostName);
@@ -120,7 +123,7 @@ export class ToporBalancerDiscoveryService {
         const items = parsedSubscription.links
             .filter((link) => Boolean(link.remark))
             .map((link): ToporBalancerDiscoveredHost => {
-                const technicalHostName = this.normalizeTechnicalHostName(link.remark ?? '');
+                const technicalHostName = normalizeTechnicalHostName(link.remark ?? '');
                 const matchedNode = importedNodes.get(technicalHostName);
 
                 return {
@@ -219,13 +222,13 @@ export class ToporBalancerDiscoveryService {
         group: Awaited<ReturnType<ToporBalancerService['getAdminGroup']>>,
         importedNodes: Awaited<ReturnType<ToporBalancerService['listAdminNodes']>>,
     ): ToporBalancerGroupDiscoveryItem {
-        const technicalHostName = this.normalizeTechnicalHostName(item.technicalHostName);
+        const technicalHostName = normalizeTechnicalHostName(item.technicalHostName);
         const isAccessibleToGroup =
             group.squadScope !== 'specific_internal_squad' ||
             !group.internalSquadUuid ||
             Boolean(item.accessibleSquads?.some((squad) => squad.uuid === group.internalSquadUuid));
         const matchingNodes = importedNodes.filter(
-            (node) => this.normalizeTechnicalHostName(node.technicalHostName) === technicalHostName,
+            (node) => normalizeTechnicalHostName(node.technicalHostName) === technicalHostName,
         );
         const nodeInThisGroup = matchingNodes.find((node) => node.groupId === group.id);
         const nodesInOtherGroups = matchingNodes.filter((node) => node.groupId !== group.id);
@@ -326,7 +329,7 @@ export class ToporBalancerDiscoveryService {
             const nodes = await this.toporBalancerService.listAdminNodes();
 
             return new Map(
-                nodes.map((node) => [this.normalizeTechnicalHostName(node.technicalHostName), node]),
+                nodes.map((node) => [normalizeTechnicalHostName(node.technicalHostName), node]),
             );
         } catch (error) {
             this.logger.warn(`[ToporBalancerDiscovery] local node lookup failed: ${error}`);
@@ -381,18 +384,14 @@ export class ToporBalancerDiscoveryService {
         return Array.from(
             new Map(
                 items.map((item) => [
-                    this.normalizeTechnicalHostName(item.technicalHostName),
+                    normalizeTechnicalHostName(item.technicalHostName),
                     {
                         ...item,
-                        technicalHostName: this.normalizeTechnicalHostName(item.technicalHostName),
+                        technicalHostName: normalizeTechnicalHostName(item.technicalHostName),
                     },
                 ]),
             ).values(),
         );
-    }
-
-    private normalizeTechnicalHostName(value: string): string {
-        return value.trim();
     }
 
     private stringifySubscriptionBody(body: unknown): string | null {
