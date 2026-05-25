@@ -52,6 +52,7 @@ const DISCOVERY_API_URL = '/api/topor-balancer/discovery/remnawave'
 const DISCOVERY_SUBSCRIPTION_URL = '/api/topor-balancer/discovery/subscription'
 const DISCOVERY_IMPORT_URL = '/api/topor-balancer/discovery/import'
 const groupDiscoveryApiUrl = (groupId: string) => `/api/topor-balancer/groups/${encodeURIComponent(groupId)}/discovery/remnawave`
+const groupRecentDiagnosticsUrl = (groupId: string) => `/api/topor-balancer/groups/${encodeURIComponent(groupId)}/diagnostics/recent`
 const groupDiscoveryRefreshUrl = (groupId: string) => `/api/topor-balancer/groups/${encodeURIComponent(groupId)}/discovery/refresh`
 const groupDiscoverySubscriptionUrl = (groupId: string) => `/api/topor-balancer/groups/${encodeURIComponent(groupId)}/discovery/subscription`
 const groupNodesImportUrl = (groupId: string) => `/api/topor-balancer/groups/${encodeURIComponent(groupId)}/nodes/import`
@@ -136,6 +137,13 @@ interface ToporBalancerAssignment {
     updatedAt?: string
 }
 
+interface AssignmentActionSummary {
+    errors: Array<{ reason: string; shortUuid?: string }>
+    reassigned: number
+    removed: number
+    skipped: number
+}
+
 interface ToporBalancerRequest {
     createdAt?: string
     errorMessage?: string
@@ -145,6 +153,30 @@ interface ToporBalancerRequest {
     responseFormat?: string
     shortUuid: string
     status?: string
+}
+
+interface GroupRuntimeDiagnostic {
+    time?: string
+    shortUuid: string
+    userAgent?: string
+    totalLinks?: number
+    matchedLinks?: number
+    rewrittenLinks?: number
+    selectedNode?: string
+    status?: string
+    warnings: string[]
+    groupDiagnostic?: {
+        publicHostCode: string
+        planCode: string
+        subscriptionCandidateNodes: string[]
+        effectiveCandidateNodes: string[]
+        selectedTechnicalHostName?: string
+        previousAssignedNode?: string
+        previousAssignedNodeStatus?: string
+        failOpenReason?: string
+        excludedNodes: Array<{ reason: string; technicalHostName: string; message: string }>
+        warnings: string[]
+    }
 }
 
 interface SubscriptionTrace {
@@ -178,6 +210,7 @@ interface DiscoveredHost {
     matchedGroupPlanCode?: string
     matchedGroupPublicHostCode?: string
     matchedNodeId: string | null
+    membershipStatus?: DiscoveryItemStatus
     pbk?: string
     port?: number
     protocol?: 'vless'
@@ -674,11 +707,16 @@ export function ToporBalancerAdminPage() {
     const [groupNodesGroupId, setGroupNodesGroupId] = useState<null | string>(null)
     const [isGroupNodesLoading, setIsGroupNodesLoading] = useState(false)
     const [assignments, setAssignments] = useState<ToporBalancerAssignment[]>([])
+    const [groupRuntimeDiagnostics, setGroupRuntimeDiagnostics] = useState<GroupRuntimeDiagnostic[]>([])
     const [requests, setRequests] = useState<ToporBalancerRequest[]>([])
     const [subscriptionTraces, setSubscriptionTraces] = useState<SubscriptionTrace[]>([])
     const [discoveredHosts, setDiscoveredHosts] = useState<DiscoveredHost[]>([])
     const [selectedHosts, setSelectedHosts] = useState<string[]>([])
+    const [showOnlyFreeDiscovery, setShowOnlyFreeDiscovery] = useState(true)
+    const [nodeDiscoverySearch, setNodeDiscoverySearch] = useState('')
+    const [nodeDiscoveryFilter, setNodeDiscoveryFilter] = useState<string | null>(null)
     const [selectedGroupId, setSelectedGroupId] = useState<string | null>(null)
+    const [assignmentNodeFilter, setAssignmentNodeFilter] = useState<string | null>(null)
     const [groupSearch, setGroupSearch] = useState('')
     const [isCreateGroupModalOpen, setIsCreateGroupModalOpen] = useState(false)
     const [isGroupEditorOpen, setIsGroupEditorOpen] = useState(false)
@@ -757,6 +795,67 @@ export function ToporBalancerAdminPage() {
 
         return assignments.filter((assignment) => selectedNodeIds.has(assignment.nodeId))
     }, [assignments, selectedGroupNodes])
+    const groupNodeDiscoveryRows = useMemo(() => {
+        const rowsByName = new Map(
+            discoveredHosts.map((host) => [normalizeTechnicalHostName(host.technicalHostName), host])
+        )
+
+        for (const node of selectedGroupNodes) {
+            const technicalHostName = normalizeTechnicalHostName(node.technicalHostName)
+
+            if (!rowsByName.has(technicalHostName)) {
+                rowsByName.set(technicalHostName, {
+                    alreadyImported: true,
+                    canAdd: false,
+                    currentGroupId: selectedGroup?.id ?? node.groupId ?? null,
+                    currentGroupName: selectedGroup?.publicName ?? node.publicName,
+                    matchedNodeId: node.id,
+                    membershipStatus: 'in_this_group',
+                    status: 'in_this_group',
+                    technicalHostName
+                })
+            }
+        }
+
+        const query = nodeDiscoverySearch.trim().toLowerCase()
+
+        return Array.from(rowsByName.values()).filter((host) => {
+            const status = host.membershipStatus ?? host.status
+            const inThisGroup = status === 'in_this_group'
+            const searchable = [
+                host.technicalHostName,
+                host.currentGroupName,
+                host.remnawaveNodeName,
+                host.remnawaveInboundName,
+                host.remnawaveProfileName,
+                host.host,
+                host.sni,
+                ...(host.accessibleSquads?.map((squad) => squad.name) ?? [])
+            ]
+                .filter(Boolean)
+                .join(' ')
+                .toLowerCase()
+
+            if (showOnlyFreeDiscovery && !inThisGroup && status !== 'free') {
+                return false
+            }
+
+            if (nodeDiscoveryFilter && !inThisGroup) {
+                const matchesFilter =
+                    status === nodeDiscoveryFilter ||
+                    host.security === nodeDiscoveryFilter ||
+                    host.type === nodeDiscoveryFilter ||
+                    host.remnawaveProfileName === nodeDiscoveryFilter ||
+                    host.accessibleSquads?.some((squad) => squad.name === nodeDiscoveryFilter)
+
+                if (!matchesFilter) {
+                    return false
+                }
+            }
+
+            return !query || searchable.includes(query)
+        })
+    }, [discoveredHosts, nodeDiscoveryFilter, nodeDiscoverySearch, selectedGroup, selectedGroupNodes, showOnlyFreeDiscovery])
     const filteredGroups = useMemo(() => {
         const query = groupSearch.trim().toLowerCase()
 
@@ -828,9 +927,10 @@ export function ToporBalancerAdminPage() {
             setIsGroupNodesLoading(true)
 
             try {
-                const [groupResponse, groupNodesResponse] = await Promise.all([
+                const [groupResponse, groupNodesResponse, groupDiagnosticsResponse] = await Promise.all([
                     fetchAdminJson<ToporBalancerGroup>(`${ADMIN_GROUPS_URL}/${groupId}`),
-                    fetchAdminJson<ToporBalancerNode[]>(`${ADMIN_GROUPS_URL}/${groupId}/nodes`)
+                    fetchAdminJson<ToporBalancerNode[]>(`${ADMIN_GROUPS_URL}/${groupId}/nodes`),
+                    fetchAdminJson<GroupRuntimeDiagnostic[]>(groupRecentDiagnosticsUrl(groupId))
                 ])
                 const nextGroupNodes = safeArray<ToporBalancerNode>(groupNodesResponse)
 
@@ -842,6 +942,7 @@ export function ToporBalancerAdminPage() {
 
                 setGroupNodesGroupId(groupId)
                 setGroupNodes(nextGroupNodes)
+                setGroupRuntimeDiagnostics(safeArray<GroupRuntimeDiagnostic>(groupDiagnosticsResponse))
                 setNodes((current) => [
                     ...current.filter((node) => node.groupId !== groupId),
                     ...nextGroupNodes
@@ -1095,6 +1196,68 @@ export function ToporBalancerAdminPage() {
         }
     }
 
+    const runAssignmentAction = async (
+        group: ToporBalancerGroup,
+        path: string,
+        confirmationText: string
+    ) => {
+        if (!window.confirm(confirmationText)) {
+            return
+        }
+
+        setIsLoading(true)
+
+        try {
+            const summary = await fetchAdminJson<AssignmentActionSummary>(path, {
+                body: JSON.stringify({ confirmed: true }),
+                method: 'POST'
+            })
+
+            await refreshAdminData()
+            await refreshGroupEditorData(group.id)
+            notifications.show({
+                color: summary?.errors.length ? 'yellow' : 'green',
+                message: `Удалено: ${summary?.removed ?? 0}, переназначено: ${summary?.reassigned ?? 0}, пропущено: ${summary?.skipped ?? 0}`,
+                title: 'Назначения обновлены'
+            })
+        } catch (error) {
+            setErrorMessage(getAdminErrorMessage(error, 'Не удалось выполнить действие с назначениями'))
+        } finally {
+            setIsLoading(false)
+        }
+    }
+
+    const resetGroupAssignments = (group: ToporBalancerGroup) =>
+        runAssignmentAction(
+            group,
+            `${ADMIN_GROUPS_URL}/${group.id}/assignments/reset`,
+            `Сбросить все назначения группы ${group.publicName}? Пользователи получат новые закрепления при следующем запросе подписки.`
+        )
+
+    const rebalanceGroupAssignments = (group: ToporBalancerGroup) =>
+        runAssignmentAction(
+            group,
+            `${ADMIN_GROUPS_URL}/${group.id}/assignments/rebalance`,
+            `Перераспределить текущие назначения группы ${group.publicName} по активным нодам? Draining, disabled и dead ноды не будут получать назначения.`
+        )
+
+    const migrateNodeAssignments = (node: ToporBalancerNode) => {
+        if (!node.groupId || !selectedGroup) {
+            return
+        }
+
+        runAssignmentAction(
+            selectedGroup,
+            `${ADMIN_GROUPS_URL}/${node.groupId}/nodes/${node.id}/assignments/migrate`,
+            `Перенести назначения с ноды ${node.technicalHostName} на активные ноды этой группы?`
+        )
+    }
+
+    const viewNodeAssignments = (node: ToporBalancerNode) => {
+        setAssignmentNodeFilter(node.id)
+        setGroupEditorTab('assignments')
+    }
+
     const runApiDiscovery = async () => {
         if (!selectedGroup) {
             notifications.show({ color: 'red', message: texts.discovery.selectGroup, title: texts.common.noGroup })
@@ -1198,6 +1361,7 @@ export function ToporBalancerAdminPage() {
             setDiscoveryImportStatuses({})
             setLastImportResult(null)
             setLastDiscoverySource(null)
+            setGroupRuntimeDiagnostics([])
         }
 
         setSelectedGroupId(group.id)
@@ -1214,7 +1378,7 @@ export function ToporBalancerAdminPage() {
             return
         }
 
-        setGroupEditorTab('discovery')
+        setGroupEditorTab('nodes')
         setIsGroupEditorOpen(true)
         setGroupNodes([])
         setGroupNodesGroupId(selectedGroup.id)
@@ -1646,7 +1810,6 @@ export function ToporBalancerAdminPage() {
                         <Tabs.List>
                             <Tabs.Tab value="overview">Обзор</Tabs.Tab>
                             <Tabs.Tab value="nodes">Ноды</Tabs.Tab>
-                            <Tabs.Tab value="discovery">Найти в Remnawave</Tabs.Tab>
                             <Tabs.Tab value="assignments">Назначения</Tabs.Tab>
                             <Tabs.Tab value="diagnostics">Диагностика</Tabs.Tab>
                             <Tabs.Tab value="settings">Настройки</Tabs.Tab>
@@ -1680,6 +1843,12 @@ export function ToporBalancerAdminPage() {
                                         </Stack>
                                     </Card>
                                 </Group>
+                                <GroupProblemsPanel
+                                    diagnostics={groupRuntimeDiagnostics}
+                                    discoveredHosts={discoveredHosts}
+                                    nodes={selectedGroupNodes}
+                                    selectedGroup={selectedGroup}
+                                />
                                 <Group gap="sm">
                                     <Button leftSection={<IconPlus size={16} />} onClick={openAddNodesFlow}>
                                         Добавить ноды
@@ -1702,12 +1871,18 @@ export function ToporBalancerAdminPage() {
                                         Group counter regression: card shows {selectedGroup.nodesCount} nodes, modal loaded {selectedGroupNodes.length} rows from /groups/{selectedGroup.id}/nodes.
                                     </Alert>
                                 )}
-                                <TechnicalNodesTable
-                                    deleteNode={deleteNode}
-                                    discoveredByTechnicalHostName={discoveredByTechnicalHostName}
-                                    nodes={selectedGroupNodes}
+                                <DiscoveredHostsTable
+                                    assignments={selectedGroupAssignments}
+                                    hosts={groupNodeDiscoveryRows}
+                                    importedByTechnicalHostName={importedByTechnicalHostName}
+                                    importStatuses={discoveryImportStatuses}
                                     patchNode={patchNode}
+                                    removeNode={deleteNode}
+                                    selectedGroup={selectedGroup}
+                                    selectedHosts={selectedHosts}
+                                    toggleSelectedHost={toggleSelectedHost}
                                 />
+                                {lastImportResult && <ImportResultSummary result={lastImportResult} />}
                             </Stack>
                         </Tabs.Panel>
 
@@ -1752,16 +1927,74 @@ export function ToporBalancerAdminPage() {
                                         <StatusLegend />
                                     </Stack>
                                 </Card>
+                                <Card className={classes.tableCard} p="md" radius="md">
+                                    <Stack gap="md">
+                                        <Group align="end" justify="space-between">
+                                            <Group align="end">
+                                                <Button leftSection={<IconRefresh size={16} />} loading={isDiscoveryLoading} onClick={runApiDiscovery} variant="light">
+                                                    Обновить из Remnawave
+                                                </Button>
+                                                <Checkbox
+                                                    checked={showOnlyFreeDiscovery}
+                                                    label="Показать только свободные"
+                                                    onChange={(event) => setShowOnlyFreeDiscovery(event.currentTarget.checked)}
+                                                />
+                                                <TextInput
+                                                    label="Поиск"
+                                                    onChange={(event) => setNodeDiscoverySearch(event.currentTarget.value)}
+                                                    placeholder="technicalHostName, host, squad, profile"
+                                                    value={nodeDiscoverySearch}
+                                                />
+                                                <Select
+                                                    clearable
+                                                    data={[
+                                                        { label: 'free', value: 'free' },
+                                                        { label: 'in_this_group', value: 'in_this_group' },
+                                                        { label: 'in_other_group', value: 'in_other_group' },
+                                                        { label: 'conflict', value: 'conflict' },
+                                                        ...Array.from(new Set(discoveredHosts.flatMap((host) => [
+                                                            host.security,
+                                                            host.type,
+                                                            host.remnawaveProfileName,
+                                                            ...(host.accessibleSquads?.map((squad) => squad.name) ?? [])
+                                                        ].filter(Boolean) as string[]))).map((value) => ({ label: value, value }))
+                                                    ]}
+                                                    label="Фильтр"
+                                                    onChange={setNodeDiscoveryFilter}
+                                                    placeholder="squad/profile/status"
+                                                    value={nodeDiscoveryFilter}
+                                                />
+                                            </Group>
+                                            <Button disabled={selectedHosts.length === 0} leftSection={<IconDownload size={16} />} loading={isDiscoveryLoading} onClick={importSelectedHosts}>
+                                                Добавить выбранные в эту группу
+                                            </Button>
+                                        </Group>
+                                        <Group align="end">
+                                            <TextInput
+                                                label="UUID тестовой подписки"
+                                                onChange={(event) => setShortUuid(event.currentTarget.value)}
+                                                placeholder="Введите UUID"
+                                                value={shortUuid}
+                                            />
+                                            <Button leftSection={<IconSearch size={16} />} loading={isDiscoveryLoading} onClick={runSubscriptionDiscovery} variant="light">
+                                                Проверить доступность по подписке
+                                            </Button>
+                                        </Group>
+                                    </Stack>
+                                </Card>
                                 {selectedGroupNodeCounterMismatch && (
                                     <Alert color="red" variant="light">
                                         Group counter regression: card shows {selectedGroup.nodesCount} nodes, modal loaded {selectedGroupNodes.length} rows from /groups/{selectedGroup.id}/nodes.
                                     </Alert>
                                 )}
                                 <TechnicalNodesTable
+                                    assignments={selectedGroupAssignments}
                                     deleteNode={deleteNode}
                                     discoveredByTechnicalHostName={discoveredByTechnicalHostName}
+                                    migrateNodeAssignments={migrateNodeAssignments}
                                     nodes={selectedGroupNodes}
                                     patchNode={patchNode}
+                                    viewNodeAssignments={viewNodeAssignments}
                                 />
                             </Stack>
                         </Tabs.Panel>
@@ -1802,7 +2035,38 @@ export function ToporBalancerAdminPage() {
                         </Tabs.Panel>
 
                         <Tabs.Panel pt="md" value="assignments">
-                            <AssignmentsTable assignments={selectedGroupAssignments} nodes={selectedGroupNodes} />
+                            <Stack gap="md">
+                                <AssignmentBehaviorInfo strategy={selectedGroup.strategy} />
+                                <Card className={classes.tableCard} p="md" radius="md">
+                                    <Group justify="space-between">
+                                        <Stack gap={2}>
+                                            <Title order={4}>Управление назначениями</Title>
+                                            <Text c="dimmed" size="sm">Назначения — это закрепления пользователей Balancer. Это не общая нагрузка Remnawave.</Text>
+                                        </Stack>
+                                        <Group gap="xs">
+                                            <Button color="red" loading={isLoading} onClick={() => resetGroupAssignments(selectedGroup)} variant="subtle">
+                                                Сбросить назначения группы
+                                            </Button>
+                                            <Button loading={isLoading} onClick={() => rebalanceGroupAssignments(selectedGroup)} variant="light">
+                                                Перераспределить назначения
+                                            </Button>
+                                        </Group>
+                                    </Group>
+                                </Card>
+                                {assignmentNodeFilter && (
+                                    <Alert color="blue" variant="light">
+                                        Показаны назначения выбранной ноды. <Button onClick={() => setAssignmentNodeFilter(null)} size="xs" variant="subtle">Показать все</Button>
+                                    </Alert>
+                                )}
+                                <AssignmentsTable
+                                    assignments={
+                                        assignmentNodeFilter
+                                            ? selectedGroupAssignments.filter((assignment) => assignment.nodeId === assignmentNodeFilter)
+                                            : selectedGroupAssignments
+                                    }
+                                    nodes={selectedGroupNodes}
+                                />
+                            </Stack>
                         </Tabs.Panel>
 
                         <Tabs.Panel pt="md" value="diagnostics">
@@ -1859,6 +2123,7 @@ export function ToporBalancerAdminPage() {
                                         )}
                                     </Stack>
                                 </Card>
+                                <GroupRecentDiagnosticsTable diagnostics={groupRuntimeDiagnostics} />
                                 <Alert color={runtimeHealth?.fallbackConfigOk ? 'green' : 'red'} variant="light">
                                     {texts.diagnostics.runtimeConfig}: {runtimeHealth?.appConfigRoute ?? '/assets/.app-config-v2.json'}; источник: {runtimeHealth?.lastConfigSource ?? '-'}; ошибка: {runtimeHealth?.lastRuntimeConfigError ?? '-'}
                                 </Alert>
@@ -2173,10 +2438,13 @@ export function ToporBalancerAdminPage() {
                                                 </Alert>
                                             )}
                                             <TechnicalNodesTable
+                                                assignments={selectedGroupAssignments}
                                                 deleteNode={deleteNode}
                                                 discoveredByTechnicalHostName={discoveredByTechnicalHostName}
+                                                migrateNodeAssignments={migrateNodeAssignments}
                                                 nodes={selectedGroupNodes}
                                                 patchNode={patchNode}
+                                                viewNodeAssignments={viewNodeAssignments}
                                             />
                                         </Stack>
                                     ) : (
@@ -2318,10 +2586,13 @@ export function ToporBalancerAdminPage() {
                                             </Alert>
                                         )}
                                         <TechnicalNodesTable
+                                            assignments={selectedGroupAssignments}
                                             deleteNode={deleteNode}
                                             discoveredByTechnicalHostName={discoveredByTechnicalHostName}
+                                            migrateNodeAssignments={migrateNodeAssignments}
                                             nodes={selectedGroupNodes}
                                             patchNode={patchNode}
+                                            viewNodeAssignments={viewNodeAssignments}
                                         />
                                     </Stack>
                                 </Tabs.Panel>
@@ -3043,16 +3314,24 @@ function RecentSubscriptionTraces({ traces }: { traces: SubscriptionTrace[] }) {
 }
 
 function TechnicalNodesTable({
+    assignments = [],
     deleteNode,
     discoveredByTechnicalHostName,
+    migrateNodeAssignments,
     nodes,
-    patchNode
+    patchNode,
+    viewNodeAssignments
 }: {
+    assignments?: ToporBalancerAssignment[]
     deleteNode: (node: ToporBalancerNode) => void
     discoveredByTechnicalHostName: Map<string, DiscoveredHost>
+    migrateNodeAssignments?: (node: ToporBalancerNode) => void
     nodes: ToporBalancerNode[]
     patchNode: (node: ToporBalancerNode, patch: Partial<ToporBalancerNode>) => void
+    viewNodeAssignments?: (node: ToporBalancerNode) => void
 }) {
+    const totalAssignments = assignments.length
+
     if (nodes.length === 0) {
         return (
             <Card className={classes.tableCard} p="lg" radius="md">
@@ -3092,6 +3371,13 @@ function TechnicalNodesTable({
                     <Table.Tbody>
                         {nodes.map((node) => {
                             const discoveredHost = discoveredByTechnicalHostName.get(normalizeTechnicalHostName(node.technicalHostName))
+                            const nodeAssignments = assignments.filter((assignment) => assignment.nodeId === node.id)
+                            const nodePercent = totalAssignments > 0 ? Math.round((nodeAssignments.length / totalAssignments) * 100) : 0
+                            const lastAssignment = nodeAssignments
+                                .map((assignment) => assignment.updatedAt)
+                                .filter(Boolean)
+                                .sort()
+                                .at(-1)
 
                             return (
                                 <Table.Tr className={classes[`row-${node.status}`]} key={node.id}>
@@ -3124,7 +3410,17 @@ function TechnicalNodesTable({
                                             value={node.maxUsers}
                                         />
                                     </Table.Td>
-                                    <Table.Td>{node.assignedUsers}</Table.Td>
+                                    <Table.Td>
+                                        <Stack gap={2}>
+                                            <Text size="sm">{node.assignedUsers} ({nodePercent}%)</Text>
+                                            <Text c="dimmed" size="xs">Последнее: {formatDate(lastAssignment)}</Text>
+                                            {viewNodeAssignments && (
+                                                <Button onClick={() => viewNodeAssignments(node)} size="compact-xs" variant="subtle">
+                                                    Посмотреть назначения
+                                                </Button>
+                                            )}
+                                        </Stack>
+                                    </Table.Td>
                                     <Table.Td>
                                         <Badge color={discoveredHost ? 'green' : 'gray'} variant="light">
                                             {discoveredHost ? 'Импортировано' : 'Не импортировано'}
@@ -3141,6 +3437,11 @@ function TechnicalNodesTable({
                                             <Button color="red" disabled={node.status === 'disabled'} onClick={() => patchNode(node, { status: 'disabled' })} size="xs" variant="subtle">
                                                 {texts.actions.disable}
                                             </Button>
+                                            {migrateNodeAssignments && (
+                                                <Button disabled={node.assignedUsers === 0} onClick={() => migrateNodeAssignments(node)} size="xs" variant="light">
+                                                    Перенести назначения
+                                                </Button>
+                                            )}
                                             <Button color="red" disabled={node.assignedUsers > 0} onClick={() => deleteNode(node)} size="xs" variant="subtle">
                                                 {texts.actions.delete}
                                             </Button>
@@ -3219,16 +3520,22 @@ function getDiscoveredHostStatusBadge({
 }
 
 function DiscoveredHostsTable({
+    assignments = [],
     hosts,
     importedByTechnicalHostName,
     importStatuses,
+    patchNode,
+    removeNode,
     selectedGroup,
     selectedHosts,
     toggleSelectedHost
 }: {
+    assignments?: ToporBalancerAssignment[]
     hosts: DiscoveredHost[]
     importedByTechnicalHostName: Map<string, ToporBalancerNode>
     importStatuses: Record<string, DiscoveryImportStatusState>
+    patchNode?: (node: ToporBalancerNode, patch: Partial<ToporBalancerNode>) => void
+    removeNode?: (node: ToporBalancerNode) => void
     selectedGroup: null | ToporBalancerGroup
     selectedHosts: string[]
     toggleSelectedHost: (technicalHostName: string) => void
@@ -3288,6 +3595,7 @@ function DiscoveredHostsTable({
                                 isImportedIntoSelectedGroup
                             })
                             const canAdd = host.canAdd ?? (!isImportedIntoSelectedGroup && !importedNode)
+                            const nodeAssignments = importedNode ? assignments.filter((assignment) => assignment.nodeId === importedNode.id) : []
 
                             return (
                                 <Table.Tr key={technicalHostName}>
@@ -3314,14 +3622,48 @@ function DiscoveredHostsTable({
                                             </Badge>
                                         </Tooltip>
                                     </Table.Td>
-                                    <Table.Td>{redactSensitiveText(host.host)}</Table.Td>
+                                    <Table.Td>{host.host ?? '-'}</Table.Td>
                                     <Table.Td>{host.port ?? '-'}</Table.Td>
                                     <Table.Td>{host.protocol ?? '-'}</Table.Td>
                                     <Table.Td>{host.security ?? '-'}</Table.Td>
                                     <Table.Td>{host.type ?? '-'}</Table.Td>
-                                    <Table.Td>{redactSensitiveText(host.sni)}</Table.Td>
+                                    <Table.Td>{host.sni ?? '-'}</Table.Td>
                                     <Table.Td>{host.flow ?? '-'}</Table.Td>
                                     <Table.Td>{[host.pbk, host.sid].filter(Boolean).join(' / ') || '-'}</Table.Td>
+                                    <Table.Td>{importedNode?.status ?? '-'}</Table.Td>
+                                    <Table.Td>{importedNode ? `${importedNode.assignedUsers} (${nodeAssignments.length})` : '-'}</Table.Td>
+                                    <Table.Td>
+                                        {importedNode && importedNode.groupId === selectedGroup?.id && (
+                                            <Group gap={6} wrap="nowrap">
+                                                <Button onClick={() => patchNode?.(importedNode, { status: 'disabled' })} size="xs" variant="subtle">
+                                                    Disable
+                                                </Button>
+                                                <Button onClick={() => patchNode?.(importedNode, { status: 'draining' })} size="xs" variant="light">
+                                                    Draining
+                                                </Button>
+                                                <Button color="red" onClick={() => patchNode?.(importedNode, { status: 'dead' })} size="xs" variant="subtle">
+                                                    Dead
+                                                </Button>
+                                                <NumberInput
+                                                    min={0.0001}
+                                                    onBlur={(event) => patchNode?.(importedNode, { weight: Number(event.currentTarget.value) || 1 })}
+                                                    size="xs"
+                                                    value={importedNode.weight}
+                                                    w={80}
+                                                />
+                                                <NumberInput
+                                                    min={1}
+                                                    onBlur={(event) => patchNode?.(importedNode, { maxUsers: Number(event.currentTarget.value) || 300 })}
+                                                    size="xs"
+                                                    value={importedNode.maxUsers}
+                                                    w={90}
+                                                />
+                                                <Button color="red" disabled={importedNode.assignedUsers > 0} onClick={() => removeNode?.(importedNode)} size="xs" variant="subtle">
+                                                    Remove
+                                                </Button>
+                                            </Group>
+                                        )}
+                                    </Table.Td>
                                 </Table.Tr>
                             )
                         })}
@@ -3329,6 +3671,121 @@ function DiscoveredHostsTable({
                 </Table>
             </ScrollArea>
         </Card>
+    )
+}
+
+function GroupProblemsPanel({
+    diagnostics,
+    discoveredHosts,
+    nodes,
+    selectedGroup
+}: {
+    diagnostics: GroupRuntimeDiagnostic[]
+    discoveredHosts: DiscoveredHost[]
+    nodes: ToporBalancerNode[]
+    selectedGroup: ToporBalancerGroup
+}) {
+    const latest = diagnostics[0]
+    const latestGroup = latest?.groupDiagnostic
+    const discoveredByName = new Map(discoveredHosts.map((host) => [normalizeTechnicalHostName(host.technicalHostName), host]))
+    const squadKeys = new Set(
+        nodes.flatMap((node) => discoveredByName.get(normalizeTechnicalHostName(node.technicalHostName))?.accessibleSquads?.map((squad) => squad.uuid) ?? [])
+    )
+    const problems = [
+        nodes.every((node) => node.status !== 'active') ? 'Нет активных нод.' : '',
+        squadKeys.size > 1 ? 'В группе есть ноды из разных squad.' : '',
+        latestGroup
+            ? `Для последней проверенной подписки доступно ${latestGroup.effectiveCandidateNodes.length} из ${latestGroup.subscriptionCandidateNodes.length} нод группы.`
+            : '',
+        latestGroup?.previousAssignedNodeStatus === 'disabled' || latestGroup?.previousAssignedNodeStatus === 'dead'
+            ? `Текущее назначение пользователя указывает на ${latestGroup.previousAssignedNodeStatus} ноду: ${latestGroup.previousAssignedNode}.`
+            : '',
+        latest?.status === 'unsupported_app' ? 'Обнаружена заглушка unsupported app fallback.' : '',
+        latest?.status === 'passed_through' ? 'Подписка прошла без rewrite.' : '',
+        latest?.status === 'no_effective_candidates' ? 'Нет effective candidates.' : '',
+        latest?.status === 'no_active_candidates' ? 'Нет active candidates.' : '',
+        latest?.status === 'failed_open' || latestGroup?.failOpenReason ? 'Использован fail-open.' : '',
+        ...(latest?.warnings ?? [])
+    ].filter(Boolean)
+
+    if (problems.length === 0) {
+        return (
+            <Alert color="green" variant="light">
+                Проблемы группы не обнаружены.
+            </Alert>
+        )
+    }
+
+    return (
+        <Alert color="yellow" title="Проблемы группы" variant="light">
+            <Stack gap={4}>
+                {Array.from(new Set(problems)).map((problem) => (
+                    <Text key={problem} size="sm">{problem}</Text>
+                ))}
+            </Stack>
+        </Alert>
+    )
+}
+
+function GroupRecentDiagnosticsTable({ diagnostics }: { diagnostics: GroupRuntimeDiagnostic[] }) {
+    if (diagnostics.length === 0) {
+        return (
+            <Alert color="gray" variant="light">
+                Последних runtime diagnostics для этой группы пока нет. Обновите подписку в клиенте и откройте группу снова.
+            </Alert>
+        )
+    }
+
+    return (
+        <Card className={classes.tableCard} p={0} radius="md">
+            <ScrollArea>
+                <Table highlightOnHover stickyHeader>
+                    <Table.Thead>
+                        <Table.Tr>
+                            <Table.Th>Время</Table.Th>
+                            <Table.Th>shortUuid</Table.Th>
+                            <Table.Th>User-Agent</Table.Th>
+                            <Table.Th>Total</Table.Th>
+                            <Table.Th>Matched</Table.Th>
+                            <Table.Th>Rewritten</Table.Th>
+                            <Table.Th>Selected node</Table.Th>
+                            <Table.Th>Status</Table.Th>
+                            <Table.Th>Warnings</Table.Th>
+                        </Table.Tr>
+                    </Table.Thead>
+                    <Table.Tbody>
+                        {diagnostics.map((diagnostic, index) => (
+                            <Table.Tr key={`${diagnostic.time ?? index}-${diagnostic.shortUuid}`}>
+                                <Table.Td>{formatDate(diagnostic.time)}</Table.Td>
+                                <Table.Td>{diagnostic.shortUuid}</Table.Td>
+                                <Table.Td className={classes.wrapCell}>{diagnostic.userAgent ?? '-'}</Table.Td>
+                                <Table.Td>{diagnostic.totalLinks ?? '-'}</Table.Td>
+                                <Table.Td>{diagnostic.matchedLinks ?? '-'}</Table.Td>
+                                <Table.Td>{diagnostic.rewrittenLinks ?? '-'}</Table.Td>
+                                <Table.Td>{diagnostic.selectedNode ?? '-'}</Table.Td>
+                                <Table.Td>{diagnostic.status ?? '-'}</Table.Td>
+                                <Table.Td className={classes.wrapCell}>{diagnostic.warnings.join('; ') || '-'}</Table.Td>
+                            </Table.Tr>
+                        ))}
+                    </Table.Tbody>
+                </Table>
+            </ScrollArea>
+        </Card>
+    )
+}
+
+function AssignmentBehaviorInfo({ strategy }: { strategy: ToporBalancerGroupStrategy }) {
+    return (
+        <Alert color="blue" variant="light">
+            <Stack gap={4}>
+                <Text size="sm">Назначения — это закрепления пользователей Balancer. Это не общая нагрузка Remnawave.</Text>
+                {strategy === 'least_loaded' && (
+                    <Text size="sm">
+                        Стратегия применяется только к новым назначениям. Уже закреплённые пользователи остаются на своих нодах, пока нода активна или выводится.
+                    </Text>
+                )}
+            </Stack>
+        </Alert>
     )
 }
 

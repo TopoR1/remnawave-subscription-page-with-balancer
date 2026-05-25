@@ -5,6 +5,7 @@ import type {
     ToporBalancerDbNode,
     ToporBalancerDebugInfo,
     ToporBalancerLocation,
+    ToporBalancerNodeStatus,
     ToporBalancerProcessResult,
     ToporRemnawaveTopologySnapshot,
 } from './types';
@@ -60,7 +61,12 @@ interface GroupCandidateDiagnostic {
     subscriptionCandidateNodes: string[];
     effectiveCandidateNodes: string[];
     excludedNodes: ExcludedCandidateNode[];
+    previousAssignedNode?: string;
+    previousAssignedNodeStatus?: ToporBalancerNodeStatus | 'not_in_subscription' | 'unknown';
+    reassignmentAttempted: boolean;
+    reassignmentResult?: 'kept' | 'reassigned' | 'failed' | 'not_needed';
     selectedTechnicalHostName?: string;
+    failOpenReason?: 'no_active_candidates' | 'node_dead' | 'node_disabled' | 'manual_strategy';
     warnings: string[];
 }
 
@@ -69,7 +75,10 @@ type ExcludedCandidateNodeReason =
     | 'not_accessible_to_group_squad'
     | 'not_accessible_to_user_squad'
     | 'not_in_subscription'
-    | 'user_not_in_group_squad';
+    | 'user_not_in_group_squad'
+    | 'node_disabled'
+    | 'node_dead'
+    | 'node_draining';
 
 interface ExcludedCandidateNode {
     technicalHostName: string;
@@ -117,11 +126,17 @@ export async function processSubscriptionWithDatabaseBalancer(
     );
 
     await input.repository.recordRequest({
+        groupCandidateDiagnostics: debugInfo.groupCandidateDiagnostics ?? [],
         shortUuid: input.shortUuid,
         userAgent: input.userAgent,
         responseFormat: format,
         inputLinksCount: debugInfo.totalVlessLinks,
+        matchedTechnicalLinks: debugInfo.matchedTechnicalLinks,
         outputLinksCount: debugInfo.outputLinkCount,
+        rewrittenLinksCount: Object.keys(debugInfo.selectedNodes).length,
+        selectedNodes: debugInfo.selectedNodes,
+        status: getRuntimeDiagnosticsStatus(debugInfo),
+        warnings: debugInfo.warnings ?? [],
     });
 
     logDebugInfo(input, debugInfo);
@@ -144,18 +159,36 @@ async function buildUnsupportedAppResult(
         detectedFormat: format,
         totalVlessLinks: extractVlessLinks(plainBody).length,
         matchedTechnicalLinks: 0,
+        groupCandidateDiagnostics: input.config.locations.map((location) => ({
+            publicHostCode: location.publicHostCode,
+            planCode: location.planCode,
+            userSquads: input.userAccess?.squads ?? [],
+            accessibleNodesCount: input.userAccess?.accessibleNodeUuids.length ?? 0,
+            groupNodesCount: location.nodes.length,
+            subscriptionCandidateNodes: [],
+            effectiveCandidateNodes: [],
+            excludedNodes: [],
+            reassignmentAttempted: false,
+            reassignmentResult: 'not_needed',
+            warnings: ['unsupported_app'],
+        })),
         selectedNodes: {},
         outputLinkCount: extractVlessLinks(plainBody).length,
         warnings: ['Remnawave returned App not supported fallback.'],
     };
 
     await input.repository.recordRequest({
+        groupCandidateDiagnostics: debugInfo.groupCandidateDiagnostics ?? [],
         shortUuid: input.shortUuid,
         userAgent: input.userAgent,
         responseFormat: format,
         inputLinksCount: debugInfo.totalVlessLinks,
+        matchedTechnicalLinks: 0,
         outputLinksCount: debugInfo.outputLinkCount,
+        rewrittenLinksCount: 0,
+        selectedNodes: {},
         status: 'unsupported_app',
+        warnings: debugInfo.warnings ?? [],
     });
 
     logDebugInfo(input, debugInfo);
@@ -265,17 +298,39 @@ async function selectNodesByPublicGroupKey(
             input,
             location,
         });
+        const nodeStatusByTechnicalHostName = await buildNodeStatusByTechnicalHostName(
+            input,
+            location,
+        );
+        const activeCandidateTechnicalHostNames = filterActiveCandidateTechnicalHostNames(
+            location,
+            accessResult.effectiveCandidateTechnicalHostNames,
+            nodeStatusByTechnicalHostName,
+        );
+        const previousAssignment = await findPreviousAssignment(
+            input,
+            location,
+            nodeStatusByTechnicalHostName,
+        );
+        const reassignmentAttempted =
+            previousAssignment?.status === 'disabled' ||
+            previousAssignment?.status === 'dead' ||
+            previousAssignment?.status === 'not_in_subscription';
         const excludedNodes = buildExcludedCandidateNodes({
             accessExcludedNodes: accessResult.excludedNodes,
-            effectiveCandidateTechnicalHostNames: accessResult.effectiveCandidateTechnicalHostNames,
+            effectiveCandidateTechnicalHostNames: activeCandidateTechnicalHostNames,
             location,
+            nodeStatusByTechnicalHostName,
             subscriptionCandidateTechnicalHostNames,
         });
         const warnings = [...accessResult.warnings];
 
-        if (accessResult.effectiveCandidateTechnicalHostNames.length === 0) {
+        if (activeCandidateTechnicalHostNames.length === 0 && !canKeepPreviousAssignment(previousAssignment)) {
+            const failOpenReason = buildFailOpenReason(previousAssignment);
             warnings.push(
-                `No accessible TopoR balancer candidates for ${publicGroupKey}; preserving original links.`,
+                accessResult.effectiveCandidateTechnicalHostNames.length === 0
+                    ? `No accessible TopoR balancer candidates for ${publicGroupKey}; preserving original links.`
+                    : `No active TopoR balancer node for ${publicGroupKey}; preserving original links.`,
             );
             groupCandidateDiagnostics.push({
                 publicHostCode: location.publicHostCode,
@@ -286,6 +341,15 @@ async function selectNodesByPublicGroupKey(
                 subscriptionCandidateNodes: subscriptionCandidateTechnicalHostNames,
                 effectiveCandidateNodes: [],
                 excludedNodes,
+                ...(previousAssignment
+                    ? {
+                          previousAssignedNode: previousAssignment.technicalHostName,
+                          previousAssignedNodeStatus: previousAssignment.status,
+                      }
+                    : {}),
+                reassignmentAttempted,
+                reassignmentResult: reassignmentAttempted ? 'failed' : 'not_needed',
+                failOpenReason,
                 warnings,
             });
             continue;
@@ -301,6 +365,13 @@ async function selectNodesByPublicGroupKey(
             selectedByPublicGroupKey.set(publicGroupKey, selectedNode);
         }
 
+        const reassignmentResult = buildReassignmentResult(
+            previousAssignment,
+            selectedNode,
+            reassignmentAttempted,
+        );
+        const failOpenReason = selectedNode ? undefined : buildFailOpenReason(previousAssignment);
+
         groupCandidateDiagnostics.push({
             publicHostCode: location.publicHostCode,
             planCode: location.planCode,
@@ -308,9 +379,18 @@ async function selectNodesByPublicGroupKey(
             accessibleNodesCount: input.userAccess?.accessibleNodeUuids.length ?? 0,
             groupNodesCount: location.nodes.length,
             subscriptionCandidateNodes: subscriptionCandidateTechnicalHostNames,
-            effectiveCandidateNodes: accessResult.effectiveCandidateTechnicalHostNames,
+            effectiveCandidateNodes: activeCandidateTechnicalHostNames,
             excludedNodes,
+            ...(previousAssignment
+                ? {
+                      previousAssignedNode: previousAssignment.technicalHostName,
+                      previousAssignedNodeStatus: previousAssignment.status,
+                  }
+                : {}),
+            reassignmentAttempted,
+            reassignmentResult,
             ...(selectedNode ? { selectedTechnicalHostName: selectedNode.technicalHostName } : {}),
+            ...(failOpenReason ? { failOpenReason } : {}),
             warnings,
         });
     }
@@ -407,7 +487,7 @@ function filterCandidatesByUserAccess(input: {
             }
         }
 
-        if (!isUserNodeAccessible) {
+        if (userSquadUuids.size > 0 && userAccessibleNodeUuids.size > 0 && !isUserNodeAccessible) {
             const message = `Candidate ${technicalHostName} is not accessible to this user's squads; excluded.`;
 
             warnings.push(message);
@@ -429,10 +509,122 @@ function filterCandidatesByUserAccess(input: {
     };
 }
 
+async function findPreviousAssignment(
+    input: ProcessSubscriptionWithDatabaseBalancerInput,
+    location: ToporBalancerLocation,
+    nodeStatusByTechnicalHostName: Map<string, ToporBalancerNodeStatus>,
+): Promise<{
+    technicalHostName: string;
+    status: ToporBalancerNodeStatus | 'not_in_subscription' | 'unknown';
+} | null> {
+    const assignments = await input.repository.listAssignments({
+        shortUuid: input.shortUuid,
+        publicHostCode: location.publicHostCode,
+        planCode: location.planCode,
+    });
+    const previousAssignment = assignments[0];
+
+    if (!previousAssignment) {
+        return null;
+    }
+
+    const technicalHostName = previousAssignment.technicalHostName ?? previousAssignment.nodeId;
+    const normalizedTechnicalHostName = normalizeTechnicalHostName(technicalHostName);
+    const configuredNode = location.nodes.find(
+        (node) => normalizeTechnicalHostName(node.technicalHostName) === normalizedTechnicalHostName,
+    );
+
+    return {
+        technicalHostName,
+        status:
+            nodeStatusByTechnicalHostName.get(normalizedTechnicalHostName) ??
+            configuredNode?.status ??
+            'unknown',
+    };
+}
+
+function canKeepPreviousAssignment(
+    previousAssignment: Awaited<ReturnType<typeof findPreviousAssignment>>,
+): boolean {
+    return previousAssignment?.status === 'active' || previousAssignment?.status === 'draining';
+}
+
+function filterActiveCandidateTechnicalHostNames(
+    location: ToporBalancerLocation,
+    candidateTechnicalHostNames: string[],
+    nodeStatusByTechnicalHostName: Map<string, ToporBalancerNodeStatus>,
+): string[] {
+    const candidateNames = new Set(candidateTechnicalHostNames.map(normalizeTechnicalHostName));
+
+    return location.nodes
+        .filter(
+            (node) =>
+                (nodeStatusByTechnicalHostName.get(normalizeTechnicalHostName(node.technicalHostName)) ??
+                    node.status) === 'active' &&
+                candidateNames.has(normalizeTechnicalHostName(node.technicalHostName)),
+        )
+        .map((node) => node.technicalHostName);
+}
+
+async function buildNodeStatusByTechnicalHostName(
+    input: ProcessSubscriptionWithDatabaseBalancerInput,
+    location: ToporBalancerLocation,
+): Promise<Map<string, ToporBalancerNodeStatus>> {
+    const nodes = await input.repository.listNodes();
+
+    return new Map(
+        nodes
+            .filter(
+                (node) =>
+                    node.publicHostCode === location.publicHostCode &&
+                    node.planCode === location.planCode,
+            )
+            .map((node) => [normalizeTechnicalHostName(node.technicalHostName), node.status]),
+    );
+}
+
+function buildReassignmentResult(
+    previousAssignment: Awaited<ReturnType<typeof findPreviousAssignment>>,
+    selectedNode: ToporBalancerDbNode | null,
+    reassignmentAttempted: boolean,
+): 'kept' | 'reassigned' | 'failed' | 'not_needed' {
+    if (!previousAssignment) {
+        return 'not_needed';
+    }
+
+    if (!selectedNode) {
+        return reassignmentAttempted ? 'failed' : 'not_needed';
+    }
+
+    if (
+        normalizeTechnicalHostName(previousAssignment.technicalHostName) ===
+        normalizeTechnicalHostName(selectedNode.technicalHostName)
+    ) {
+        return 'kept';
+    }
+
+    return reassignmentAttempted ? 'reassigned' : 'not_needed';
+}
+
+function buildFailOpenReason(
+    previousAssignment: Awaited<ReturnType<typeof findPreviousAssignment>>,
+): 'no_active_candidates' | 'node_dead' | 'node_disabled' | 'manual_strategy' {
+    if (previousAssignment?.status === 'dead') {
+        return 'node_dead';
+    }
+
+    if (previousAssignment?.status === 'disabled') {
+        return 'node_disabled';
+    }
+
+    return 'no_active_candidates';
+}
+
 function buildExcludedCandidateNodes(input: {
     accessExcludedNodes: ExcludedCandidateNode[];
     effectiveCandidateTechnicalHostNames: string[];
     location: ToporBalancerLocation;
+    nodeStatusByTechnicalHostName: Map<string, ToporBalancerNodeStatus>;
     subscriptionCandidateTechnicalHostNames: string[];
 }): ExcludedCandidateNode[] {
     const excludedByName = new Map(
@@ -461,6 +653,36 @@ function buildExcludedCandidateNodes(input: {
                 technicalHostName: node.technicalHostName,
                 reason: 'not_in_subscription',
                 message: `Node ${node.technicalHostName} is in the Balancer group but is not present in this user's subscription response.`,
+            });
+            continue;
+        }
+
+        const nodeStatus =
+            input.nodeStatusByTechnicalHostName.get(normalizedTechnicalHostName) ?? node.status;
+
+        if (nodeStatus === 'disabled') {
+            excludedByName.set(node.technicalHostName, {
+                technicalHostName: node.technicalHostName,
+                reason: 'node_disabled',
+                message: `Node ${node.technicalHostName} is disabled and cannot receive assignments.`,
+            });
+            continue;
+        }
+
+        if (nodeStatus === 'dead') {
+            excludedByName.set(node.technicalHostName, {
+                technicalHostName: node.technicalHostName,
+                reason: 'node_dead',
+                message: `Node ${node.technicalHostName} is dead and must be reassigned.`,
+            });
+            continue;
+        }
+
+        if (nodeStatus === 'draining') {
+            excludedByName.set(node.technicalHostName, {
+                technicalHostName: node.technicalHostName,
+                reason: 'node_draining',
+                message: `Node ${node.technicalHostName} is draining and cannot receive new assignments.`,
             });
         }
     }
@@ -559,6 +781,32 @@ function buildDebugInfo(
               }
             : {}),
     };
+}
+
+function getRuntimeDiagnosticsStatus(debugInfo: ToporBalancerDebugInfo): string {
+    const groups = debugInfo.groupCandidateDiagnostics ?? [];
+
+    if (groups.some((group) => group.failOpenReason === 'no_active_candidates')) {
+        return 'no_active_candidates';
+    }
+
+    if (groups.some((group) => group.effectiveCandidateNodes.length === 0)) {
+        return 'no_effective_candidates';
+    }
+
+    if (groups.some((group) => group.failOpenReason)) {
+        return 'failed_open';
+    }
+
+    if (debugInfo.matchedTechnicalLinks > 0 && Object.keys(debugInfo.selectedNodes).length === 0) {
+        return 'passed_through';
+    }
+
+    if (groups.length > Object.keys(debugInfo.selectedNodes).length) {
+        return 'partially_processed';
+    }
+
+    return Object.keys(debugInfo.selectedNodes).length > 0 ? 'processed' : 'passed_through';
 }
 
 function buildMissingSelectionWarnings(

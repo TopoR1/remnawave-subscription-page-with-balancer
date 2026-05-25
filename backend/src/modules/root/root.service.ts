@@ -264,10 +264,13 @@ export class RootService {
             );
 
             const subscriptionData = subscriptionDataResponse.response;
+            const subscriptionDataOriginalBody = JSON.stringify(subscriptionDataResponse.response);
 
-            if (baseSettings.showConnectionKeys) {
-                await this.processBrowserPanelSubscriptionLinks(subscriptionData, shortUuid, req);
-            } else {
+            const browserBalancerTrace = baseSettings.showConnectionKeys
+                ? await this.processBrowserPanelSubscriptionLinks(subscriptionData, shortUuid, req)
+                : null;
+
+            if (!baseSettings.showConnectionKeys) {
                 this.logToporBalancerBrowserDebug({
                     browserFlowProcessed: false,
                     inputLinksCount: 0,
@@ -281,17 +284,11 @@ export class RootService {
                 subscriptionData.response.ssConfLinks = {};
             }
 
-            res.cookie('session', this.generateJwtForCookie(subpageConfig.subpageConfigUuid), {
-                httpOnly: true,
-                secure: true,
-                maxAge: 1_800_000, // 30 minutes
-            });
-
-            const viewModel = {
-                metaTitle: baseSettings.metaTitle,
-                metaDescription: baseSettings.metaDescription,
-                panelData: Buffer.from(JSON.stringify(subscriptionData)).toString('base64'),
-            };
+            const browserBalancerInputBody =
+                browserBalancerTrace?.inputBody ?? subscriptionDataOriginalBody;
+            const browserBalancerOutputBody =
+                browserBalancerTrace?.outputBody ?? JSON.stringify(subscriptionData);
+            const browserBalancerResult = browserBalancerTrace?.result ?? null;
 
             this.toporBalancerService.recordSubscriptionTrace({
                 id: `${Date.now()}-${shortUuid.slice(0, 4)}`,
@@ -305,17 +302,55 @@ export class RootService {
                 }),
                 upstream: this.toporBalancerService.analyzeSubscriptionBody(
                     'getSubscriptionInfo',
-                    subscriptionDataResponse.response,
+                    subscriptionDataOriginalBody,
                     'application/json',
                     undefined,
                 ),
                 balancer: this.toporBalancerService.buildBalancerTrace({
-                    contentType: 'application/json',
-                    inputBody: JSON.stringify(subscriptionDataResponse.response),
-                    outputBody: JSON.stringify(subscriptionData),
-                    result: null,
+                    contentType: 'text/plain',
+                    inputBody: browserBalancerInputBody,
+                    outputBody: browserBalancerOutputBody,
+                    result: browserBalancerResult,
                 }),
             });
+
+            if (this.isToporBalancerDebugEnabled) {
+                this.toporBalancerService.recordSubscriptionTrace({
+                    id: `${Date.now()}-${shortUuid.slice(0, 4)}-config`,
+                    request: this.buildRequestTrace({
+                        clientIp,
+                        flow: 'browser',
+                        rawSubscriptionUsed: false,
+                        req,
+                        returnWebpageUsed: true,
+                        shortUuid,
+                    }),
+                    upstream: this.toporBalancerService.analyzeSubscriptionBody(
+                        'getSubpageConfig',
+                        subpageConfigResponse.response,
+                        'application/json',
+                        undefined,
+                    ),
+                    balancer: this.toporBalancerService.buildBalancerTrace({
+                        contentType: 'application/json',
+                        inputBody: '',
+                        outputBody: '',
+                        result: null,
+                    }),
+                });
+            }
+
+            res.cookie('session', this.generateJwtForCookie(subpageConfig.subpageConfigUuid), {
+                httpOnly: true,
+                secure: true,
+                maxAge: 1_800_000, // 30 minutes
+            });
+
+            const viewModel = {
+                metaTitle: baseSettings.metaTitle,
+                metaDescription: baseSettings.metaDescription,
+                panelData: Buffer.from(JSON.stringify(subscriptionData)).toString('base64'),
+            };
 
             if (!this.isToporBalancerDebugEnabled) {
                 res.render('index', viewModel);
@@ -349,10 +384,14 @@ export class RootService {
         },
         shortUuid: string,
         req: Request,
-    ): Promise<void> {
+    ): Promise<{
+        inputBody: string;
+        outputBody: string;
+        result: ToporBalancerProcessResult;
+    } | null> {
         const links = subscriptionData.response?.links;
-        const subscriptionResponse = subscriptionData.response;
-        const browserDebug = {
+            const subscriptionResponse = subscriptionData.response;
+            const browserDebug = {
             browserFlowProcessed: false,
             inputLinksCount: this.countPanelLinks(links),
             outputLinksCount: this.countPanelLinks(links),
@@ -361,9 +400,9 @@ export class RootService {
             rewrittenLinksCount: 0,
         };
 
-        if (links === undefined || links === null) {
-            this.logToporBalancerBrowserDebug(browserDebug);
-            return;
+            if (links === undefined || links === null) {
+                this.logToporBalancerBrowserDebug(browserDebug);
+            return null;
         }
 
         if (!subscriptionResponse) {
@@ -371,7 +410,7 @@ export class RootService {
                 ...browserDebug,
                 reason: 'missing-subscription-response',
             });
-            return;
+            return null;
         }
 
         try {
@@ -388,7 +427,7 @@ export class RootService {
 
                 if (!result) {
                     this.logToporBalancerBrowserDebug(browserDebug);
-                    return;
+                    return null;
                 }
 
                 const outputLinks = result.body.split(/\r?\n/).filter((line) => line.trim());
@@ -402,7 +441,11 @@ export class RootService {
                         result,
                     }),
                 );
-                return;
+                return {
+                    inputBody,
+                    outputBody: result.body,
+                    result,
+                };
             }
 
             if (typeof links === 'string' || Buffer.isBuffer(links)) {
@@ -416,7 +459,7 @@ export class RootService {
 
                 if (!result) {
                     this.logToporBalancerBrowserDebug(browserDebug);
-                    return;
+                    return null;
                 }
 
                 subscriptionResponse.links = result.body;
@@ -428,19 +471,25 @@ export class RootService {
                         result,
                     }),
                 );
-                return;
+                return {
+                    inputBody,
+                    outputBody: result.body,
+                    result,
+                };
             }
 
             this.logToporBalancerBrowserDebug({
                 ...browserDebug,
                 reason: 'unsupported-links-shape',
             });
+            return null;
         } catch (error) {
             this.logger.warn(`TopoR browser panel balancing failed open: ${error}`);
             this.logToporBalancerBrowserDebug({
                 ...browserDebug,
                 reason: 'balancer-failed-open',
             });
+            return null;
         }
     }
 
@@ -523,7 +572,7 @@ export class RootService {
             timestamp: new Date().toISOString(),
             shortUuid: this.maskSecret(input.shortUuid),
             requestPath: input.req.path,
-            queryString: input.req.url.includes('?') ? input.req.url.slice(input.req.url.indexOf('?') + 1) : '',
+            queryString: this.sanitizeQueryString(input.req.url),
             method: input.req.method,
             host: this.formatUserAgent(input.req.headers.host),
             userAgent: this.formatUserAgent(input.req.headers['user-agent']),
@@ -532,12 +581,30 @@ export class RootService {
             secFetchMode: this.formatUserAgent(input.req.headers['sec-fetch-mode']),
             xForwardedProto: this.formatUserAgent(input.req.headers['x-forwarded-proto']),
             xForwardedHost: this.formatUserAgent(input.req.headers['x-forwarded-host']),
-            xRealIp: this.maskSecret(this.formatUserAgent(input.req.headers['x-real-ip']) ?? ''),
+            xRealIp: this.maskIp(this.formatUserAgent(input.req.headers['x-real-ip']) ?? ''),
             clientIp: this.maskIp(input.clientIp),
             flow: input.flow,
             returnWebpageUsed: input.returnWebpageUsed,
             rawSubscriptionUsed: input.rawSubscriptionUsed,
         };
+    }
+
+    private sanitizeQueryString(url: string): string {
+        if (!url.includes('?')) {
+            return '';
+        }
+
+        const queryString = url.slice(url.indexOf('?') + 1);
+        const params = new URLSearchParams(queryString);
+        const sensitiveKeyPattern = /(token|uuid|key|secret|auth|password|signature|sid|pbk)/i;
+
+        for (const key of Array.from(params.keys())) {
+            if (sensitiveKeyPattern.test(key)) {
+                params.set(key, '***');
+            }
+        }
+
+        return params.toString();
     }
 
     private maskSecret(value: string): string {

@@ -102,10 +102,18 @@ export interface ToporBalancerDebugInfo {
                 | 'not_accessible_to_user_squad'
                 | 'not_accessible_to_group_squad'
                 | 'missing_topology'
-                | 'user_not_in_group_squad';
+                | 'user_not_in_group_squad'
+                | 'node_disabled'
+                | 'node_dead'
+                | 'node_draining';
             message: string;
         }>;
+        previousAssignedNode?: string;
+        previousAssignedNodeStatus?: ToporBalancerNodeStatus | 'not_in_subscription' | 'unknown';
+        reassignmentAttempted: boolean;
+        reassignmentResult?: 'kept' | 'reassigned' | 'failed' | 'not_needed';
         selectedTechnicalHostName?: string;
+        failOpenReason?: 'no_active_candidates' | 'node_dead' | 'node_disabled' | 'manual_strategy';
         warnings: string[];
     }>;
     outputLinkCount: number;
@@ -330,6 +338,16 @@ export interface ToporBalancerDbAssignment {
     updatedAt?: string;
 }
 
+export interface ToporBalancerAssignmentActionSummary {
+    removed: number;
+    reassigned: number;
+    skipped: number;
+    errors: Array<{
+        reason: string;
+        shortUuid?: string;
+    }>;
+}
+
 export interface ToporBalancerAdminNode extends ToporBalancerDbNode {
     assignedUsers: number;
 }
@@ -409,7 +427,34 @@ export interface ToporBalancerAdminRequest {
     outputLinksCount?: number;
     status?: string;
     errorMessage?: string;
+    groupCandidateDiagnostics?: NonNullable<ToporBalancerDebugInfo['groupCandidateDiagnostics']>;
+    matchedTechnicalLinks?: number;
+    rewrittenLinksCount?: number;
+    selectedNodes?: Record<string, string>;
     createdAt?: string;
+    warnings?: string[];
+}
+
+export type ToporBalancerRuntimeDiagnosticsStatus =
+    | 'failed_open'
+    | 'no_active_candidates'
+    | 'no_effective_candidates'
+    | 'partially_processed'
+    | 'passed_through'
+    | 'processed'
+    | 'unsupported_app';
+
+export interface ToporBalancerGroupRecentDiagnostic {
+    time?: string;
+    shortUuid: string;
+    userAgent?: string;
+    totalLinks?: number;
+    matchedLinks?: number;
+    rewrittenLinks?: number;
+    selectedNode?: string;
+    status?: ToporBalancerRuntimeDiagnosticsStatus | string;
+    warnings: string[];
+    groupDiagnostic?: NonNullable<ToporBalancerDebugInfo['groupCandidateDiagnostics']>[number];
 }
 
 export interface ToporBalancerSubscriptionRequestTrace {
@@ -544,6 +589,7 @@ export interface ToporBalancerGroupDiscoveryItem extends ToporBalancerDiscovered
     canAdd: boolean;
     currentGroupId: null | string;
     currentGroupName: null | string;
+    membershipStatus: ToporBalancerGroupDiscoveryItemStatus;
     status: ToporBalancerGroupDiscoveryItemStatus;
 }
 

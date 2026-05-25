@@ -1275,6 +1275,54 @@ test('subscription diagnostics detects unsupported app fallback without technica
     );
 });
 
+test('trace-subscription reports unsupported app fallback without assignment or suggestions', async () => {
+    const repository = InMemoryToporBalancerRepository.fromConfig(balancerConfig);
+    const service = new ToporBalancerService(
+        createConfigServiceStub({
+            TOPOR_BALANCER_ASSIGNMENT_MODE: 'database',
+            TOPOR_BALANCER_DATABASE_URL: 'postgres://unit-test',
+            TOPOR_BALANCER_DEBUG: false,
+        }),
+        ({
+            getSubscriptionWithTrace: async (
+                _clientIp: string,
+                _shortUuid: string,
+                headers: Record<string, string>,
+            ) => ({
+                response: buildUnsupportedAppFallbackLink(),
+                headers: {
+                    'content-type': 'text/plain',
+                },
+                trace: {
+                    endpointType: 'getSubscription',
+                    outgoingUserAgent: headers['user-agent'],
+                    path: 'api/sub/trace-user',
+                },
+            }),
+        } as unknown) as AxiosService,
+    );
+
+    setServiceRepository(service, repository);
+
+    const result = await service.traceSubscription({
+        shortUuid: 'trace-user',
+        headers: {
+            'user-agent': 'v2raytun/windows',
+            accept: '*/*',
+        },
+    });
+
+    assert.equal(result.upstream.outgoingUserAgent, 'v2raytun/windows');
+    assert.equal(result.upstream.vlessLinksCount, 1);
+    assert.equal(result.upstream.unsupportedAppFallback, true);
+    assert.equal(result.balancer.status, 'unsupported_app');
+    assert.equal(result.balancer.inputLinksCount, 1);
+    assert.equal(result.balancer.matchedTechnicalLinks, 0);
+    assert.deepEqual(result.balancer.unmatchedRemarks, []);
+    assert.equal(result.output.unsupportedAppFallback, true);
+    assert.equal(repository.assignments.size, 0);
+});
+
 test('database balancer creates a new assignment', async () => {
     const repository = InMemoryToporBalancerRepository.fromConfig(balancerConfig);
     const body = [buildVlessLink('FI-STD-01'), buildVlessLink('FI-STD-02')].join('\n');
@@ -1374,6 +1422,34 @@ test('database balancer passes through a group when user has no accessible candi
         result.debugInfo.warnings?.some((warning) =>
             warning.includes('No accessible TopoR balancer candidates'),
         ),
+    );
+});
+
+test('database balancer treats subscription-present nodes as accessible when user squads are empty', async () => {
+    const config = buildStrategyConfig('least_loaded', [
+        { technicalHostName: 'FI-STD-01', weight: 1, maxUsers: 300, status: 'active' },
+    ]);
+    const repository = InMemoryToporBalancerRepository.fromConfig(config);
+    const body = buildVlessLink('FI-STD-01');
+    const result = await processSubscriptionWithDatabaseBalancer({
+        shortUuid: 'empty-squads-user',
+        body,
+        config,
+        repository,
+        topology: buildRuntimeTopology(),
+        userAccess: {
+            squads: [],
+            accessibleNodeUuids: [],
+        },
+    });
+
+    assert.equal(result.debugInfo.selectedNodes['fi_standard:standard'], 'FI-STD-01');
+    assert.equal(parseSubscription(result.body).links[0].remark, '\u{1F1EB}\u{1F1EE} Finland');
+    assert.equal(
+        result.debugInfo.groupCandidateDiagnostics?.[0]?.excludedNodes.some(
+            (node) => node.reason === 'not_accessible_to_user_squad',
+        ),
+        false,
     );
 });
 
@@ -1484,6 +1560,10 @@ test('database balancer keeps an existing active assignment', async () => {
     });
 
     assert.equal(result.debugInfo.selectedNodes['fi_standard:standard'], 'FI-STD-02');
+    assert.equal(result.debugInfo.groupCandidateDiagnostics?.[0]?.previousAssignedNode, 'FI-STD-02');
+    assert.equal(result.debugInfo.groupCandidateDiagnostics?.[0]?.previousAssignedNodeStatus, 'active');
+    assert.equal(result.debugInfo.groupCandidateDiagnostics?.[0]?.reassignmentAttempted, false);
+    assert.equal(result.debugInfo.groupCandidateDiagnostics?.[0]?.reassignmentResult, 'kept');
 });
 
 test('database balancer keeps a draining assignment for existing users', async () => {
@@ -1501,9 +1581,37 @@ test('database balancer keeps a draining assignment for existing users', async (
     });
 
     assert.equal(result.debugInfo.selectedNodes['fi_standard:standard'], 'FI-STD-02');
+    assert.equal(result.debugInfo.groupCandidateDiagnostics?.[0]?.previousAssignedNode, 'FI-STD-02');
+    assert.equal(result.debugInfo.groupCandidateDiagnostics?.[0]?.previousAssignedNodeStatus, 'draining');
+    assert.equal(result.debugInfo.groupCandidateDiagnostics?.[0]?.reassignmentAttempted, false);
+    assert.equal(result.debugInfo.groupCandidateDiagnostics?.[0]?.reassignmentResult, 'kept');
 });
 
-test('database balancer reassigns disabled or dead assigned nodes', async () => {
+test('database balancer reassigns disabled assigned nodes to an active candidate', async () => {
+    const repository = InMemoryToporBalancerRepository.fromConfig(balancerConfig);
+    const body = [buildVlessLink('FI-STD-01'), buildVlessLink('FI-STD-02')].join('\n');
+
+    repository.setStatus('FI-STD-02', 'disabled');
+    repository.assign('db-user-disabled', 'fi_standard', 'standard', 'FI-STD-02');
+
+    const result = await processSubscriptionWithDatabaseBalancer({
+        shortUuid: 'db-user-disabled',
+        body,
+        config: balancerConfig,
+        repository,
+    });
+
+    assert.equal(result.debugInfo.selectedNodes['fi_standard:standard'], 'FI-STD-01');
+    assert.equal(parseSubscription(result.body).links.length, 1);
+    assert.equal(parseSubscription(result.body).links[0].remark, '\u{1F1EB}\u{1F1EE} Finland');
+    assert.equal(result.debugInfo.groupCandidateDiagnostics?.[0]?.previousAssignedNode, 'FI-STD-02');
+    assert.equal(result.debugInfo.groupCandidateDiagnostics?.[0]?.previousAssignedNodeStatus, 'disabled');
+    assert.equal(result.debugInfo.groupCandidateDiagnostics?.[0]?.reassignmentAttempted, true);
+    assert.equal(result.debugInfo.groupCandidateDiagnostics?.[0]?.reassignmentResult, 'reassigned');
+    assert.equal(result.debugInfo.groupCandidateDiagnostics?.[0]?.selectedTechnicalHostName, 'FI-STD-01');
+});
+
+test('database balancer reassigns dead assigned nodes to an active candidate', async () => {
     const repository = InMemoryToporBalancerRepository.fromConfig(balancerConfig);
     const body = [buildVlessLink('FI-STD-01'), buildVlessLink('FI-STD-02')].join('\n');
 
@@ -1518,6 +1626,41 @@ test('database balancer reassigns disabled or dead assigned nodes', async () => 
     });
 
     assert.equal(result.debugInfo.selectedNodes['fi_standard:standard'], 'FI-STD-01');
+    assert.equal(result.debugInfo.groupCandidateDiagnostics?.[0]?.previousAssignedNode, 'FI-STD-02');
+    assert.equal(result.debugInfo.groupCandidateDiagnostics?.[0]?.previousAssignedNodeStatus, 'dead');
+    assert.equal(result.debugInfo.groupCandidateDiagnostics?.[0]?.reassignmentAttempted, true);
+    assert.equal(result.debugInfo.groupCandidateDiagnostics?.[0]?.reassignmentResult, 'reassigned');
+});
+
+test('database balancer fails open clearly when disabled or dead assignment has no active candidates', async () => {
+    const config = buildStrategyConfig('least_loaded', [
+        { technicalHostName: 'FI-STD-01', weight: 1, maxUsers: 300, status: 'disabled' },
+        { technicalHostName: 'FI-STD-02', weight: 1, maxUsers: 300, status: 'dead' },
+    ]);
+    const repository = InMemoryToporBalancerRepository.fromConfig(config);
+    const body = [buildVlessLink('FI-STD-01'), buildVlessLink('FI-STD-02')].join('\n');
+
+    repository.assign('db-user-no-active-disabled', 'fi_standard', 'standard', 'FI-STD-01');
+
+    const result = await processSubscriptionWithDatabaseBalancer({
+        shortUuid: 'db-user-no-active-disabled',
+        body,
+        config,
+        repository,
+    });
+
+    assert.equal(result.body, body);
+    assert.deepEqual(result.debugInfo.selectedNodes, {});
+    assert.equal(result.debugInfo.groupCandidateDiagnostics?.[0]?.previousAssignedNode, 'FI-STD-01');
+    assert.equal(result.debugInfo.groupCandidateDiagnostics?.[0]?.previousAssignedNodeStatus, 'disabled');
+    assert.equal(result.debugInfo.groupCandidateDiagnostics?.[0]?.reassignmentAttempted, true);
+    assert.equal(result.debugInfo.groupCandidateDiagnostics?.[0]?.reassignmentResult, 'failed');
+    assert.equal(result.debugInfo.groupCandidateDiagnostics?.[0]?.failOpenReason, 'node_disabled');
+    assert.ok(
+        result.debugInfo.groupCandidateDiagnostics?.[0]?.excludedNodes.some(
+            (node) => node.reason === 'node_dead',
+        ),
+    );
 });
 
 test('database balancer selects the lowest weighted load node', async () => {
@@ -1663,6 +1806,31 @@ test('disabled and dead nodes are excluded from new assignments', async () => {
     });
 
     assert.equal(result.debugInfo.selectedNodes['fi_standard:standard'], 'FI-STD-03');
+});
+
+test('database balancer rewrites group when one node is disabled and another is active', async () => {
+    const config = buildStrategyConfig('least_loaded', [
+        { technicalHostName: 'FI-STD-01', weight: 1, maxUsers: 300, status: 'disabled' },
+        { technicalHostName: 'FI-STD-02', weight: 1, maxUsers: 300, status: 'active' },
+    ]);
+    const repository = InMemoryToporBalancerRepository.fromConfig(config);
+    const body = [buildVlessLink('FI-STD-01'), buildVlessLink('FI-STD-02')].join('\n');
+    const result = await processSubscriptionWithDatabaseBalancer({
+        shortUuid: 'one-disabled-one-active',
+        body,
+        config,
+        repository,
+    });
+    const outputRemarks = parseSubscription(result.body).links.map((link) => link.remark);
+
+    assert.deepEqual(outputRemarks, ['\u{1F1EB}\u{1F1EE} Finland']);
+    assert.equal(result.debugInfo.selectedNodes['fi_standard:standard'], 'FI-STD-02');
+    assert.equal(result.debugInfo.groupCandidateDiagnostics?.[0]?.reassignmentAttempted, false);
+    assert.ok(
+        result.debugInfo.groupCandidateDiagnostics?.[0]?.excludedNodes.some(
+            (node) => node.technicalHostName === 'FI-STD-01' && node.reason === 'node_disabled',
+        ),
+    );
 });
 
 test('manual strategy fails open when no existing assignment exists', async () => {
@@ -2188,6 +2356,150 @@ test('admin service lists, updates, and manually reassigns nodes', async () => {
     assert.equal(reassignment.technicalHostName, 'FI-STD-02');
     assert.equal(assignments.length, 1);
     assert.ok(nodes.some((node) => node.technicalHostName === 'FI-STD-01'));
+});
+
+test('admin service resets assignments for a group', async () => {
+    const repository = InMemoryToporBalancerRepository.fromConfig(balancerConfig);
+    const service = new ToporBalancerService(
+        createConfigServiceStub({
+            TOPOR_BALANCER_ENABLED: true,
+            TOPOR_BALANCER_ASSIGNMENT_MODE: 'database',
+            TOPOR_BALANCER_DATABASE_URL: 'postgres://unit-test',
+        }),
+    );
+
+    setServiceRepository(service, repository);
+    repository.assign('reset-1', 'fi_standard', 'standard', 'FI-STD-01');
+    repository.assign('reset-2', 'fi_standard', 'standard', 'FI-STD-02');
+    repository.assign('keep-1', 'fi_game', 'game', 'FI-GAME-01');
+
+    const summary = await service.resetGroupAssignments('fi_standard:standard', true);
+
+    assert.deepEqual(summary, { removed: 2, reassigned: 0, skipped: 0, errors: [] });
+    assert.equal((await repository.listGroupAssignments({ publicHostCode: 'fi_standard', planCode: 'standard' })).length, 0);
+    assert.equal((await repository.listGroupAssignments({ publicHostCode: 'fi_game', planCode: 'game' })).length, 1);
+});
+
+test('admin service migrates assignments from a disabled node to active nodes', async () => {
+    const repository = InMemoryToporBalancerRepository.fromConfig(balancerConfig);
+    const service = new ToporBalancerService(
+        createConfigServiceStub({
+            TOPOR_BALANCER_ENABLED: true,
+            TOPOR_BALANCER_ASSIGNMENT_MODE: 'database',
+            TOPOR_BALANCER_DATABASE_URL: 'postgres://unit-test',
+        }),
+    );
+
+    setServiceRepository(service, repository);
+    repository.setStatus('FI-STD-02', 'disabled');
+    repository.assign('migrate-1', 'fi_standard', 'standard', 'FI-STD-02');
+    repository.assign('migrate-2', 'fi_standard', 'standard', 'FI-STD-02');
+
+    const summary = await service.migrateNodeAssignments('fi_standard:standard', 'FI-STD-02', true);
+    const assignments = await repository.listGroupAssignments({
+        publicHostCode: 'fi_standard',
+        planCode: 'standard',
+    });
+
+    assert.equal(summary.reassigned, 2);
+    assert.equal(summary.skipped, 0);
+    assert.equal(assignments.every((assignment) => assignment.technicalHostName !== 'FI-STD-02'), true);
+    assert.equal(
+        assignments.every((assignment) =>
+            ['FI-STD-01', 'FI-STD-03'].includes(assignment.technicalHostName ?? ''),
+        ),
+        true,
+    );
+});
+
+test('admin service rebalances least_loaded assignments across active nodes', async () => {
+    const config = buildStrategyConfig('least_loaded', [
+        { technicalHostName: 'FI-STD-01', weight: 1, maxUsers: 300, status: 'active' },
+        { technicalHostName: 'FI-STD-02', weight: 1, maxUsers: 300, status: 'active' },
+    ]);
+    const repository = InMemoryToporBalancerRepository.fromConfig(config);
+    const service = new ToporBalancerService(
+        createConfigServiceStub({
+            TOPOR_BALANCER_ENABLED: true,
+            TOPOR_BALANCER_ASSIGNMENT_MODE: 'database',
+            TOPOR_BALANCER_DATABASE_URL: 'postgres://unit-test',
+        }),
+    );
+
+    setServiceRepository(service, repository);
+    repository.assign('rebalance-1', 'fi_standard', 'standard', 'FI-STD-01');
+    repository.assign('rebalance-2', 'fi_standard', 'standard', 'FI-STD-01');
+    repository.assign('rebalance-3', 'fi_standard', 'standard', 'FI-STD-01');
+    repository.assign('rebalance-4', 'fi_standard', 'standard', 'FI-STD-01');
+
+    const summary = await service.rebalanceGroupAssignments('fi_standard:standard', true);
+    const assignments = await repository.listGroupAssignments({
+        publicHostCode: 'fi_standard',
+        planCode: 'standard',
+    });
+    const firstCount = assignments.filter((assignment) => assignment.technicalHostName === 'FI-STD-01').length;
+    const secondCount = assignments.filter((assignment) => assignment.technicalHostName === 'FI-STD-02').length;
+
+    assert.equal(summary.reassigned, 4);
+    assert.deepEqual([firstCount, secondCount].sort(), [2, 2]);
+});
+
+test('admin assignment actions never use disabled or dead nodes', async () => {
+    const config = buildStrategyConfig('least_loaded', [
+        { technicalHostName: 'FI-STD-01', weight: 1, maxUsers: 300, status: 'active' },
+        { technicalHostName: 'FI-STD-02', weight: 1, maxUsers: 300, status: 'disabled' },
+        { technicalHostName: 'FI-STD-03', weight: 1, maxUsers: 300, status: 'dead' },
+    ]);
+    const repository = InMemoryToporBalancerRepository.fromConfig(config);
+    const service = new ToporBalancerService(
+        createConfigServiceStub({
+            TOPOR_BALANCER_ENABLED: true,
+            TOPOR_BALANCER_ASSIGNMENT_MODE: 'database',
+            TOPOR_BALANCER_DATABASE_URL: 'postgres://unit-test',
+        }),
+    );
+
+    setServiceRepository(service, repository);
+    repository.assign('safe-1', 'fi_standard', 'standard', 'FI-STD-02');
+    repository.assign('safe-2', 'fi_standard', 'standard', 'FI-STD-03');
+
+    const summary = await service.rebalanceGroupAssignments('fi_standard:standard', true);
+    const assignments = await repository.listGroupAssignments({
+        publicHostCode: 'fi_standard',
+        planCode: 'standard',
+    });
+
+    assert.equal(summary.reassigned, 2);
+    assert.equal(assignments.every((assignment) => assignment.technicalHostName === 'FI-STD-01'), true);
+});
+
+test('admin service exposes recent diagnostics for a group', async () => {
+    const repository = InMemoryToporBalancerRepository.fromConfig(balancerConfig);
+    const service = new ToporBalancerService(
+        createConfigServiceStub({
+            TOPOR_BALANCER_ENABLED: true,
+            TOPOR_BALANCER_ASSIGNMENT_MODE: 'database',
+            TOPOR_BALANCER_DATABASE_URL: 'postgres://unit-test',
+        }),
+    );
+
+    setServiceRepository(service, repository);
+    await processSubscriptionWithDatabaseBalancer({
+        shortUuid: 'recent-diagnostics-user',
+        body: [buildVlessLink('FI-STD-01'), buildVlessLink('FI-STD-02')].join('\n'),
+        config: balancerConfig,
+        repository,
+        userAgent: 'v2raytun/windows',
+    });
+
+    const diagnostics = await service.listGroupRecentDiagnostics('fi_standard:standard');
+
+    assert.equal(diagnostics.length, 1);
+    assert.equal(diagnostics[0].userAgent, 'v2raytun/windows');
+    assert.equal(diagnostics[0].totalLinks, 2);
+    assert.equal(diagnostics[0].matchedLinks, 2);
+    assert.equal(diagnostics[0].status, 'processed');
+    assert.ok(diagnostics[0].selectedNode);
 });
 
 test('database mode starts without a JSON config and exposes an empty nodes list', async () => {
@@ -3382,6 +3694,31 @@ class InMemoryToporBalancerRepository implements ToporBalancerAssignmentReposito
             );
     }
 
+    public async listGroupAssignments(filters: {
+        publicHostCode: string;
+        planCode: string;
+    }): Promise<ToporBalancerDbAssignment[]> {
+        return this.listAssignments({
+            publicHostCode: filters.publicHostCode,
+            planCode: filters.planCode,
+        });
+    }
+
+    public async resetGroupAssignments(filters: {
+        publicHostCode: string;
+        planCode: string;
+    }): Promise<number> {
+        const assignments = await this.listGroupAssignments(filters);
+
+        for (const assignment of assignments) {
+            this.assignments.delete(
+                assignmentKey(assignment.shortUuid, assignment.publicHostCode, assignment.planCode),
+            );
+        }
+
+        return assignments.length;
+    }
+
     public async reassign(
         input: ToporBalancerManualReassignInput,
     ): Promise<ToporBalancerDbAssignment | null> {
@@ -3428,6 +3765,37 @@ class InMemoryToporBalancerRepository implements ToporBalancerAssignmentReposito
                 createdAt: new Date(0).toISOString(),
             }))
             .filter((request) => !filters.shortUuid || request.shortUuid === filters.shortUuid);
+    }
+
+    public async listGroupRecentDiagnostics(filters: {
+        publicHostCode: string;
+        planCode: string;
+    }): Promise<ToporBalancerAdminRequest[]> {
+        return this.requests
+            .map((request, index) => ({
+                id: `${index}`,
+                shortUuid: request.shortUuid,
+                userAgent: request.userAgent,
+                responseFormat: request.responseFormat,
+                inputLinksCount: request.inputLinksCount,
+                matchedTechnicalLinks: request.matchedTechnicalLinks,
+                outputLinksCount: request.outputLinksCount,
+                rewrittenLinksCount: request.rewrittenLinksCount,
+                selectedNodes: request.selectedNodes,
+                status: request.status,
+                errorMessage: request.errorMessage,
+                groupCandidateDiagnostics:
+                    request.groupCandidateDiagnostics as ToporBalancerAdminRequest['groupCandidateDiagnostics'],
+                createdAt: new Date(0).toISOString(),
+                warnings: request.warnings,
+            }))
+            .filter((request) =>
+                request.groupCandidateDiagnostics?.some(
+                    (group) =>
+                        group.publicHostCode === filters.publicHostCode &&
+                        group.planCode === filters.planCode,
+                ),
+            );
     }
 
     public async replaceRemnawaveTopologyCache(

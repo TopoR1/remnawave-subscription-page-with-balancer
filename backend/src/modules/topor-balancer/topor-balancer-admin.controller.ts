@@ -171,6 +171,11 @@ export class ToporBalancerAdminController {
         return this.toporBalancerDiscoveryService.discoverGroupFromRemnawaveApi(id);
     }
 
+    @Get('groups/:id/diagnostics/recent')
+    public async groupRecentDiagnostics(@Param('id') id: string) {
+        return this.toporBalancerService.listGroupRecentDiagnostics(id);
+    }
+
     @Post('groups/:id/discovery/refresh')
     public async refreshGroupDiscovery(@Param('id') id: string) {
         return this.toporBalancerDiscoveryService.refreshGroupFromRemnawaveApi(id);
@@ -302,6 +307,31 @@ export class ToporBalancerAdminController {
         },
     ) {
         return this.toporBalancerService.reassignAdminAssignment(body);
+    }
+
+    @Post('groups/:id/assignments/reset')
+    public async resetGroupAssignments(
+        @Param('id') id: string,
+        @Body() body: { confirmed?: boolean },
+    ) {
+        return this.toporBalancerService.resetGroupAssignments(id, body.confirmed === true);
+    }
+
+    @Post('groups/:id/assignments/rebalance')
+    public async rebalanceGroupAssignments(
+        @Param('id') id: string,
+        @Body() body: { confirmed?: boolean },
+    ) {
+        return this.toporBalancerService.rebalanceGroupAssignments(id, body.confirmed === true);
+    }
+
+    @Post('groups/:id/nodes/:nodeId/assignments/migrate')
+    public async migrateNodeAssignments(
+        @Param('id') id: string,
+        @Param('nodeId') nodeId: string,
+        @Body() body: { confirmed?: boolean },
+    ) {
+        return this.toporBalancerService.migrateNodeAssignments(id, nodeId, body.confirmed === true);
     }
 
     @Post('nodes/:id/drain')

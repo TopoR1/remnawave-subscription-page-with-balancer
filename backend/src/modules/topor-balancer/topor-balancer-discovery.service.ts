@@ -241,6 +241,7 @@ export class ToporBalancerDiscoveryService {
                 currentGroupId: nodeInThisGroup?.groupId ?? null,
                 currentGroupName: nodeInThisGroup?.publicName ?? null,
                 matchedNodeId: nodeInThisGroup?.id ?? null,
+                membershipStatus: 'not_accessible_to_selected_squad',
                 squadStatus: 'not_accessible_to_selected_squad',
                 status: 'not_accessible_to_selected_squad',
                 technicalHostName,
@@ -258,6 +259,7 @@ export class ToporBalancerDiscoveryService {
                 matchedGroupPlanCode: nodeInThisGroup.planCode,
                 matchedGroupPublicHostCode: nodeInThisGroup.publicHostCode,
                 matchedNodeId: nodeInThisGroup.id,
+                membershipStatus: 'in_this_group',
                 status: 'in_this_group',
                 technicalHostName,
             };
@@ -276,6 +278,7 @@ export class ToporBalancerDiscoveryService {
                 matchedGroupPlanCode: nodeInOtherGroup.planCode,
                 matchedGroupPublicHostCode: nodeInOtherGroup.publicHostCode,
                 matchedNodeId: nodeInOtherGroup.id,
+                membershipStatus: 'in_other_group',
                 status: 'in_other_group',
                 technicalHostName,
             };
@@ -289,6 +292,7 @@ export class ToporBalancerDiscoveryService {
                 currentGroupId: null,
                 currentGroupName: nodesInOtherGroups.map((node) => node.publicName).join(', '),
                 matchedNodeId: null,
+                membershipStatus: 'conflict',
                 status: 'conflict',
                 technicalHostName,
             };
@@ -304,6 +308,7 @@ export class ToporBalancerDiscoveryService {
             matchedGroupPlanCode: undefined,
             matchedGroupPublicHostCode: undefined,
             matchedNodeId: null,
+            membershipStatus: 'free',
             squadStatus: item.accessibleSquads?.length ? 'accessible' : 'unknown',
             status: 'free',
             technicalHostName,

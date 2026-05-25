@@ -53,13 +53,18 @@ export interface ToporBalancerAssignmentSelectionInput {
 }
 
 export interface ToporBalancerRequestLogInput {
+    groupCandidateDiagnostics?: unknown[];
     shortUuid: string;
     userAgent?: string;
     responseFormat: string;
     inputLinksCount: number;
+    matchedTechnicalLinks?: number;
     outputLinksCount: number;
+    rewrittenLinksCount?: number;
+    selectedNodes?: Record<string, string>;
     status?: string;
     errorMessage?: string;
+    warnings?: string[];
 }
 
 export interface ToporBalancerAssignmentFilters {
@@ -67,6 +72,11 @@ export interface ToporBalancerAssignmentFilters {
     publicHostCode?: string;
     planCode?: string;
     nodeId?: string;
+}
+
+export interface ToporBalancerGroupAssignmentFilters {
+    publicHostCode: string;
+    planCode: string;
 }
 
 export interface ToporBalancerRequestFilters {
@@ -150,6 +160,7 @@ export interface ToporBalancerAssignmentRepository {
     countNodes(): Promise<number>;
     countAssignments(): Promise<number>;
     countRequests(): Promise<number>;
+    listGroupRecentDiagnostics(filters: ToporBalancerGroupAssignmentFilters): Promise<ToporBalancerAdminRequest[]>;
     listGroups(): Promise<ToporBalancerAdminGroup[]>;
     getGroup(id: string): Promise<ToporBalancerAdminGroup | null>;
     createGroup(input: ToporBalancerGroupCreateInput): Promise<ToporBalancerAdminGroup | null>;
@@ -177,6 +188,8 @@ export interface ToporBalancerAssignmentRepository {
     ): Promise<ToporBalancerAdminNode | null>;
     deleteNode(id: string): Promise<ToporBalancerNodeDeleteResult>;
     listAssignments(filters: ToporBalancerAssignmentFilters): Promise<ToporBalancerDbAssignment[]>;
+    listGroupAssignments(filters: ToporBalancerGroupAssignmentFilters): Promise<ToporBalancerDbAssignment[]>;
+    resetGroupAssignments(filters: ToporBalancerGroupAssignmentFilters): Promise<number>;
     reassign(input: ToporBalancerManualReassignInput): Promise<ToporBalancerDbAssignment | null>;
     listRequests(filters: ToporBalancerRequestFilters): Promise<ToporBalancerAdminRequest[]>;
     replaceRemnawaveTopologyCache(input: ToporRemnawaveTopologySnapshot): Promise<void>;
@@ -280,15 +293,20 @@ interface DbTopologySquadRow {
 }
 
 interface DbRequestRow {
+    group_candidate_diagnostics: unknown[] | null;
     id: string;
     short_uuid: string;
     user_agent: string | null;
     response_format: string | null;
     input_links_count: number | null;
+    matched_technical_links: number | null;
     output_links_count: number | null;
+    rewritten_links_count: number | null;
+    selected_nodes: Record<string, string> | null;
     status: string | null;
     error_message: string | null;
     created_at: Date | string;
+    warnings: string[] | null;
 }
 
 export class ToporBalancerPostgresRepository implements ToporBalancerAssignmentRepository {
@@ -428,6 +446,21 @@ export class ToporBalancerPostgresRepository implements ToporBalancerAssignmentR
             ALTER TABLE topor_balancer_requests
                 ADD COLUMN IF NOT EXISTS error_message TEXT;
 
+            ALTER TABLE topor_balancer_requests
+                ADD COLUMN IF NOT EXISTS matched_technical_links INTEGER;
+
+            ALTER TABLE topor_balancer_requests
+                ADD COLUMN IF NOT EXISTS rewritten_links_count INTEGER;
+
+            ALTER TABLE topor_balancer_requests
+                ADD COLUMN IF NOT EXISTS selected_nodes JSONB NOT NULL DEFAULT '{}'::jsonb;
+
+            ALTER TABLE topor_balancer_requests
+                ADD COLUMN IF NOT EXISTS group_candidate_diagnostics JSONB NOT NULL DEFAULT '[]'::jsonb;
+
+            ALTER TABLE topor_balancer_requests
+                ADD COLUMN IF NOT EXISTS warnings JSONB NOT NULL DEFAULT '[]'::jsonb;
+
             CREATE TABLE IF NOT EXISTS topor_remnawave_hosts (
                 uuid TEXT PRIMARY KEY,
                 remark TEXT NOT NULL,
@@ -541,11 +574,16 @@ export class ToporBalancerPostgresRepository implements ToporBalancerAssignmentR
                 user_agent,
                 response_format,
                 input_links_count,
+                matched_technical_links,
                 output_links_count,
+                rewritten_links_count,
+                selected_nodes,
+                group_candidate_diagnostics,
                 status,
-                error_message
+                error_message,
+                warnings
             )
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb, $9::jsonb, $10, $11, $12::jsonb)
             `,
             [
                 randomUUID(),
@@ -553,9 +591,14 @@ export class ToporBalancerPostgresRepository implements ToporBalancerAssignmentR
                 input.userAgent ?? null,
                 input.responseFormat,
                 input.inputLinksCount,
+                input.matchedTechnicalLinks ?? null,
                 input.outputLinksCount,
+                input.rewrittenLinksCount ?? null,
+                JSON.stringify(input.selectedNodes ?? {}),
+                JSON.stringify(input.groupCandidateDiagnostics ?? []),
                 input.status ?? 'ok',
                 input.errorMessage ?? null,
+                JSON.stringify(input.warnings ?? []),
             ],
         );
     }
@@ -982,6 +1025,41 @@ export class ToporBalancerPostgresRepository implements ToporBalancerAssignmentR
         return result.rows.map(mapAssignmentRow);
     }
 
+    public async listGroupAssignments(
+        filters: ToporBalancerGroupAssignmentFilters,
+    ): Promise<ToporBalancerDbAssignment[]> {
+        const result = await this.pool.query<DbAssignmentRow>(
+            `
+            SELECT a.*, n.technical_host_name
+            FROM topor_balancer_assignments a
+            JOIN topor_balancer_nodes n ON n.id = a.node_id
+            WHERE a.public_host_code = $1
+              AND a.plan_code = $2
+            ORDER BY a.updated_at DESC
+            `,
+            [filters.publicHostCode, filters.planCode],
+        );
+
+        return result.rows.map(mapAssignmentRow);
+    }
+
+    public async resetGroupAssignments(filters: ToporBalancerGroupAssignmentFilters): Promise<number> {
+        const result = await this.pool.query<DbCountRow>(
+            `
+            WITH deleted AS (
+                DELETE FROM topor_balancer_assignments
+                WHERE public_host_code = $1
+                  AND plan_code = $2
+                RETURNING id
+            )
+            SELECT COUNT(*) AS count FROM deleted
+            `,
+            [filters.publicHostCode, filters.planCode],
+        );
+
+        return Number(result.rows[0]?.count ?? 0);
+    }
+
     public async reassign(
         input: ToporBalancerManualReassignInput,
     ): Promise<ToporBalancerDbAssignment | null> {
@@ -1061,6 +1139,30 @@ export class ToporBalancerPostgresRepository implements ToporBalancerAssignmentR
             LIMIT 500
             `,
             params,
+        );
+
+        return result.rows.map(mapRequestRow);
+    }
+
+    public async listGroupRecentDiagnostics(
+        filters: ToporBalancerGroupAssignmentFilters,
+    ): Promise<ToporBalancerAdminRequest[]> {
+        const result = await this.pool.query<DbRequestRow>(
+            `
+            SELECT *
+            FROM topor_balancer_requests
+            WHERE group_candidate_diagnostics @> $1::jsonb
+            ORDER BY created_at DESC
+            LIMIT 100
+            `,
+            [
+                JSON.stringify([
+                    {
+                        publicHostCode: filters.publicHostCode,
+                        planCode: filters.planCode,
+                    },
+                ]),
+            ],
         );
 
         return result.rows.map(mapRequestRow);
@@ -1795,10 +1897,18 @@ function mapRequestRow(row: DbRequestRow): ToporBalancerAdminRequest {
         userAgent: row.user_agent ?? undefined,
         responseFormat: row.response_format ?? undefined,
         inputLinksCount: row.input_links_count ?? undefined,
+        matchedTechnicalLinks: row.matched_technical_links ?? undefined,
         outputLinksCount: row.output_links_count ?? undefined,
+        rewrittenLinksCount: row.rewritten_links_count ?? undefined,
+        selectedNodes: row.selected_nodes ?? undefined,
         status: row.status ?? undefined,
         errorMessage: row.error_message ?? undefined,
+        groupCandidateDiagnostics:
+            (row.group_candidate_diagnostics as NonNullable<
+                ToporBalancerAdminRequest['groupCandidateDiagnostics']
+            > | null) ?? undefined,
         createdAt: row.created_at?.toString(),
+        warnings: row.warnings ?? undefined,
     };
 }
 

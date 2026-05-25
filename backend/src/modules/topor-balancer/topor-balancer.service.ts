@@ -29,16 +29,19 @@ import type {
     ToporBalancerAdminGroup,
     ToporBalancerAdminNode,
     ToporBalancerAdminRequest,
+    ToporBalancerAssignmentActionSummary,
     ToporBalancerBootstrap,
     ToporBalancerAssignmentMode,
     ToporBalancerConfig,
     ToporBalancerDbAssignment,
+    ToporBalancerDbNode,
     ToporBalancerDiscoveryImportInput,
     ToporBalancerDiscoveryImportResult,
     ToporBalancerDebugProcessSubscriptionResult,
     ToporBalancerDebugInfo,
     ToporBalancerGroupStrategy,
     ToporBalancerGroupNodeImportResult,
+    ToporBalancerGroupRecentDiagnostic,
     ToporBalancerNodeStatus,
     ToporBalancerProcessResult,
     ToporBalancerRecentSubscriptionTrace,
@@ -674,10 +677,195 @@ export class ToporBalancerService implements OnModuleDestroy, OnModuleInit {
         return assignment;
     }
 
+    public async resetGroupAssignments(
+        groupId: string,
+        confirmed: boolean,
+    ): Promise<ToporBalancerAssignmentActionSummary> {
+        this.validateConfirmation(confirmed);
+        const group = await this.requireAdminGroup(groupId);
+        const removed = await this.getAdminRepository().resetGroupAssignments({
+            publicHostCode: group.publicHostCode,
+            planCode: group.planCode,
+        });
+
+        return { removed, reassigned: 0, skipped: 0, errors: [] };
+    }
+
+    public async rebalanceGroupAssignments(
+        groupId: string,
+        confirmed: boolean,
+    ): Promise<ToporBalancerAssignmentActionSummary> {
+        this.validateConfirmation(confirmed);
+        const group = await this.requireAdminGroup(groupId);
+        const repository = this.getAdminRepository();
+        const assignments = await repository.listGroupAssignments({
+            publicHostCode: group.publicHostCode,
+            planCode: group.planCode,
+        });
+        const nodes = (await repository.listGroupNodes(groupId)) ?? [];
+        const activeNodes = nodes.filter((node) => node.status === 'active');
+        const summary: ToporBalancerAssignmentActionSummary = {
+            removed: 0,
+            reassigned: 0,
+            skipped: 0,
+            errors: [],
+        };
+
+        if (activeNodes.length === 0) {
+            return {
+                ...summary,
+                skipped: assignments.length,
+                errors: [{ reason: 'no_active_nodes' }],
+            };
+        }
+
+        const counts = new Map(activeNodes.map((node) => [node.id, 0]));
+
+        for (const assignment of assignments) {
+            const target = this.selectAssignmentTargetNode(group.strategy, assignment.shortUuid, activeNodes, counts);
+
+            if (!target) {
+                summary.skipped += 1;
+                summary.errors.push({ reason: 'no_active_target', shortUuid: assignment.shortUuid });
+                continue;
+            }
+
+            try {
+                await repository.reassign({
+                    shortUuid: assignment.shortUuid,
+                    publicHostCode: group.publicHostCode,
+                    planCode: group.planCode,
+                    technicalHostName: target.technicalHostName,
+                });
+                counts.set(target.id, (counts.get(target.id) ?? 0) + 1);
+                summary.reassigned += 1;
+            } catch (error) {
+                summary.errors.push({
+                    reason: String(error),
+                    shortUuid: assignment.shortUuid,
+                });
+            }
+        }
+
+        return summary;
+    }
+
+    public async migrateNodeAssignments(
+        groupId: string,
+        nodeId: string,
+        confirmed: boolean,
+    ): Promise<ToporBalancerAssignmentActionSummary> {
+        this.validateConfirmation(confirmed);
+        const group = await this.requireAdminGroup(groupId);
+        const repository = this.getAdminRepository();
+        const sourceNode = (await repository.listGroupNodes(groupId))?.find((node) => node.id === nodeId);
+
+        if (!sourceNode) {
+            throw new NotFoundException('TopoR balancer node not found');
+        }
+
+        const nodes = (await repository.listGroupNodes(groupId)) ?? [];
+        const activeNodes = nodes.filter((node) => node.status === 'active' && node.id !== nodeId);
+        const assignments = await repository.listAssignments({
+            publicHostCode: group.publicHostCode,
+            planCode: group.planCode,
+            nodeId,
+        });
+        const summary: ToporBalancerAssignmentActionSummary = {
+            removed: 0,
+            reassigned: 0,
+            skipped: 0,
+            errors: [],
+        };
+
+        if (activeNodes.length === 0) {
+            return {
+                ...summary,
+                skipped: assignments.length,
+                errors: [{ reason: 'no_active_target_nodes' }],
+            };
+        }
+
+        const allGroupAssignments = await repository.listGroupAssignments({
+            publicHostCode: group.publicHostCode,
+            planCode: group.planCode,
+        });
+        const counts = new Map(
+            activeNodes.map((node) => [
+                node.id,
+                allGroupAssignments.filter((assignment) => assignment.nodeId === node.id).length,
+            ]),
+        );
+
+        for (const assignment of assignments) {
+            const target = this.selectAssignmentTargetNode(group.strategy, assignment.shortUuid, activeNodes, counts);
+
+            if (!target) {
+                summary.skipped += 1;
+                summary.errors.push({ reason: 'no_active_target', shortUuid: assignment.shortUuid });
+                continue;
+            }
+
+            try {
+                await repository.reassign({
+                    shortUuid: assignment.shortUuid,
+                    publicHostCode: group.publicHostCode,
+                    planCode: group.planCode,
+                    technicalHostName: target.technicalHostName,
+                });
+                counts.set(target.id, (counts.get(target.id) ?? 0) + 1);
+                summary.reassigned += 1;
+            } catch (error) {
+                summary.errors.push({
+                    reason: String(error),
+                    shortUuid: assignment.shortUuid,
+                });
+            }
+        }
+
+        return summary;
+    }
+
     public async listAdminRequests(
         filters: ToporBalancerRequestFilters,
     ): Promise<ToporBalancerAdminRequest[]> {
         return this.getAdminRepository().listRequests(filters);
+    }
+
+    public async listGroupRecentDiagnostics(
+        groupId: string,
+    ): Promise<ToporBalancerGroupRecentDiagnostic[]> {
+        const group = await this.requireAdminGroup(groupId);
+        const requests = await this.getAdminRepository().listGroupRecentDiagnostics({
+            publicHostCode: group.publicHostCode,
+            planCode: group.planCode,
+        });
+        const groupKey = `${group.publicHostCode}:${group.planCode}`;
+
+        return requests.map((request) => {
+            const groupDiagnostic = request.groupCandidateDiagnostics?.find(
+                (item) =>
+                    item.publicHostCode === group.publicHostCode &&
+                    item.planCode === group.planCode,
+            );
+
+            return {
+                time: request.createdAt,
+                shortUuid: this.maskTraceValue(request.shortUuid),
+                userAgent: request.userAgent,
+                totalLinks: request.inputLinksCount,
+                matchedLinks: request.matchedTechnicalLinks,
+                rewrittenLinks: request.rewrittenLinksCount,
+                selectedNode: request.selectedNodes?.[groupKey] ?? groupDiagnostic?.selectedTechnicalHostName,
+                status: request.status,
+                warnings: [
+                    ...(request.warnings ?? []),
+                    ...(groupDiagnostic?.warnings ?? []),
+                    ...this.buildGroupProblemMessages(groupDiagnostic),
+                ],
+                ...(groupDiagnostic ? { groupDiagnostic } : {}),
+            };
+        });
     }
 
     public listRecentSubscriptionTraces(): ToporBalancerRecentSubscriptionTrace[] {
@@ -711,7 +899,7 @@ export class ToporBalancerService implements OnModuleDestroy, OnModuleInit {
             bodyLength: Buffer.byteLength(bodyText),
             detectedFormat: format,
             vlessLinksCount: links.length,
-            firstRemarks: links.slice(0, 5).map((link) => link.remark ?? '-'),
+            firstRemarks: links.slice(0, 5).map((link) => this.maskTraceValue(link.remark ?? '-')),
             unsupportedAppFallback: isUnsupportedAppFallback(links),
         };
     }
@@ -1721,7 +1909,13 @@ export class ToporBalancerService implements OnModuleDestroy, OnModuleInit {
         );
 
         if (selectedTechnicalHostNames.size === 0) {
-            return [];
+            if (isUnsupportedAppFallback(inputLinks)) {
+                return [];
+            }
+
+            return inputLinks
+                .map((link) => link.remark)
+                .filter((remark): remark is string => Boolean(remark));
         }
 
         return inputLinks
@@ -1743,6 +1937,18 @@ export class ToporBalancerService implements OnModuleDestroy, OnModuleInit {
 
             return outputLink !== undefined && outputLink.remark !== link.remark;
         }).length;
+    }
+
+    private maskTraceValue(value: string): string {
+        if (!value) {
+            return '';
+        }
+
+        if (value.length <= 8) {
+            return `${value.slice(0, 2)}***`;
+        }
+
+        return `${value.slice(0, 4)}...${value.slice(-4)}`;
     }
 
     private async buildOriginalSubscriptionComparison(
@@ -2654,6 +2860,130 @@ export class ToporBalancerService implements OnModuleDestroy, OnModuleInit {
         if (targetNode.status !== 'active') {
             throw new BadRequestException('TopoR balancer reassignment target must be active');
         }
+    }
+
+    private validateConfirmation(confirmed: boolean): void {
+        if (confirmed !== true) {
+            throw new BadRequestException('TopoR balancer assignment action requires confirmation');
+        }
+    }
+
+    private async requireAdminGroup(groupId: string): Promise<ToporBalancerAdminGroup> {
+        this.validateNonEmptyString(groupId, 'groupId');
+
+        const group = await this.getAdminRepository().getGroup(groupId);
+
+        if (!group) {
+            throw new NotFoundException('TopoR balancer group not found');
+        }
+
+        return group;
+    }
+
+    private selectAssignmentTargetNode(
+        strategy: ToporBalancerGroupStrategy,
+        shortUuid: string,
+        activeNodes: ToporBalancerDbNode[],
+        counts: Map<string, number>,
+    ): ToporBalancerDbNode | null {
+        if (activeNodes.length === 0 || strategy === 'manual') {
+            return null;
+        }
+
+        if (strategy === 'priority_failover') {
+            return activeNodes
+                .slice()
+                .sort(
+                    (left, right) =>
+                        left.priority - right.priority ||
+                        left.technicalHostName.localeCompare(right.technicalHostName),
+                )[0];
+        }
+
+        if (strategy === 'sticky_hash') {
+            const sorted = activeNodes
+                .slice()
+                .sort((left, right) => left.technicalHostName.localeCompare(right.technicalHostName));
+            const hash = this.hashString(`${shortUuid}:${sorted.map((node) => node.id).join('|')}`);
+
+            return sorted[hash % sorted.length];
+        }
+
+        if (strategy === 'weighted') {
+            return activeNodes
+                .slice()
+                .sort((left, right) => {
+                    const leftScore = (counts.get(left.id) ?? 0) / Math.max(left.weight, 1);
+                    const rightScore = (counts.get(right.id) ?? 0) / Math.max(right.weight, 1);
+
+                    return (
+                        leftScore - rightScore ||
+                        left.technicalHostName.localeCompare(right.technicalHostName)
+                    );
+                })[0];
+        }
+
+        return activeNodes
+            .slice()
+            .sort((left, right) => {
+                const leftScore =
+                    (counts.get(left.id) ?? 0) / Math.max(left.maxUsers * left.weight, 1);
+                const rightScore =
+                    (counts.get(right.id) ?? 0) / Math.max(right.maxUsers * right.weight, 1);
+
+                return (
+                    leftScore - rightScore ||
+                    left.technicalHostName.localeCompare(right.technicalHostName)
+                );
+            })[0];
+    }
+
+    private hashString(value: string): number {
+        let hash = 0;
+
+        for (let index = 0; index < value.length; index += 1) {
+            hash = (hash * 31 + value.charCodeAt(index)) >>> 0;
+        }
+
+        return hash;
+    }
+
+    private buildGroupProblemMessages(
+        groupDiagnostic?: NonNullable<ToporBalancerDebugInfo['groupCandidateDiagnostics']>[number],
+    ): string[] {
+        if (!groupDiagnostic) {
+            return [];
+        }
+
+        const messages: string[] = [];
+
+        if (
+            groupDiagnostic.subscriptionCandidateNodes.length > 0 &&
+            !groupDiagnostic.selectedTechnicalHostName
+        ) {
+            messages.push(
+                `Ссылка группы найдена, но нода не выбрана. Причина: ${groupDiagnostic.failOpenReason ?? 'no_selected_node'}.`,
+            );
+            messages.push('Balancer вернул оригинальные ссылки Remnawave для этой группы.');
+        }
+
+        if (groupDiagnostic.failOpenReason) {
+            messages.push('fail-open used');
+        }
+
+        if (
+            groupDiagnostic.excludedNodes.some(
+                (node) =>
+                    node.reason === 'missing_topology' ||
+                    node.reason === 'not_accessible_to_user_squad',
+            )
+        ) {
+            messages.push(
+                'Нода есть в подписке пользователя, поэтому она должна считаться доступной. Проверьте squad/topology filter.',
+            );
+        }
+
+        return messages;
     }
 
     private validateNonEmptyString(value: unknown, fieldName: string): void {
