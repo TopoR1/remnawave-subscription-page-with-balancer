@@ -13,6 +13,8 @@ export type ToporBalancerGroupSquadScope =
     | 'any_visible_to_user'
     | 'specific_internal_squad';
 
+export type ToporBalancerUnavailablePolicy = 'hide_group' | 'pass_through_original';
+
 export interface ToporBalancerNode {
     technicalHostName: string;
     weight: number;
@@ -22,6 +24,7 @@ export interface ToporBalancerNode {
 }
 
 export interface ToporBalancerLocation {
+    enabled?: boolean;
     publicHostCode: string;
     publicName: string;
     locationCode?: string;
@@ -29,6 +32,7 @@ export interface ToporBalancerLocation {
     strategy?: ToporBalancerGroupStrategy;
     squadScope?: ToporBalancerGroupSquadScope;
     internalSquadUuid?: string;
+    unavailablePolicy?: ToporBalancerUnavailablePolicy;
     nodes: ToporBalancerNode[];
 }
 
@@ -113,7 +117,23 @@ export interface ToporBalancerDebugInfo {
         reassignmentAttempted: boolean;
         reassignmentResult?: 'kept' | 'reassigned' | 'failed' | 'not_needed';
         selectedTechnicalHostName?: string;
-        failOpenReason?: 'no_active_candidates' | 'node_dead' | 'node_disabled' | 'manual_strategy';
+        failOpenReason?:
+            | 'group_disabled_hidden'
+            | 'manual_strategy'
+            | 'no_active_candidates'
+            | 'node_dead'
+            | 'node_disabled';
+        hiddenLinksCount?: number;
+        matchedLinksCount?: number;
+        passThroughOriginalUsed?: boolean;
+        reason?:
+            | 'group_disabled_hidden'
+            | 'manual_strategy'
+            | 'no_active_candidates'
+            | 'node_dead'
+            | 'node_disabled'
+            | 'processed';
+        status?: string;
         warnings: string[];
     }>;
     outputLinkCount: number;
@@ -245,7 +265,10 @@ export interface ToporBalancerSubscriptionDiagnosticsResult {
                 | 'not_accessible_to_user_squad'
                 | 'not_accessible_to_group_squad'
                 | 'missing_topology'
-                | 'user_not_in_group_squad';
+                | 'user_not_in_group_squad'
+                | 'node_disabled'
+                | 'node_dead'
+                | 'node_draining';
             message: string;
         }>;
         outputRemarks: string[];
@@ -323,6 +346,7 @@ export interface ToporBalancerDbGroup {
     enabled: boolean;
     squadScope: ToporBalancerGroupSquadScope;
     internalSquadUuid?: string;
+    unavailablePolicy?: ToporBalancerUnavailablePolicy;
     createdAt?: string;
     updatedAt?: string;
 }
@@ -356,11 +380,18 @@ export interface ToporRemnawaveTopologyHost {
     uuid: string;
     remark: string;
     address?: string;
+    flow?: string;
     inboundUuid?: string;
+    lastSeenAt?: string;
     nodeUuid?: string;
     nodeName?: string;
+    port?: number;
+    protocol?: 'vless';
     profileUuid?: string;
     profileName?: string;
+    security?: string;
+    sni?: string;
+    transport?: string;
     inboundName?: string;
     accessibleSquads: Array<{
         uuid: string;
@@ -559,6 +590,7 @@ export interface ToporBalancerDiscoveredHost {
     type?: string;
     sni?: string;
     flow?: string;
+    lastSeenAt?: string;
     pbk?: string;
     sid?: string;
     rawRemark?: string;
@@ -602,12 +634,16 @@ export interface ToporBalancerGroupDiscoveryResponse {
     };
     items: ToporBalancerGroupDiscoveryItem[];
     message?: string;
+    cacheStale?: boolean;
+    refreshedAt?: string;
     shortUuid?: string;
     source: 'remnawave-api' | 'subscription';
 }
 
 export interface ToporBalancerDiscoveryResponse {
     source: 'remnawave-api' | 'subscription';
+    cacheStale?: boolean;
+    refreshedAt?: string;
     shortUuid?: string;
     items: ToporBalancerDiscoveredHost[];
 }

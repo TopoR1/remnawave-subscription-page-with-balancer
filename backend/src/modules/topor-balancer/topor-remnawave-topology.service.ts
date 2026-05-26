@@ -213,11 +213,18 @@ export class ToporRemnawaveTopologyService {
                     uuid,
                     remark,
                     address: this.readString(item, ['address', 'host']),
+                    flow: this.readString(item, ['flow']),
                     inboundUuid,
+                    lastSeenAt: new Date().toISOString(),
                     nodeUuid,
                     nodeName: node?.name,
+                    port: this.readNumber(item, ['port']),
+                    protocol: 'vless',
                     profileUuid: inbound?.profileUuid,
                     profileName: inbound?.profileName,
+                    security: this.readString(item, ['security', 'securityLayer', 'security_layer'])?.toLowerCase(),
+                    sni: this.readString(item, ['sni', 'serverName', 'server_name']),
+                    transport: this.readString(item, ['type', 'transport', 'network']),
                     inboundName: inbound?.name,
                     accessibleSquads,
                 };
@@ -364,5 +371,31 @@ export class ToporRemnawaveTopologyService {
         }
 
         return [];
+    }
+
+    private readNumber(item: unknown, keys: string[]): number | undefined {
+        if (!item || typeof item !== 'object') {
+            return undefined;
+        }
+
+        const record = item as Record<string, unknown>;
+
+        for (const key of keys) {
+            const value = record[key];
+
+            if (typeof value === 'number' && Number.isFinite(value)) {
+                return value;
+            }
+
+            if (typeof value === 'string' && value.trim()) {
+                const parsed = Number(value);
+
+                if (Number.isFinite(parsed)) {
+                    return parsed;
+                }
+            }
+        }
+
+        return undefined;
     }
 }

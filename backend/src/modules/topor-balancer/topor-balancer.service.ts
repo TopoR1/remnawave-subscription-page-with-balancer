@@ -53,6 +53,7 @@ import type {
     ToporBalancerSubscriptionRequestTrace,
     ToporBalancerSubscriptionUpstreamTrace,
     ToporBalancerTraceSubscriptionResult,
+    ToporBalancerUnavailablePolicy,
     ToporRemnawaveTopologySnapshot,
 } from './types';
 
@@ -126,6 +127,11 @@ const ADMIN_GROUP_STRATEGIES = new Set<ToporBalancerGroupStrategy>([
 const ADMIN_GROUP_SQUAD_SCOPES = new Set([
     'any_visible_to_user',
     'specific_internal_squad',
+]);
+
+const ADMIN_GROUP_UNAVAILABLE_POLICIES = new Set<ToporBalancerUnavailablePolicy>([
+    'hide_group',
+    'pass_through_original',
 ]);
 
 @Injectable()
@@ -2583,6 +2589,13 @@ export class ToporBalancerService implements OnModuleDestroy, OnModuleInit {
             throw new BadRequestException('TopoR balancer group enabled must be a boolean');
         }
 
+        if (
+            input.unavailablePolicy !== undefined &&
+            !ADMIN_GROUP_UNAVAILABLE_POLICIES.has(input.unavailablePolicy)
+        ) {
+            throw new BadRequestException('Invalid TopoR balancer group unavailable policy');
+        }
+
         this.validateGroupSquadScope(input);
     }
 
@@ -2661,11 +2674,12 @@ export class ToporBalancerService implements OnModuleDestroy, OnModuleInit {
         const locations: ToporBalancerConfig['locations'] = [];
         let nodesCount = 0;
 
-        for (const group of groups.filter((item) => item.enabled)) {
+        for (const group of groups) {
             const nodes = (await repository.listGroupNodes(group.id)) ?? [];
             nodesCount += nodes.length;
 
             locations.push({
+                enabled: group.enabled,
                 locationCode: group.locationCode,
                 nodes: nodes.map((node) => ({
                     maxUsers: node.maxUsers,
@@ -2680,6 +2694,7 @@ export class ToporBalancerService implements OnModuleDestroy, OnModuleInit {
                 strategy: group.strategy,
                 squadScope: group.squadScope,
                 internalSquadUuid: group.internalSquadUuid,
+                unavailablePolicy: group.unavailablePolicy ?? 'hide_group',
             });
         }
 

@@ -14,6 +14,7 @@ import type {
     ToporBalancerLocation,
     ToporBalancerNode,
     ToporBalancerNodeStatus,
+    ToporBalancerUnavailablePolicy,
     ToporRemnawaveTopologyHost,
     ToporRemnawaveTopologyInbound,
     ToporRemnawaveTopologyNode,
@@ -119,6 +120,7 @@ export interface ToporBalancerGroupCreateInput {
     enabled: boolean;
     squadScope?: ToporBalancerGroupSquadScope;
     internalSquadUuid?: string;
+    unavailablePolicy?: ToporBalancerUnavailablePolicy;
 }
 
 export interface ToporBalancerGroupUpdateInput {
@@ -130,6 +132,7 @@ export interface ToporBalancerGroupUpdateInput {
     enabled?: boolean;
     squadScope?: ToporBalancerGroupSquadScope;
     internalSquadUuid?: string;
+    unavailablePolicy?: ToporBalancerUnavailablePolicy;
 }
 
 export interface ToporBalancerGroupNodeCreateInput {
@@ -226,6 +229,7 @@ interface DbGroupRow {
     enabled: boolean;
     squad_scope: ToporBalancerGroupSquadScope;
     internal_squad_uuid: string | null;
+    unavailable_policy?: ToporBalancerUnavailablePolicy | null;
     created_at?: Date | string;
     updated_at?: Date | string;
 }
@@ -260,13 +264,20 @@ interface DbTopologyHostRow {
     uuid: string;
     remark: string;
     address: string | null;
+    flow: string | null;
     inbound_uuid: string | null;
     node_uuid: string | null;
     node_name: string | null;
+    port: number | null;
+    protocol: 'vless' | null;
     profile_uuid: string | null;
     profile_name: string | null;
+    security: string | null;
+    sni: string | null;
+    transport: string | null;
     inbound_name: string | null;
     accessible_squads: Array<{ name: string; uuid: string }> | string | null;
+    last_seen_at?: Date | string;
     updated_at?: Date | string;
 }
 
@@ -333,6 +344,7 @@ export class ToporBalancerPostgresRepository implements ToporBalancerAssignmentR
                 enabled BOOLEAN NOT NULL DEFAULT TRUE,
                 squad_scope TEXT NOT NULL DEFAULT 'any_visible_to_user',
                 internal_squad_uuid TEXT,
+                unavailable_policy TEXT NOT NULL DEFAULT 'hide_group',
                 created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
                 updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
                 UNIQUE (public_host_code, plan_code)
@@ -371,6 +383,9 @@ export class ToporBalancerPostgresRepository implements ToporBalancerAssignmentR
 
             ALTER TABLE topor_balancer_groups
                 ADD COLUMN IF NOT EXISTS internal_squad_uuid TEXT;
+
+            ALTER TABLE topor_balancer_groups
+                ADD COLUMN IF NOT EXISTS unavailable_policy TEXT NOT NULL DEFAULT 'hide_group';
 
             INSERT INTO topor_balancer_groups (
                 id,
@@ -465,6 +480,12 @@ export class ToporBalancerPostgresRepository implements ToporBalancerAssignmentR
                 uuid TEXT PRIMARY KEY,
                 remark TEXT NOT NULL,
                 address TEXT,
+                port INTEGER,
+                protocol TEXT,
+                security TEXT,
+                transport TEXT,
+                sni TEXT,
+                flow TEXT,
                 inbound_uuid TEXT,
                 node_uuid TEXT,
                 node_name TEXT,
@@ -472,8 +493,30 @@ export class ToporBalancerPostgresRepository implements ToporBalancerAssignmentR
                 profile_name TEXT,
                 inbound_name TEXT,
                 accessible_squads JSONB NOT NULL DEFAULT '[]'::jsonb,
+                last_seen_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
                 updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
             );
+
+            ALTER TABLE topor_remnawave_hosts
+                ADD COLUMN IF NOT EXISTS port INTEGER;
+
+            ALTER TABLE topor_remnawave_hosts
+                ADD COLUMN IF NOT EXISTS protocol TEXT;
+
+            ALTER TABLE topor_remnawave_hosts
+                ADD COLUMN IF NOT EXISTS security TEXT;
+
+            ALTER TABLE topor_remnawave_hosts
+                ADD COLUMN IF NOT EXISTS transport TEXT;
+
+            ALTER TABLE topor_remnawave_hosts
+                ADD COLUMN IF NOT EXISTS sni TEXT;
+
+            ALTER TABLE topor_remnawave_hosts
+                ADD COLUMN IF NOT EXISTS flow TEXT;
+
+            ALTER TABLE topor_remnawave_hosts
+                ADD COLUMN IF NOT EXISTS last_seen_at TIMESTAMPTZ NOT NULL DEFAULT NOW();
 
             CREATE TABLE IF NOT EXISTS topor_remnawave_nodes (
                 uuid TEXT PRIMARY KEY,
@@ -679,9 +722,10 @@ export class ToporBalancerPostgresRepository implements ToporBalancerAssignmentR
                 strategy,
                 enabled,
                 squad_scope,
-                internal_squad_uuid
+                internal_squad_uuid,
+                unavailable_policy
             )
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
             ON CONFLICT (public_host_code, plan_code) DO NOTHING
             RETURNING *
             `,
@@ -695,6 +739,7 @@ export class ToporBalancerPostgresRepository implements ToporBalancerAssignmentR
                 input.enabled,
                 input.squadScope ?? 'any_visible_to_user',
                 input.internalSquadUuid ?? null,
+                input.unavailablePolicy ?? 'hide_group',
             ],
         );
 
@@ -722,6 +767,7 @@ export class ToporBalancerPostgresRepository implements ToporBalancerAssignmentR
         addUpdate(updates, params, 'enabled', input.enabled);
         addUpdate(updates, params, 'squad_scope', input.squadScope);
         addUpdate(updates, params, 'internal_squad_uuid', input.internalSquadUuid);
+        addUpdate(updates, params, 'unavailable_policy', input.unavailablePolicy);
 
         if (updates.length > 0) {
             params.push(id);
@@ -1303,18 +1349,31 @@ export class ToporBalancerPostgresRepository implements ToporBalancerAssignmentR
                         uuid,
                         remark,
                         address,
+                        port,
+                        protocol,
+                        security,
+                        transport,
+                        sni,
+                        flow,
                         inbound_uuid,
                         node_uuid,
                         node_name,
                         profile_uuid,
                         profile_name,
                         inbound_name,
-                        accessible_squads
+                        accessible_squads,
+                        last_seen_at
                     )
-                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10::jsonb)
+                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16::jsonb, $17)
                     ON CONFLICT (uuid) DO UPDATE SET
                         remark = EXCLUDED.remark,
                         address = EXCLUDED.address,
+                        port = EXCLUDED.port,
+                        protocol = EXCLUDED.protocol,
+                        security = EXCLUDED.security,
+                        transport = EXCLUDED.transport,
+                        sni = EXCLUDED.sni,
+                        flow = EXCLUDED.flow,
                         inbound_uuid = EXCLUDED.inbound_uuid,
                         node_uuid = EXCLUDED.node_uuid,
                         node_name = EXCLUDED.node_name,
@@ -1322,12 +1381,19 @@ export class ToporBalancerPostgresRepository implements ToporBalancerAssignmentR
                         profile_name = EXCLUDED.profile_name,
                         inbound_name = EXCLUDED.inbound_name,
                         accessible_squads = EXCLUDED.accessible_squads,
+                        last_seen_at = EXCLUDED.last_seen_at,
                         updated_at = NOW()
                     `,
                     [
                         host.uuid,
                         host.remark,
                         host.address ?? null,
+                        host.port ?? null,
+                        host.protocol ?? null,
+                        host.security ?? null,
+                        host.transport ?? null,
+                        host.sni ?? null,
+                        host.flow ?? null,
                         host.inboundUuid ?? null,
                         host.nodeUuid ?? null,
                         host.nodeName ?? null,
@@ -1335,6 +1401,7 @@ export class ToporBalancerPostgresRepository implements ToporBalancerAssignmentR
                         host.profileName ?? null,
                         host.inboundName ?? null,
                         JSON.stringify(host.accessibleSquads),
+                        host.lastSeenAt ?? input.refreshedAt ?? new Date().toISOString(),
                     ],
                 );
 
@@ -1801,6 +1868,7 @@ function mapGroupRow(row: DbGroupRow): ToporBalancerDbGroup {
         enabled: row.enabled,
         squadScope: row.squad_scope ?? 'any_visible_to_user',
         internalSquadUuid: row.internal_squad_uuid ?? undefined,
+        unavailablePolicy: row.unavailable_policy ?? 'hide_group',
         createdAt: row.created_at?.toString(),
         updatedAt: row.updated_at?.toString(),
     };
@@ -1821,11 +1889,18 @@ function mapTopologyHostRow(row: DbTopologyHostRow): ToporRemnawaveTopologyHost 
         uuid: row.uuid,
         remark: row.remark,
         address: row.address ?? undefined,
+        flow: row.flow ?? undefined,
         inboundUuid: row.inbound_uuid ?? undefined,
+        lastSeenAt: row.last_seen_at?.toString() ?? row.updated_at?.toString(),
         nodeUuid: row.node_uuid ?? undefined,
         nodeName: row.node_name ?? undefined,
+        port: row.port ?? undefined,
+        protocol: row.protocol ?? undefined,
         profileUuid: row.profile_uuid ?? undefined,
         profileName: row.profile_name ?? undefined,
+        security: row.security ?? undefined,
+        sni: row.sni ?? undefined,
+        transport: row.transport ?? undefined,
         inboundName: row.inbound_name ?? undefined,
         accessibleSquads: parseJsonArray(row.accessible_squads),
         updatedAt: row.updated_at?.toString(),

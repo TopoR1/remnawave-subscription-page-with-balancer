@@ -51,10 +51,17 @@
     border-radius: 8px;
 }
 
+.adminShell {
+    width: calc(100vw - 48px);
+    max-width: 1680px;
+    margin-right: auto;
+    margin-left: auto;
+}
+
 .adminLayout {
     display: grid;
-    grid-template-columns: minmax(300px, 360px) minmax(0, 1fr);
-    gap: var(--mantine-spacing-md);
+    grid-template-columns: clamp(360px, 26vw, 440px) minmax(0, 1fr);
+    gap: var(--mantine-spacing-lg);
     align-items: start;
 }
 
@@ -65,8 +72,8 @@
 }
 
 .groupListViewport {
-    height: min(620px, calc(100vh - 320px));
-    min-height: 360px;
+    height: min(720px, calc(100vh - 300px));
+    min-height: 420px;
 }
 
 .groupListItem {
@@ -102,34 +109,103 @@
     gap: var(--mantine-spacing-md);
 }
 
+.groupEditorContent {
+    width: 92vw;
+    max-width: 1600px;
+    height: 86vh;
+}
+
+.groupEditorBody {
+    height: calc(86vh - 72px);
+    overflow: hidden;
+}
+
+.groupEditorTabs {
+    display: flex;
+    flex-direction: column;
+    height: 100%;
+}
+
+.groupEditorPanel {
+    min-height: 0;
+    overflow: auto;
+}
+
 .legacyAdmin {
     display: none;
 }
 
 .tableCard {
+    width: 100%;
     overflow: hidden;
     background: rgb(22 27 35 / 72%);
     border: 1px solid rgb(255 255 255 / 8%);
 }
 
+.tableToolbar {
+    padding: 12px 14px;
+    border-bottom: 1px solid rgb(255 255 255 / 8%);
+}
+
 .nodesTable {
-    min-width: 1040px;
+    width: 100%;
+    min-width: 860px;
 }
 
 .groupsTable {
-    min-width: 1160px;
+    width: 100%;
+    min-width: 980px;
 }
 
 .assignmentsTable {
-    min-width: 1280px;
+    width: 100%;
+    min-width: 960px;
 }
 
 .requestsTable {
-    min-width: 1220px;
+    width: 100%;
+    min-width: 920px;
 }
 
 .discoveryTable {
-    min-width: 2400px;
+    width: 100%;
+    min-width: 1480px;
+}
+
+.stickyFirstColumn {
+    position: sticky;
+    left: 0;
+    z-index: 2;
+    width: 48px;
+    background: rgb(22 27 35);
+}
+
+.stickyActionsColumn {
+    position: sticky;
+    right: 0;
+    z-index: 2;
+    min-width: 280px;
+    background: rgb(22 27 35);
+    box-shadow: -8px 0 16px rgb(0 0 0 / 18%);
+}
+
+.discoveryTable th:first-child,
+.discoveryTable td:first-child {
+    position: sticky;
+    left: 0;
+    z-index: 2;
+    width: 48px;
+    background: rgb(22 27 35);
+}
+
+.discoveryTable th:last-child,
+.discoveryTable td:last-child {
+    position: sticky;
+    right: 0;
+    z-index: 2;
+    min-width: 280px;
+    background: rgb(22 27 35);
+    box-shadow: -8px 0 16px rgb(0 0 0 / 18%);
 }
 
 .nodesTable th {

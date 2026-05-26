@@ -429,21 +429,18 @@ test('hash balancer keeps one active technical node per public host and renames 
     assert.equal(Object.keys(result.debugInfo.selectedNodes).length, 2);
     assert.ok(result.debugInfo.selectedNodes['fi_standard:standard'].startsWith('FI-STD-'));
     assert.equal(result.debugInfo.selectedNodes['de_standard:standard'], 'DE-STD-01');
-    assert.equal(result.debugInfo.outputLinkCount, 4);
-    assert.equal(parsedOutput.links.length, 4);
+    assert.equal(result.debugInfo.outputLinkCount, 3);
+    assert.equal(parsedOutput.links.length, 3);
     assert.ok(outputRemarks.includes('\u{1F1EB}\u{1F1EE} Finland'));
     assert.ok(outputRemarks.includes('\u{1F1E9}\u{1F1EA} Germany'));
-    assert.ok(outputRemarks.includes('FR-STD-01'));
+    assert.equal(outputRemarks.includes('FR-STD-01'), false);
     assert.ok(outputRemarks.includes('UNKNOWN-STD-01'));
     assert.equal(outputRemarks.includes('DE-STD-02'), false);
-    assert.ok(
-        result.debugInfo.warnings?.includes(
-            'No active TopoR balancer node for fr_standard:standard; preserving original links.',
-        ),
-    );
-    assert.equal(logs.length, 2);
+    assert.equal(result.debugInfo.groupCandidateDiagnostics?.find(
+        (group) => group.publicHostCode === 'fr_standard',
+    )?.reason, 'no_active_candidates');
+    assert.equal(logs.length, 1);
     assert.match(logs[0], /\[TOPOR_BALANCER_DEBUG\]/);
-    assert.match(logs[1], /\[TOPOR_BALANCER_WARNING\]/);
 });
 
 test('hash balancer processes same publicHostCode with different planCode independently', () => {
@@ -635,7 +632,7 @@ test('technicalHostName matching keeps Finland standard and game distinct', () =
     assert.equal(outputRemarks.includes('Finland Game Public'), true);
 });
 
-test('hash balancer preserves original links when no active node exists', () => {
+test('hash balancer hides original technical links when no active node exists', () => {
     const body = [
         buildVlessLink('DE-STD-01'),
         buildVlessLink('DE-STD-02'),
@@ -686,12 +683,56 @@ test('hash balancer preserves original links when no active node exists', () => 
         config: disabledConfig,
     });
 
-    assert.equal(result.body, body);
+    assert.equal(result.body, '');
     assert.deepEqual(result.debugInfo.selectedNodes, {});
-    assert.deepEqual(result.debugInfo.warnings, [
-        'No active TopoR balancer node for de_standard:standard; preserving original links.',
-        'No active TopoR balancer node for fr_standard:standard; preserving original links.',
+    assert.equal(parseSubscription(result.body).links.length, 0);
+    assert.deepEqual(
+        result.debugInfo.groupCandidateDiagnostics?.map((group) => ({
+            hiddenLinksCount: group.hiddenLinksCount,
+            passThroughOriginalUsed: group.passThroughOriginalUsed,
+            reason: group.reason,
+        })),
+        [
+            { hiddenLinksCount: 2, passThroughOriginalUsed: false, reason: 'node_dead' },
+            { hiddenLinksCount: 1, passThroughOriginalUsed: false, reason: 'no_active_candidates' },
+        ],
+    );
+});
+
+test('hash balancer preserves original links only with pass_through_original policy', () => {
+    const body = [buildVlessLink('FI-STD-01')].join('\n');
+    const config = buildStrategyConfig('least_loaded', [
+        { technicalHostName: 'FI-STD-01', weight: 1, maxUsers: 300, status: 'disabled' },
     ]);
+
+    config.locations[0].unavailablePolicy = 'pass_through_original';
+
+    const result = processSubscriptionWithHashBalancer({
+        shortUuid: 'pass-through-debug',
+        body,
+        config,
+    });
+
+    assert.equal(result.body, body);
+    assert.equal(result.debugInfo.groupCandidateDiagnostics?.[0]?.passThroughOriginalUsed, true);
+});
+
+test('hash balancer hides disabled group technical links by default', () => {
+    const body = [buildVlessLink('FI-STD-01'), buildVlessLink('FI-STD-02')].join('\n');
+    const config = buildStrategyConfig('least_loaded');
+
+    config.locations[0].enabled = false;
+
+    const result = processSubscriptionWithHashBalancer({
+        shortUuid: 'disabled-group',
+        body,
+        config,
+    });
+
+    assert.equal(result.body, '');
+    assert.deepEqual(result.debugInfo.selectedNodes, {});
+    assert.equal(result.debugInfo.groupCandidateDiagnostics?.[0]?.reason, 'group_disabled_hidden');
+    assert.equal(result.debugInfo.groupCandidateDiagnostics?.[0]?.hiddenLinksCount, 2);
 });
 
 test('hash balancer is sticky for the same shortUuid and public host', () => {
@@ -1621,7 +1662,7 @@ test('database balancer diagnostics show group nodes excluded from this subscrip
     ]);
 });
 
-test('database balancer passes through a group when user has no accessible candidates', async () => {
+test('database balancer hides a group when user has no accessible candidates', async () => {
     const config = buildStrategyConfig('least_loaded', [
         { technicalHostName: 'FI-GAME-01', weight: 1, maxUsers: 300, status: 'active' },
     ]);
@@ -1639,12 +1680,14 @@ test('database balancer passes through a group when user has no accessible candi
         },
     });
 
-    assert.equal(result.body, body);
+    assert.equal(result.body, '');
     assert.deepEqual(result.debugInfo.selectedNodes, {});
     assert.deepEqual(result.debugInfo.groupCandidateDiagnostics?.[0]?.effectiveCandidateNodes, []);
+    assert.equal(result.debugInfo.groupCandidateDiagnostics?.[0]?.hiddenLinksCount, 1);
+    assert.equal(result.debugInfo.groupCandidateDiagnostics?.[0]?.passThroughOriginalUsed, false);
     assert.ok(
         result.debugInfo.warnings?.some((warning) =>
-            warning.includes('No accessible TopoR balancer candidates'),
+            warning.includes('hiding original technical links'),
         ),
     );
 });
@@ -1747,7 +1790,7 @@ test('database balancer processes same publicHostCode with different planCode in
     assert.equal(repository.assignments.size, 2);
 });
 
-test('database balancer preserves original links when no active node exists', async () => {
+test('database balancer hides original technical links when no active node exists', async () => {
     const repository = InMemoryToporBalancerRepository.fromConfig(balancerConfig);
     const body = [buildVlessLink('DE-STD-02'), buildVlessLink('FR-STD-01')].join('\n');
 
@@ -1761,12 +1804,20 @@ test('database balancer preserves original links when no active node exists', as
         repository,
     });
 
-    assert.equal(result.body, body);
+    assert.equal(result.body, '');
     assert.deepEqual(result.debugInfo.selectedNodes, {});
-    assert.deepEqual(result.debugInfo.warnings, [
-        'No active TopoR balancer node for de_standard:standard; preserving original links.',
-        'No active TopoR balancer node for fr_standard:standard; preserving original links.',
-    ]);
+    assert.equal(parseSubscription(result.body).links.length, 0);
+    assert.deepEqual(
+        result.debugInfo.groupCandidateDiagnostics?.map((group) => ({
+            hiddenLinksCount: group.hiddenLinksCount,
+            passThroughOriginalUsed: group.passThroughOriginalUsed,
+            reason: group.reason,
+        })),
+        [
+            { hiddenLinksCount: 1, passThroughOriginalUsed: false, reason: 'node_dead' },
+            { hiddenLinksCount: 1, passThroughOriginalUsed: false, reason: 'no_active_candidates' },
+        ],
+    );
     assert.equal(repository.assignments.size, 0);
 });
 
@@ -1856,7 +1907,7 @@ test('database balancer reassigns dead assigned nodes to an active candidate', a
     assert.equal(result.debugInfo.groupCandidateDiagnostics?.[0]?.reassignmentResult, 'reassigned');
 });
 
-test('database balancer fails open clearly when disabled or dead assignment has no active candidates', async () => {
+test('database balancer hides group when disabled or dead assignment has no active candidates', async () => {
     const config = buildStrategyConfig('least_loaded', [
         { technicalHostName: 'FI-STD-01', weight: 1, maxUsers: 300, status: 'disabled' },
         { technicalHostName: 'FI-STD-02', weight: 1, maxUsers: 300, status: 'dead' },
@@ -1873,18 +1924,60 @@ test('database balancer fails open clearly when disabled or dead assignment has 
         repository,
     });
 
-    assert.equal(result.body, body);
+    assert.equal(result.body, '');
     assert.deepEqual(result.debugInfo.selectedNodes, {});
     assert.equal(result.debugInfo.groupCandidateDiagnostics?.[0]?.previousAssignedNode, 'FI-STD-01');
     assert.equal(result.debugInfo.groupCandidateDiagnostics?.[0]?.previousAssignedNodeStatus, 'disabled');
     assert.equal(result.debugInfo.groupCandidateDiagnostics?.[0]?.reassignmentAttempted, true);
     assert.equal(result.debugInfo.groupCandidateDiagnostics?.[0]?.reassignmentResult, 'failed');
     assert.equal(result.debugInfo.groupCandidateDiagnostics?.[0]?.failOpenReason, 'node_disabled');
+    assert.equal(result.debugInfo.groupCandidateDiagnostics?.[0]?.hiddenLinksCount, 2);
+    assert.equal(result.debugInfo.groupCandidateDiagnostics?.[0]?.passThroughOriginalUsed, false);
     assert.ok(
         result.debugInfo.groupCandidateDiagnostics?.[0]?.excludedNodes.some(
             (node) => node.reason === 'node_dead',
         ),
     );
+});
+
+test('database balancer pass_through_original preserves old behavior only when configured', async () => {
+    const config = buildStrategyConfig('least_loaded', [
+        { technicalHostName: 'FI-STD-01', weight: 1, maxUsers: 300, status: 'disabled' },
+    ]);
+    const repository = InMemoryToporBalancerRepository.fromConfig(config);
+    const body = [buildVlessLink('FI-STD-01')].join('\n');
+
+    config.locations[0].unavailablePolicy = 'pass_through_original';
+
+    const result = await processSubscriptionWithDatabaseBalancer({
+        shortUuid: 'db-pass-through-debug',
+        body,
+        config,
+        repository,
+    });
+
+    assert.equal(result.body, body);
+    assert.equal(result.debugInfo.groupCandidateDiagnostics?.[0]?.passThroughOriginalUsed, true);
+});
+
+test('database balancer hides disabled group technical links by default', async () => {
+    const config = buildStrategyConfig('least_loaded');
+    const repository = InMemoryToporBalancerRepository.fromConfig(config);
+    const body = [buildVlessLink('FI-STD-01'), buildVlessLink('FI-STD-02')].join('\n');
+
+    config.locations[0].enabled = false;
+
+    const result = await processSubscriptionWithDatabaseBalancer({
+        shortUuid: 'db-disabled-group',
+        body,
+        config,
+        repository,
+    });
+
+    assert.equal(result.body, '');
+    assert.deepEqual(result.debugInfo.selectedNodes, {});
+    assert.equal(result.debugInfo.groupCandidateDiagnostics?.[0]?.reason, 'group_disabled_hidden');
+    assert.equal(result.debugInfo.groupCandidateDiagnostics?.[0]?.hiddenLinksCount, 2);
 });
 
 test('database balancer selects the lowest weighted load node', async () => {
@@ -2057,7 +2150,7 @@ test('database balancer rewrites group when one node is disabled and another is 
     );
 });
 
-test('manual strategy fails open when no existing assignment exists', async () => {
+test('manual strategy hides technical links when no existing assignment exists', async () => {
     const config = buildStrategyConfig('manual');
     const repository = InMemoryToporBalancerRepository.fromConfig(config);
     const body = [buildVlessLink('FI-STD-01'), buildVlessLink('FI-STD-02')].join('\n');
@@ -2068,7 +2161,7 @@ test('manual strategy fails open when no existing assignment exists', async () =
         repository,
     });
 
-    assert.equal(result.body, body);
+    assert.equal(result.body, '');
     assert.deepEqual(result.debugInfo.selectedNodes, {});
     assert.equal(repository.assignments.size, 0);
 });
@@ -3578,7 +3671,7 @@ class InMemoryToporBalancerRepository implements ToporBalancerAssignmentReposito
                 id: groupId,
                 activeNodesCount: location.nodes.filter((node) => node.status === 'active').length,
                 assignedUsers: 0,
-                enabled: true,
+                enabled: location.enabled ?? true,
                 locationCode: location.locationCode,
                 nodesCount: location.nodes.length,
                 nodesCountSource: 'db_group_id',
@@ -3587,6 +3680,7 @@ class InMemoryToporBalancerRepository implements ToporBalancerAssignmentReposito
                 publicName: location.publicName,
                 squadScope: 'any_visible_to_user',
                 strategy: location.strategy ?? 'least_loaded',
+                unavailablePolicy: location.unavailablePolicy ?? 'hide_group',
             });
 
             for (const node of location.nodes) {

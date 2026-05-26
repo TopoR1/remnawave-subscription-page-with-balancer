@@ -4,6 +4,7 @@ import type {
     ToporBalancerLocation,
     ToporBalancerNode,
     ToporBalancerNodeStatus,
+    ToporBalancerUnavailablePolicy,
 } from './types';
 import { normalizeTechnicalHostName } from './topor-balancer-technical-host-name';
 
@@ -13,6 +14,10 @@ const DEFAULT_NODE_STATUS: ToporBalancerNodeStatus = 'active';
 const DEFAULT_NODE_PRIORITY = 100;
 
 const NODE_STATUSES = new Set<ToporBalancerNodeStatus>(['active', 'dead', 'disabled', 'draining']);
+const UNAVAILABLE_POLICIES = new Set<ToporBalancerUnavailablePolicy>([
+    'hide_group',
+    'pass_through_original',
+]);
 const GROUP_STRATEGIES = new Set<ToporBalancerGroupStrategy>([
     'least_loaded',
     'manual',
@@ -81,6 +86,11 @@ function normalizeLocation(
     const locationCode = readRequiredString(location, 'locationCode', path, issues);
     const planCode = readRequiredString(location, 'planCode', path, issues);
     const strategy = readOptionalGroupStrategy(location.strategy, `${path}.strategy`, issues);
+    const unavailablePolicy = readOptionalUnavailablePolicy(
+        location.unavailablePolicy,
+        `${path}.unavailablePolicy`,
+        issues,
+    );
     const nodesInput = Array.isArray(location.nodes) ? location.nodes : [];
 
     if (location.nodes !== undefined && !Array.isArray(location.nodes)) {
@@ -88,11 +98,13 @@ function normalizeLocation(
     }
 
     return {
+        enabled: typeof location.enabled === 'boolean' ? location.enabled : true,
         publicHostCode,
         publicName,
         locationCode,
         planCode,
         strategy,
+        unavailablePolicy,
         nodes: nodesInput.map((node, index) => normalizeNode(node, locationIndex, index, issues)),
     };
 }
@@ -232,6 +244,27 @@ function readOptionalGroupStrategy(
     }
 
     return value as ToporBalancerGroupStrategy;
+}
+
+function readOptionalUnavailablePolicy(
+    value: unknown,
+    path: string,
+    issues: string[],
+): ToporBalancerUnavailablePolicy {
+    if (value === undefined) {
+        return 'hide_group';
+    }
+
+    if (
+        typeof value !== 'string' ||
+        !UNAVAILABLE_POLICIES.has(value as ToporBalancerUnavailablePolicy)
+    ) {
+        issues.push(`${path} must be one of: ${Array.from(UNAVAILABLE_POLICIES).join(', ')}`);
+
+        return 'hide_group';
+    }
+
+    return value as ToporBalancerUnavailablePolicy;
 }
 
 function validateUniqueLocations(locations: ToporBalancerLocation[], issues: string[]): void {

@@ -43,6 +43,36 @@ interface MatchingLine {
     nodeRef: TechnicalNodeRef;
 }
 
+interface GroupSelectionDiagnostic {
+    publicHostCode: string;
+    planCode: string;
+    userSquads: [];
+    accessibleNodesCount: 0;
+    groupNodesCount: number;
+    subscriptionCandidateNodes: string[];
+    effectiveCandidateNodes: string[];
+    excludedNodes: Array<{
+        technicalHostName: string;
+        reason: 'node_dead' | 'node_disabled' | 'node_draining' | 'not_in_subscription';
+        message: string;
+    }>;
+    reassignmentAttempted: false;
+    reassignmentResult: 'not_needed';
+    selectedTechnicalHostName?: string;
+    failOpenReason?: 'group_disabled_hidden' | 'manual_strategy' | 'no_active_candidates' | 'node_dead';
+    hiddenLinksCount: number;
+    matchedLinksCount: number;
+    passThroughOriginalUsed: boolean;
+    reason:
+        | 'group_disabled_hidden'
+        | 'manual_strategy'
+        | 'no_active_candidates'
+        | 'node_dead'
+        | 'processed';
+    status: 'hidden' | 'ok' | 'passed_through';
+    warnings: string[];
+}
+
 function getPublicGroupKey(location: ToporBalancerLocation): string {
     return `${location.publicHostCode}:${location.planCode}`;
 }
@@ -94,11 +124,11 @@ export function processSubscriptionWithHashBalancer(
 
     const technicalNodeMap = buildTechnicalNodeMap(input.config);
     const matchingLines = collectMatchingLines(plainBody, technicalNodeMap);
-    const selectedByPublicGroupKey = selectNodesByPublicGroupKey(input.shortUuid, matchingLines);
+    const selection = selectNodesByPublicGroupKey(input.shortUuid, matchingLines);
     const outputPlainBody = filterSubscriptionBody(
         plainBody,
         technicalNodeMap,
-        selectedByPublicGroupKey,
+        selection.selectedByPublicGroupKey,
     );
     const outputBody = encodeSubscriptionBody(outputPlainBody, format, input.body);
     const debugInfo = buildDebugInfo(
@@ -106,7 +136,8 @@ export function processSubscriptionWithHashBalancer(
         format,
         plainBody,
         matchingLines,
-        selectedByPublicGroupKey,
+        selection.selectedByPublicGroupKey,
+        selection.groupCandidateDiagnostics,
         outputPlainBody,
         input.requestPath,
         input.userAgent,
@@ -215,7 +246,10 @@ function collectMatchingLines(
 function selectNodesByPublicGroupKey(
     shortUuid: string,
     matchingLines: MatchingLine[],
-): Map<string, TechnicalNodeRef> {
+): {
+    groupCandidateDiagnostics: GroupSelectionDiagnostic[];
+    selectedByPublicGroupKey: Map<string, TechnicalNodeRef>;
+} {
     const groups = new Map<string, MatchingLine[]>();
 
     for (const matchingLine of matchingLines) {
@@ -225,22 +259,130 @@ function selectNodesByPublicGroupKey(
     }
 
     const selectedByPublicGroupKey = new Map<string, TechnicalNodeRef>();
+    const groupCandidateDiagnostics: GroupSelectionDiagnostic[] = [];
 
     for (const [publicGroupKey, group] of groups.entries()) {
-        const activeCandidates = uniqueNodeRefs(group)
-            .filter((nodeRef) => nodeRef.node.status === 'active')
+        const location = group[0].nodeRef.location;
+        const subscriptionCandidateNodes = Array.from(
+            new Set(group.map((matchingLine) => matchingLine.nodeRef.node.technicalHostName)),
+        );
+        const uniqueCandidates = uniqueNodeRefs(group);
+        const activeCandidates = uniqueCandidates
+            .filter((nodeRef) => location.enabled !== false && nodeRef.node.status === 'active')
             .sort((left, right) =>
                 left.node.technicalHostName.localeCompare(right.node.technicalHostName),
             );
-
-        const selectedNodeRef = selectHashModeNode(shortUuid, publicGroupKey, activeCandidates);
+        const unavailablePolicy = location.unavailablePolicy ?? 'hide_group';
+        const selectedNodeRef =
+            location.enabled === false
+                ? null
+                : selectHashModeNode(shortUuid, publicGroupKey, activeCandidates);
+        const unavailableReason = selectedNodeRef
+            ? undefined
+            : buildUnavailableReason(location, uniqueCandidates);
+        const passThroughOriginalUsed =
+            !selectedNodeRef && unavailablePolicy === 'pass_through_original';
+        const hiddenLinksCount = !selectedNodeRef && !passThroughOriginalUsed ? group.length : 0;
 
         if (selectedNodeRef) {
             selectedByPublicGroupKey.set(publicGroupKey, selectedNodeRef);
         }
+
+        groupCandidateDiagnostics.push({
+            publicHostCode: location.publicHostCode,
+            planCode: location.planCode,
+            userSquads: [],
+            accessibleNodesCount: 0,
+            groupNodesCount: location.nodes.length,
+            subscriptionCandidateNodes,
+            effectiveCandidateNodes: activeCandidates.map((nodeRef) => nodeRef.node.technicalHostName),
+            excludedNodes: buildExcludedCandidateNodes(location, subscriptionCandidateNodes),
+            reassignmentAttempted: false,
+            reassignmentResult: 'not_needed',
+            ...(selectedNodeRef
+                ? { selectedTechnicalHostName: selectedNodeRef.node.technicalHostName }
+                : {}),
+            ...(!selectedNodeRef && unavailableReason ? { failOpenReason: unavailableReason } : {}),
+            hiddenLinksCount,
+            matchedLinksCount: group.length,
+            passThroughOriginalUsed,
+            reason: selectedNodeRef ? 'processed' : (unavailableReason ?? 'no_active_candidates'),
+            status: selectedNodeRef ? 'ok' : passThroughOriginalUsed ? 'passed_through' : 'hidden',
+            warnings:
+                !selectedNodeRef && passThroughOriginalUsed
+                    ? [
+                          `No active TopoR balancer node for ${publicGroupKey}; preserving original links by unavailablePolicy=pass_through_original.`,
+                      ]
+                    : [],
+        });
     }
 
-    return selectedByPublicGroupKey;
+    return {
+        groupCandidateDiagnostics,
+        selectedByPublicGroupKey,
+    };
+}
+
+function buildUnavailableReason(
+    location: ToporBalancerLocation,
+    candidates: TechnicalNodeRef[],
+): 'group_disabled_hidden' | 'manual_strategy' | 'no_active_candidates' | 'node_dead' {
+    if (location.enabled === false) {
+        return 'group_disabled_hidden';
+    }
+
+    if (location.strategy === 'manual') {
+        return 'manual_strategy';
+    }
+
+    if (candidates.some((candidate) => candidate.node.status === 'dead')) {
+        return 'node_dead';
+    }
+
+    return 'no_active_candidates';
+}
+
+function buildExcludedCandidateNodes(
+    location: ToporBalancerLocation,
+    subscriptionCandidateTechnicalHostNames: string[],
+): GroupSelectionDiagnostic['excludedNodes'] {
+    const subscriptionCandidateNames = new Set(
+        subscriptionCandidateTechnicalHostNames.map(normalizeTechnicalHostName),
+    );
+
+    return location.nodes
+        .filter((node) => node.status !== 'active' || !subscriptionCandidateNames.has(normalizeTechnicalHostName(node.technicalHostName)))
+        .map((node) => {
+            if (!subscriptionCandidateNames.has(normalizeTechnicalHostName(node.technicalHostName))) {
+                return {
+                    technicalHostName: node.technicalHostName,
+                    reason: 'not_in_subscription' as const,
+                    message: `Node ${node.technicalHostName} is in the Balancer group but is not present in this user's subscription response.`,
+                };
+            }
+
+            if (node.status === 'dead') {
+                return {
+                    technicalHostName: node.technicalHostName,
+                    reason: 'node_dead' as const,
+                    message: `Node ${node.technicalHostName} is dead and must be reassigned.`,
+                };
+            }
+
+            if (node.status === 'disabled') {
+                return {
+                    technicalHostName: node.technicalHostName,
+                    reason: 'node_disabled' as const,
+                    message: `Node ${node.technicalHostName} is disabled and cannot receive assignments.`,
+                };
+            }
+
+            return {
+                technicalHostName: node.technicalHostName,
+                reason: 'node_draining' as const,
+                message: `Node ${node.technicalHostName} is draining and cannot receive new assignments.`,
+            };
+        });
 }
 
 function uniqueNodeRefs(matchingLines: MatchingLine[]): TechnicalNodeRef[] {
@@ -357,7 +499,9 @@ function filterSubscriptionBody(
         const selectedNodeRef = selectedByPublicGroupKey.get(publicGroupKey);
 
         if (!selectedNodeRef) {
-            outputLines.push(line);
+            if ((nodeRef.location.unavailablePolicy ?? 'hide_group') === 'pass_through_original') {
+                outputLines.push(line);
+            }
             continue;
         }
 
@@ -385,6 +529,7 @@ function buildDebugInfo(
     plainBody: string,
     matchingLines: MatchingLine[],
     selectedByPublicGroupKey: Map<string, TechnicalNodeRef>,
+    groupCandidateDiagnostics: GroupSelectionDiagnostic[],
     outputPlainBody: string,
     requestPath?: string,
     userAgent?: string,
@@ -401,6 +546,7 @@ function buildDebugInfo(
         detectedFormat: format,
         totalVlessLinks: extractVlessLinks(plainBody).length,
         matchedTechnicalLinks: matchingLines.length,
+        groupCandidateDiagnostics,
         selectedNodes: Object.fromEntries(
             Array.from(selectedByPublicGroupKey.entries()).map(([publicGroupKey, nodeRef]) => [
                 publicGroupKey,
@@ -416,15 +562,23 @@ function buildMissingSelectionWarnings(
     matchingLines: MatchingLine[],
     selectedByPublicGroupKey: Map<string, TechnicalNodeRef>,
 ): string[] {
-    const matchingGroupKeys = new Set(
-        matchingLines.map((matchingLine) => getPublicGroupKey(matchingLine.nodeRef.location)),
-    );
+    const matchingGroupKeys = new Map<string, ToporBalancerLocation>();
 
-    return Array.from(matchingGroupKeys)
-        .filter((publicGroupKey) => !selectedByPublicGroupKey.has(publicGroupKey))
+    for (const matchingLine of matchingLines) {
+        matchingGroupKeys.set(
+            getPublicGroupKey(matchingLine.nodeRef.location),
+            matchingLine.nodeRef.location,
+        );
+    }
+
+    return Array.from(matchingGroupKeys.entries())
+        .filter(([publicGroupKey, location]) =>
+            !selectedByPublicGroupKey.has(publicGroupKey) &&
+            (location.unavailablePolicy ?? 'hide_group') === 'pass_through_original',
+        )
         .map(
-            (publicGroupKey) =>
-                `No active TopoR balancer node for ${publicGroupKey}; preserving original links.`,
+            ([publicGroupKey]) =>
+                `No active TopoR balancer node for ${publicGroupKey}; preserving original links by unavailablePolicy=pass_through_original.`,
         );
 }
 

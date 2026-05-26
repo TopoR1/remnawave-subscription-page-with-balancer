@@ -19,6 +19,7 @@ import { ToporRemnawaveTopologyService } from './topor-remnawave-topology.servic
 
 @Injectable()
 export class ToporBalancerDiscoveryService {
+    private static readonly REMNAWAVE_CACHE_STALE_MS = 5 * 60 * 1000;
     private readonly logger = new Logger(ToporBalancerDiscoveryService.name);
 
     constructor(
@@ -83,15 +84,19 @@ export class ToporBalancerDiscoveryService {
                     remnawaveInboundName: topologyHost?.inboundName,
                     remnawaveProfileName: topologyHost?.profileName,
                     security: host.securityLayer.toLowerCase(),
+                    lastSeenAt: topologyHost?.lastSeenAt ?? topologyHost?.updatedAt,
                     squadStatus: 'unknown',
                     sni: host.sni ?? undefined,
                     technicalHostName,
+                    type: topologyHost?.transport,
                 };
             });
 
         return {
             source: 'remnawave-api',
             items: this.deduplicateByTechnicalHostName(items),
+            refreshedAt: this.getTopologyRefreshedAt(topology),
+            cacheStale: false,
         };
     }
 
@@ -165,6 +170,48 @@ export class ToporBalancerDiscoveryService {
         return this.mapDiscoveryResponseToGroup(groupId, response);
     }
 
+    public async getCachedGroupRemnawaveDiscovery(
+        groupId: string,
+    ): Promise<ToporBalancerGroupDiscoveryResponse> {
+        const topology = await this.toporBalancerService.getRemnawaveTopologyCache();
+        const response: ToporBalancerDiscoveryResponse = {
+            cacheStale: this.isTopologyCacheStale(topology),
+            items: topology.hosts.map((host): ToporBalancerDiscoveredHost => {
+                const technicalHostName = normalizeTechnicalHostName(host.remark);
+
+                return {
+                    accessibleSquads: host.accessibleSquads,
+                    alreadyImported: false,
+                    flow: host.flow,
+                    host: host.address,
+                    lastSeenAt: host.lastSeenAt ?? host.updatedAt,
+                    matchedNodeId: null,
+                    port: host.port,
+                    protocol: host.protocol ?? 'vless',
+                    rawRemark: host.remark,
+                    remnawaveInboundName: host.inboundName,
+                    remnawaveNodeName: host.nodeName,
+                    remnawaveNodeUuid: this.maskSecret(host.nodeUuid),
+                    remnawaveProfileName: host.profileName,
+                    security: host.security,
+                    squadStatus: host.accessibleSquads.length ? 'accessible' : 'unknown',
+                    sni: host.sni,
+                    technicalHostName,
+                    type: host.transport,
+                };
+            }),
+            refreshedAt: this.getTopologyRefreshedAt(topology),
+            source: 'remnawave-api',
+        };
+
+        return this.mapDiscoveryResponseToGroup(groupId, {
+            ...response,
+            items: this.deduplicateByTechnicalHostName(
+                response.items.filter((item) => item.technicalHostName.length > 0),
+            ),
+        });
+    }
+
     public async refreshGroupFromRemnawaveApi(
         groupId: string,
     ): Promise<ToporBalancerGroupDiscoveryResponse> {
@@ -212,6 +259,8 @@ export class ToporBalancerDiscoveryService {
         return {
             group: this.mapGroupSummary(group),
             items,
+            cacheStale: response.cacheStale,
+            refreshedAt: response.refreshedAt,
             shortUuid: response.shortUuid,
             source: response.source,
         };
@@ -244,6 +293,23 @@ export class ToporBalancerDiscoveryService {
                 membershipStatus: 'not_accessible_to_selected_squad',
                 squadStatus: 'not_accessible_to_selected_squad',
                 status: 'not_accessible_to_selected_squad',
+                technicalHostName,
+            };
+        }
+
+        if (nodeInThisGroup && nodesInOtherGroups.length > 0) {
+            return {
+                ...item,
+                alreadyImported: true,
+                canAdd: false,
+                currentGroupId: nodeInThisGroup.groupId ?? null,
+                currentGroupName: [nodeInThisGroup.publicName, ...nodesInOtherGroups.map((node) => node.publicName)].join(', '),
+                matchedGroupId: nodeInThisGroup.groupId,
+                matchedGroupPlanCode: nodeInThisGroup.planCode,
+                matchedGroupPublicHostCode: nodeInThisGroup.publicHostCode,
+                matchedNodeId: nodeInThisGroup.id,
+                membershipStatus: 'conflict',
+                status: 'conflict',
                 technicalHostName,
             };
         }
@@ -397,6 +463,37 @@ export class ToporBalancerDiscoveryService {
                 ]),
             ).values(),
         );
+    }
+
+    private getTopologyRefreshedAt(topology: {
+        hosts: Array<{ lastSeenAt?: string; updatedAt?: string }>;
+        refreshedAt?: string;
+    }): string | undefined {
+        if (topology.refreshedAt) {
+            return topology.refreshedAt;
+        }
+
+        return topology.hosts
+            .map((host) => host.lastSeenAt ?? host.updatedAt)
+            .filter((value): value is string => Boolean(value))
+            .sort()
+            .at(-1);
+    }
+
+    private isTopologyCacheStale(topology: {
+        hosts: Array<{ lastSeenAt?: string; updatedAt?: string }>;
+        refreshedAt?: string;
+    }): boolean {
+        const refreshedAt = this.getTopologyRefreshedAt(topology);
+
+        if (!refreshedAt) {
+            return true;
+        }
+
+        const refreshedAtMs = Date.parse(refreshedAt);
+
+        return !Number.isFinite(refreshedAtMs) ||
+            Date.now() - refreshedAtMs > ToporBalancerDiscoveryService.REMNAWAVE_CACHE_STALE_MS;
     }
 
     private stringifySubscriptionBody(body: unknown): string | null {

@@ -74,6 +74,10 @@ export const en = {
             ready: 'Done',
             uuidHidden: 'uuid hidden',
         },
+        language: {
+            en: 'English',
+            ru: 'Русский',
+        },
         discovery: {
             addModalTitle: 'Add to group',
             alreadyInGroup: 'Already in this group',
@@ -123,6 +127,13 @@ export const en = {
             valid: 'Valid',
             warnings: 'Warnings',
             error: 'error',
+            reasonLabels: {
+                group_disabled_hidden: 'The group is disabled, so its technical links are hidden from the subscription.',
+                no_active_candidates: 'The group has no active nodes to choose from.',
+                not_in_subscription: "The node exists in the Balancer group but is missing from this user's subscription.",
+                technicalHostName_mismatch: 'The link name did not match technicalHostName in Balancer.',
+                unsupported_app: 'Remnawave returned the App not supported fallback.',
+            },
         },
         fields: {
             assignedUsers: 'Assigned',
@@ -144,6 +155,7 @@ export const en = {
             publicHostCode: 'Group code',
             publicName: 'Public name',
             responseFormat: 'Format',
+            remark: 'Remark',
             security: 'Security',
             shortUuid: 'Short UUID',
             sni: 'SNI',
@@ -153,6 +165,8 @@ export const en = {
             type: 'Type',
             updatedAt: 'Updated',
             weight: 'Weight',
+            inboundProfile: 'Inbound / profile',
+            squad: 'Squad',
         },
         forms: {
             groupCreateTitle: 'Create group',
@@ -192,6 +206,9 @@ export const en = {
             technicalHostRequired: 'Enter technical name',
             tokenRequired: 'Enter test subscription Short UUID',
             requiredGroupFields: 'Fill public name, group code, and plan',
+            typoFlStandart: '"fl_standart" looks like typo, expected "fi_standard"',
+            typoStandart: '"standart" looks like typo, expected "standard"',
+            cacheStaleRefreshing: 'cache is stale, background refresh is running',
         },
         nodes: {
             emptyText: 'Add a node manually or import discovered Remnawave records.',
@@ -205,6 +222,20 @@ export const en = {
             draining: 'Draining',
             groupEnabled: 'Enabled',
             groupDisabled: 'Disabled',
+        },
+        strategies: {
+            least_loaded: 'Least loaded',
+            manual: 'Manual',
+            priority_failover: 'Priority failover',
+            sticky_hash: 'Sticky hash',
+            weighted: 'Weighted',
+        },
+        strategyTooltips: {
+            least_loaded: 'New assignments go to the active node with the lowest effective load: assignments / (user limit * weight).',
+            manual: 'New users are not assigned automatically. Existing manual assignments are used; otherwise the subscription keeps original links.',
+            priority_failover: 'The first active node by priority is selected. If the primary node is unavailable, the next one is used.',
+            sticky_hash: 'Static selection by user identifier. Without DB it is stable, but can change when the node list changes.',
+            weighted: 'New assignments are distributed by weight. Nodes with higher weight receive more users; user limit is treated as a soft cap.',
         },
         subtitle: 'Public location groups and technical balancer nodes',
         tabs: {

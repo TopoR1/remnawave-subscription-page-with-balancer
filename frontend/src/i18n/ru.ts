@@ -74,6 +74,10 @@ export const ru = {
             ready: 'Готово',
             uuidHidden: 'uuid скрыт',
         },
+        language: {
+            en: 'English',
+            ru: 'Русский',
+        },
         discovery: {
             addModalTitle: 'Добавить в группу',
             alreadyInGroup: 'Уже в этой группе',
@@ -123,6 +127,13 @@ export const ru = {
             valid: 'Валидна',
             warnings: 'Предупреждения',
             error: 'ошибка',
+            reasonLabels: {
+                group_disabled_hidden: 'Группа отключена, её технические ссылки скрыты из подписки.',
+                no_active_candidates: 'В группе нет активных нод для выбора.',
+                not_in_subscription: 'Нода есть в группе Balancer, но отсутствует в подписке этого пользователя.',
+                technicalHostName_mismatch: 'Название ссылки не совпало с technicalHostName в Balancer.',
+                unsupported_app: 'Remnawave вернул заглушку App not supported.',
+            },
         },
         fields: {
             assignedUsers: 'Назначено',
@@ -144,6 +155,7 @@ export const ru = {
             publicHostCode: 'Код группы',
             publicName: 'Публичное название',
             responseFormat: 'Формат',
+            remark: 'Название ссылки',
             security: 'Защита',
             shortUuid: 'UUID подписки',
             sni: 'Серверное имя',
@@ -153,6 +165,8 @@ export const ru = {
             type: 'Транспорт',
             updatedAt: 'Обновлено',
             weight: 'Вес',
+            inboundProfile: 'Inbound / профиль',
+            squad: 'Squad',
         },
         forms: {
             groupCreateTitle: 'Создать группу',
@@ -192,6 +206,9 @@ export const ru = {
             technicalHostRequired: 'Введите техническую ноду',
             tokenRequired: 'Введите UUID тестовой подписки',
             requiredGroupFields: 'Заполните публичное название, код группы и тариф',
+            typoFlStandart: '"fl_standart" похоже на опечатку, ожидается "fi_standard"',
+            typoStandart: '"standart" похоже на опечатку, ожидается "standard"',
+            cacheStaleRefreshing: 'кэш устарел, идет фоновое обновление',
         },
         nodes: {
             emptyText: 'Добавьте ноду вручную или импортируйте найденные записи Remnawave.',
@@ -205,6 +222,20 @@ export const ru = {
             draining: 'Выводится',
             groupEnabled: 'Включена',
             groupDisabled: 'Отключена',
+        },
+        strategies: {
+            least_loaded: 'Минимальная нагрузка',
+            manual: 'Ручная',
+            priority_failover: 'Приоритетный резерв',
+            sticky_hash: 'Статический хеш',
+            weighted: 'Взвешенная',
+        },
+        strategyTooltips: {
+            least_loaded: 'Новые назначения идут на активную ноду с минимальной эффективной нагрузкой: назначения / (лимит пользователей * вес).',
+            manual: 'Новые пользователи не назначаются автоматически. Используются только существующие ручные назначения, иначе подписка сохраняет исходные ссылки.',
+            priority_failover: 'Выбирается первая активная нода по приоритету. Если основная недоступна, используется следующая.',
+            sticky_hash: 'Статический выбор по идентификатору пользователя. Без БД стабилен, но может измениться при изменении списка нод.',
+            weighted: 'Новые назначения распределяются по весам. Ноды с большим весом получают больше пользователей; лимит пользователей учитывается как мягкий.',
         },
         subtitle: 'Группы публичных локаций и технические ноды балансировщика',
         tabs: {

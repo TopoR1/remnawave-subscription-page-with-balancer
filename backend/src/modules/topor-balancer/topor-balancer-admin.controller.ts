@@ -168,7 +168,7 @@ export class ToporBalancerAdminController {
 
     @Get('groups/:id/discovery/remnawave')
     public async discoverGroupFromRemnawaveApi(@Param('id') id: string) {
-        return this.toporBalancerDiscoveryService.discoverGroupFromRemnawaveApi(id);
+        return this.toporBalancerDiscoveryService.getCachedGroupRemnawaveDiscovery(id);
     }
 
     @Get('groups/:id/diagnostics/recent')

@@ -66,7 +66,23 @@ interface GroupCandidateDiagnostic {
     reassignmentAttempted: boolean;
     reassignmentResult?: 'kept' | 'reassigned' | 'failed' | 'not_needed';
     selectedTechnicalHostName?: string;
-    failOpenReason?: 'no_active_candidates' | 'node_dead' | 'node_disabled' | 'manual_strategy';
+    failOpenReason?:
+        | 'group_disabled_hidden'
+        | 'manual_strategy'
+        | 'no_active_candidates'
+        | 'node_dead'
+        | 'node_disabled';
+    hiddenLinksCount?: number;
+    matchedLinksCount?: number;
+    passThroughOriginalUsed?: boolean;
+    reason?:
+        | 'group_disabled_hidden'
+        | 'manual_strategy'
+        | 'no_active_candidates'
+        | 'node_dead'
+        | 'node_disabled'
+        | 'processed';
+    status?: string;
     warnings: string[];
 }
 
@@ -340,6 +356,7 @@ async function selectNodesByPublicGroupKey(
 
     for (const [publicGroupKey, group] of groups.entries()) {
         const location = group[0].nodeRef.location;
+        const unavailablePolicy = location.unavailablePolicy ?? 'hide_group';
         const subscriptionCandidateTechnicalHostNames = Array.from(
             new Set(
                 group
@@ -378,13 +395,23 @@ async function selectNodesByPublicGroupKey(
             subscriptionCandidateTechnicalHostNames,
         });
         const warnings = [...accessResult.warnings];
+        const groupDisabled = location.enabled === false;
 
-        if (activeCandidateTechnicalHostNames.length === 0 && !canKeepPreviousAssignment(previousAssignment)) {
-            const failOpenReason = buildFailOpenReason(previousAssignment);
+        if (
+            groupDisabled ||
+            (activeCandidateTechnicalHostNames.length === 0 &&
+                !canKeepPreviousAssignment(previousAssignment))
+        ) {
+            const failOpenReason = buildFailOpenReason(previousAssignment, excludedNodes);
+            const reason = groupDisabled ? 'group_disabled_hidden' : failOpenReason;
+            const passThroughOriginalUsed = unavailablePolicy === 'pass_through_original';
+            const hiddenLinksCount = passThroughOriginalUsed ? 0 : group.length;
             warnings.push(
-                accessResult.effectiveCandidateTechnicalHostNames.length === 0
-                    ? `No accessible TopoR balancer candidates for ${publicGroupKey}; preserving original links.`
-                    : `No active TopoR balancer node for ${publicGroupKey}; preserving original links.`,
+                passThroughOriginalUsed
+                    ? `No active TopoR balancer node for ${publicGroupKey}; preserving original links by unavailablePolicy=pass_through_original.`
+                    : groupDisabled
+                      ? `TopoR balancer group ${publicGroupKey} is disabled; hiding original technical links.`
+                      : `No active TopoR balancer node for ${publicGroupKey}; hiding original technical links.`,
             );
             groupCandidateDiagnostics.push({
                 publicHostCode: location.publicHostCode,
@@ -403,7 +430,12 @@ async function selectNodesByPublicGroupKey(
                     : {}),
                 reassignmentAttempted,
                 reassignmentResult: reassignmentAttempted ? 'failed' : 'not_needed',
-                failOpenReason,
+                failOpenReason: reason,
+                hiddenLinksCount,
+                matchedLinksCount: group.length,
+                passThroughOriginalUsed,
+                reason,
+                status: passThroughOriginalUsed ? 'passed_through' : 'hidden',
                 warnings,
             });
             continue;
@@ -424,7 +456,9 @@ async function selectNodesByPublicGroupKey(
             selectedNode,
             reassignmentAttempted,
         );
-        const failOpenReason = selectedNode ? undefined : buildFailOpenReason(previousAssignment);
+        const failOpenReason = selectedNode
+            ? undefined
+            : buildFailOpenReason(previousAssignment, excludedNodes);
 
         groupCandidateDiagnostics.push({
             publicHostCode: location.publicHostCode,
@@ -445,6 +479,11 @@ async function selectNodesByPublicGroupKey(
             reassignmentResult,
             ...(selectedNode ? { selectedTechnicalHostName: selectedNode.technicalHostName } : {}),
             ...(failOpenReason ? { failOpenReason } : {}),
+            hiddenLinksCount: selectedNode ? group.length - 1 : 0,
+            matchedLinksCount: group.length,
+            passThroughOriginalUsed: false,
+            reason: selectedNode ? 'processed' : failOpenReason,
+            status: selectedNode ? 'ok' : 'hidden',
             warnings,
         });
     }
@@ -493,14 +532,10 @@ function filterCandidatesByUserAccess(input: {
         const host = hostByRemark.get(normalizeTechnicalHostName(technicalHostName));
 
         if (!host) {
-            const message = `Candidate ${technicalHostName} has no Remnawave topology host; excluded for user-aware balancing.`;
+            const message = `Candidate ${technicalHostName} has no Remnawave topology host; keeping it because it is present in this user's subscription response.`;
 
             warnings.push(message);
-            excludedNodes.push({
-                technicalHostName,
-                reason: 'missing_topology',
-                message,
-            });
+            effectiveCandidateTechnicalHostNames.push(technicalHostName);
             continue;
         }
 
@@ -613,6 +648,7 @@ function filterActiveCandidateTechnicalHostNames(
     return location.nodes
         .filter(
             (node) =>
+                location.enabled !== false &&
                 (nodeStatusByTechnicalHostName.get(normalizeTechnicalHostName(node.technicalHostName)) ??
                     node.status) === 'active' &&
                 candidateNames.has(normalizeTechnicalHostName(node.technicalHostName)),
@@ -662,6 +698,7 @@ function buildReassignmentResult(
 
 function buildFailOpenReason(
     previousAssignment: Awaited<ReturnType<typeof findPreviousAssignment>>,
+    excludedNodes: ExcludedCandidateNode[] = [],
 ): 'no_active_candidates' | 'node_dead' | 'node_disabled' | 'manual_strategy' {
     if (previousAssignment?.status === 'dead') {
         return 'node_dead';
@@ -669,6 +706,10 @@ function buildFailOpenReason(
 
     if (previousAssignment?.status === 'disabled') {
         return 'node_disabled';
+    }
+
+    if (excludedNodes.some((node) => node.reason === 'node_dead')) {
+        return 'node_dead';
     }
 
     return 'no_active_candidates';
@@ -772,7 +813,9 @@ function filterSubscriptionBody(
         const selectedNode = selectedByPublicGroupKey.get(publicGroupKey);
 
         if (!selectedNode) {
-            outputLines.push(line);
+            if ((nodeRef.location.unavailablePolicy ?? 'hide_group') === 'pass_through_original') {
+                outputLines.push(line);
+            }
             continue;
         }
 
@@ -840,6 +883,10 @@ function buildDebugInfo(
 function getRuntimeDiagnosticsStatus(debugInfo: ToporBalancerDebugInfo): string {
     const groups = debugInfo.groupCandidateDiagnostics ?? [];
 
+    if (groups.some((group) => group.reason === 'group_disabled_hidden')) {
+        return 'no_active_candidates';
+    }
+
     if (groups.some((group) => group.failOpenReason === 'no_active_candidates')) {
         return 'no_active_candidates';
     }
@@ -868,28 +915,24 @@ function buildMissingSelectionWarnings(
     selectedByPublicGroupKey: Map<string, ToporBalancerDbNode>,
     groupCandidateDiagnostics: GroupCandidateDiagnostic[],
 ): string[] {
+    const passThroughGroupKeys = new Set(
+        groupCandidateDiagnostics
+            .filter((diagnostic) => diagnostic.passThroughOriginalUsed === true)
+            .map((diagnostic) => `${diagnostic.publicHostCode}:${diagnostic.planCode}`),
+    );
     const matchingGroupKeys = new Set(
         matchingLines.map((matchingLine) => getPublicGroupKey(matchingLine.nodeRef.location)),
-    );
-    const noAccessibleCandidateGroupKeys = new Set(
-        groupCandidateDiagnostics
-            .filter(
-                (diagnostic) =>
-                    diagnostic.subscriptionCandidateNodes.length > 0 &&
-                    diagnostic.effectiveCandidateNodes.length === 0,
-            )
-            .map((diagnostic) => `${diagnostic.publicHostCode}:${diagnostic.planCode}`),
     );
 
     return Array.from(matchingGroupKeys)
         .filter(
             (publicGroupKey) =>
                 !selectedByPublicGroupKey.has(publicGroupKey) &&
-                !noAccessibleCandidateGroupKeys.has(publicGroupKey),
+                passThroughGroupKeys.has(publicGroupKey),
         )
         .map(
             (publicGroupKey) =>
-                `No active TopoR balancer node for ${publicGroupKey}; preserving original links.`,
+                `No active TopoR balancer node for ${publicGroupKey}; preserving original links by unavailablePolicy=pass_through_original.`,
         );
 }
 
