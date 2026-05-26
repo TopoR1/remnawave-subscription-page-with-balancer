@@ -121,7 +121,7 @@
 }
 
 .assignmentsTable {
-    min-width: 1120px;
+    min-width: 1280px;
 }
 
 .requestsTable {
@@ -129,7 +129,7 @@
 }
 
 .discoveryTable {
-    min-width: 1180px;
+    min-width: 2400px;
 }
 
 .nodesTable th {

@@ -128,6 +128,7 @@ interface ToporBalancerNode {
 }
 
 interface ToporBalancerAssignment {
+    createdAt?: string
     id: string
     nodeId: string
     planCode: string
@@ -521,6 +522,18 @@ function maskShort(value: string) {
     return `${value.slice(0, 4)}...${value.slice(-4)}`
 }
 
+function maskSecret(value?: string) {
+    if (!value) {
+        return '-'
+    }
+
+    if (value.length <= 8) {
+        return `${value.slice(0, 2)}***`
+    }
+
+    return `${value.slice(0, 4)}...${value.slice(-4)}`
+}
+
 function redactSensitiveText(value?: string) {
     if (!value) {
         return '-'
@@ -631,7 +644,9 @@ function getDiagnosticsStatusLabel(status: SubscriptionDiagnosticsResult['groups
     const labels: Partial<Record<SubscriptionDiagnosticsResult['groups'][number]['status'], string>> = {
         'fail-open': 'Исходные ссылки',
         'no-active-node': 'Нет активной ноды',
-        ok: 'Готово'
+        ok: 'Обработана',
+        partial: 'Обработана частично',
+        'passed-through': 'Без изменений'
     }
 
     return labels[status] ?? status
@@ -651,7 +666,7 @@ function getDiagnosticsOverallStatusColor(status: SubscriptionDiagnosticsResult[
 
 function getDiagnosticsOverallStatusLabel(status: SubscriptionDiagnosticsResult['status']) {
     if (status === 'unsupported_app') {
-        return 'App not supported'
+        return 'Приложение не поддержано'
     }
 
     const labels: Partial<Record<SubscriptionDiagnosticsResult['status'], string>> = {
@@ -666,7 +681,7 @@ function getDiagnosticsOverallStatusLabel(status: SubscriptionDiagnosticsResult[
 
 function getDiagnosticsReasonLabel(reason: DiagnosticsUnchangedReason) {
     if (reason === 'unsupported_app') {
-        return 'App not supported'
+        return 'Приложение не поддержано'
     }
 
     const labels: Partial<Record<DiagnosticsUnchangedReason, string>> = {
@@ -685,6 +700,51 @@ function getDiagnosticsReasonLabel(reason: DiagnosticsUnchangedReason) {
     }
 
     return labels[reason] ?? reason
+}
+
+function getSubscriptionFormatLabel(format: SubscriptionDiagnosticsResult['format']) {
+    const labels: Record<SubscriptionDiagnosticsResult['format'], string> = {
+        base64_links: 'Base64 со ссылками',
+        plain_links: 'Обычный список ссылок',
+        unknown: 'Неизвестный'
+    }
+
+    return labels[format]
+}
+
+function getTraceFlowLabel(flow: SubscriptionTrace['request']['flow']) {
+    const labels: Record<SubscriptionTrace['request']['flow'], string> = {
+        browser: 'Браузер',
+        raw: 'Сырые данные'
+    }
+
+    return labels[flow]
+}
+
+function getDiscoveryStatusLabel(status?: DiscoveryItemStatus) {
+    const labels: Record<DiscoveryItemStatus, string> = {
+        conflict: 'Конфликт',
+        free: 'Свободна',
+        in_other_group: 'В другой группе',
+        in_this_group: 'В этой группе',
+        not_accessible_to_selected_squad: 'Недоступна squad группы'
+    }
+
+    return status ? labels[status] : 'Свободна'
+}
+
+function getRuntimeStatusLabel(status?: string) {
+    const labels: Record<string, string> = {
+        failed_open: 'Ошибка, отдана исходная подписка',
+        no_active_candidates: 'Нет активных кандидатов',
+        no_effective_candidates: 'Нет эффективных кандидатов',
+        partially_processed: 'Обработано частично',
+        passed_through: 'Без изменений',
+        processed: 'Обработано',
+        unsupported_app: 'Приложение не поддержано'
+    }
+
+    return status ? labels[status] ?? status : '-'
 }
 
 function getAssignmentModeLabel(mode?: string) {
@@ -1238,7 +1298,7 @@ export function ToporBalancerAdminPage() {
         runAssignmentAction(
             group,
             `${ADMIN_GROUPS_URL}/${group.id}/assignments/rebalance`,
-            `Перераспределить текущие назначения группы ${group.publicName} по активным нодам? Draining, disabled и dead ноды не будут получать назначения.`
+            `Перераспределить текущие назначения группы ${group.publicName} по активным нодам? Ноды в выводе, отключенные и аварийные ноды не будут получать назначения.`
         )
 
     const migrateNodeAssignments = (node: ToporBalancerNode) => {
@@ -1273,7 +1333,7 @@ export function ToporBalancerAdminPage() {
         if (incompatibleSelectedHosts.length > 0) {
             notifications.show({
                 color: 'red',
-                message: `Nodes are not accessible to selected squad: ${incompatibleSelectedHosts.map((host) => host.technicalHostName).join(', ')}`,
+                message: `Ноды недоступны для выбранной squad: ${incompatibleSelectedHosts.map((host) => host.technicalHostName).join(', ')}`,
                 title: texts.discovery.conflict
             })
             return
@@ -1389,8 +1449,8 @@ export function ToporBalancerAdminPage() {
         }
     }
 
-    const importSelectedHosts = async () => {
-        if (selectedHosts.length === 0) {
+    const importSelectedHosts = async (technicalHostNames = selectedHosts) => {
+        if (technicalHostNames.length === 0) {
             notifications.show({
                 color: 'red',
                 message: texts.discovery.selectAtLeastOne,
@@ -1412,7 +1472,7 @@ export function ToporBalancerAdminPage() {
                 body: JSON.stringify({
                     defaults: importDefaults,
                     mode: 'skip_conflicts',
-                    technicalHostNames: selectedHosts
+                    technicalHostNames
                 }),
                 method: 'POST'
             })
@@ -1868,7 +1928,7 @@ export function ToporBalancerAdminPage() {
                                 </Group>
                                 {selectedGroupNodeCounterMismatch && (
                                     <Alert color="red" variant="light">
-                                        Group counter regression: card shows {selectedGroup.nodesCount} nodes, modal loaded {selectedGroupNodes.length} rows from /groups/{selectedGroup.id}/nodes.
+                                        Счетчик группы отличается от загруженного списка: в группе указано {selectedGroup.nodesCount}, загружено {selectedGroupNodes.length}.
                                     </Alert>
                                 )}
                                 <DiscoveredHostsTable
@@ -1876,6 +1936,7 @@ export function ToporBalancerAdminPage() {
                                     hosts={groupNodeDiscoveryRows}
                                     importedByTechnicalHostName={importedByTechnicalHostName}
                                     importStatuses={discoveryImportStatuses}
+                                    importOneHost={(technicalHostName) => importSelectedHosts([technicalHostName])}
                                     patchNode={patchNode}
                                     removeNode={deleteNode}
                                     selectedGroup={selectedGroup}
@@ -1942,16 +2003,16 @@ export function ToporBalancerAdminPage() {
                                                 <TextInput
                                                     label="Поиск"
                                                     onChange={(event) => setNodeDiscoverySearch(event.currentTarget.value)}
-                                                    placeholder="technicalHostName, host, squad, profile"
+                                                    placeholder="Техническая нода, хост, squad, profile"
                                                     value={nodeDiscoverySearch}
                                                 />
                                                 <Select
                                                     clearable
                                                     data={[
-                                                        { label: 'free', value: 'free' },
-                                                        { label: 'in_this_group', value: 'in_this_group' },
-                                                        { label: 'in_other_group', value: 'in_other_group' },
-                                                        { label: 'conflict', value: 'conflict' },
+                                                        { label: 'Свободна', value: 'free' },
+                                                        { label: 'В этой группе', value: 'in_this_group' },
+                                                        { label: 'В другой группе', value: 'in_other_group' },
+                                                        { label: 'Конфликт', value: 'conflict' },
                                                         ...Array.from(new Set(discoveredHosts.flatMap((host) => [
                                                             host.security,
                                                             host.type,
@@ -1961,11 +2022,11 @@ export function ToporBalancerAdminPage() {
                                                     ]}
                                                     label="Фильтр"
                                                     onChange={setNodeDiscoveryFilter}
-                                                    placeholder="squad/profile/status"
+                                                    placeholder="Статус, squad, profile/inbound"
                                                     value={nodeDiscoveryFilter}
                                                 />
                                             </Group>
-                                            <Button disabled={selectedHosts.length === 0} leftSection={<IconDownload size={16} />} loading={isDiscoveryLoading} onClick={importSelectedHosts}>
+                                            <Button disabled={selectedHosts.length === 0} leftSection={<IconDownload size={16} />} loading={isDiscoveryLoading} onClick={() => importSelectedHosts()}>
                                                 Добавить выбранные в эту группу
                                             </Button>
                                         </Group>
@@ -1984,53 +2045,21 @@ export function ToporBalancerAdminPage() {
                                 </Card>
                                 {selectedGroupNodeCounterMismatch && (
                                     <Alert color="red" variant="light">
-                                        Group counter regression: card shows {selectedGroup.nodesCount} nodes, modal loaded {selectedGroupNodes.length} rows from /groups/{selectedGroup.id}/nodes.
+                                        Счетчик группы отличается от загруженного списка: в группе указано {selectedGroup.nodesCount}, загружено {selectedGroupNodes.length}.
                                     </Alert>
                                 )}
-                                <TechnicalNodesTable
-                                    assignments={selectedGroupAssignments}
-                                    deleteNode={deleteNode}
-                                    discoveredByTechnicalHostName={discoveredByTechnicalHostName}
-                                    migrateNodeAssignments={migrateNodeAssignments}
-                                    nodes={selectedGroupNodes}
-                                    patchNode={patchNode}
-                                    viewNodeAssignments={viewNodeAssignments}
-                                />
-                            </Stack>
-                        </Tabs.Panel>
-
-                        <Tabs.Panel pt="md" value="discovery">
-                            <Stack gap="md">
-                                <Card className={classes.tableCard} p="md" radius="md">
-                                    <Group align="end" justify="space-between">
-                                        <Group align="end">
-                                            <Button leftSection={<IconRefresh size={16} />} loading={isDiscoveryLoading} onClick={runApiDiscovery} variant="light">
-                                                Обновить список
-                                            </Button>
-                                            <TextInput
-                                                label="UUID тестовой подписки"
-                                                onChange={(event) => setShortUuid(event.currentTarget.value)}
-                                                placeholder="Введите UUID"
-                                                value={shortUuid}
-                                            />
-                                            <Button leftSection={<IconSearch size={16} />} loading={isDiscoveryLoading} onClick={runSubscriptionDiscovery} variant="light">
-                                                Сканировать подписку
-                                            </Button>
-                                        </Group>
-                                        <Button disabled={selectedHosts.length === 0} leftSection={<IconDownload size={16} />} loading={isDiscoveryLoading} onClick={importSelectedHosts}>
-                                            Импортировать выбранные
-                                        </Button>
-                                    </Group>
-                                </Card>
                                 <DiscoveredHostsTable
-                                    hosts={discoveredHosts}
+                                    assignments={selectedGroupAssignments}
+                                    hosts={groupNodeDiscoveryRows}
                                     importedByTechnicalHostName={importedByTechnicalHostName}
                                     importStatuses={discoveryImportStatuses}
+                                    importOneHost={(technicalHostName) => importSelectedHosts([technicalHostName])}
+                                    patchNode={patchNode}
+                                    removeNode={deleteNode}
                                     selectedGroup={selectedGroup}
                                     selectedHosts={selectedHosts}
                                     toggleSelectedHost={toggleSelectedHost}
                                 />
-                                {lastImportResult && <ImportResultSummary result={lastImportResult} />}
                             </Stack>
                         </Tabs.Panel>
 
@@ -2108,7 +2137,7 @@ export function ToporBalancerAdminPage() {
                                         {subscriptionDiagnostics && (
                                             <Stack gap="md">
                                                 <Group gap="sm">
-                                                    <Badge variant="light">Формат: {subscriptionDiagnostics.format}</Badge>
+                                                    <Badge variant="light">Формат: {getSubscriptionFormatLabel(subscriptionDiagnostics.format)}</Badge>
                                                     <Badge variant="light">Входящих VLESS: {subscriptionDiagnostics.inputLinksCount}</Badge>
                                                     <Badge variant="light">Исходящих VLESS: {subscriptionDiagnostics.outputLinksCount}</Badge>
                                                 </Group>
@@ -2434,7 +2463,7 @@ export function ToporBalancerAdminPage() {
 
                                             {selectedGroupNodeCounterMismatch && (
                                                 <Alert color="red" variant="light">
-                                                    Group counter regression: card shows {selectedGroup.nodesCount} nodes, modal loaded {selectedGroupNodes.length} rows from /groups/{selectedGroup.id}/nodes.
+                                                    Счетчик группы отличается от загруженного списка: в группе указано {selectedGroup.nodesCount}, загружено {selectedGroupNodes.length}.
                                                 </Alert>
                                             )}
                                             <TechnicalNodesTable
@@ -2582,7 +2611,7 @@ export function ToporBalancerAdminPage() {
 
                                         {selectedGroupNodeCounterMismatch && selectedGroup && (
                                             <Alert color="red" variant="light">
-                                                Group counter regression: card shows {selectedGroup.nodesCount} nodes, modal loaded {selectedGroupNodes.length} rows from /groups/{selectedGroup.id}/nodes.
+                                                Счетчик группы отличается от загруженного списка: в группе указано {selectedGroup.nodesCount}, загружено {selectedGroupNodes.length}.
                                             </Alert>
                                         )}
                                         <TechnicalNodesTable
@@ -2639,7 +2668,7 @@ export function ToporBalancerAdminPage() {
                                         />
 
                                         <Group justify="flex-end">
-                                            <Button disabled={selectedHosts.length === 0} leftSection={<IconDownload size={16} />} loading={isDiscoveryLoading} onClick={importSelectedHosts}>
+                                            <Button disabled={selectedHosts.length === 0} leftSection={<IconDownload size={16} />} loading={isDiscoveryLoading} onClick={() => importSelectedHosts()}>
                                                 {texts.actions.addToGroup}
                                             </Button>
                                         </Group>
@@ -2924,7 +2953,7 @@ function DiagnosticsSummary({ result }: { result: SubscriptionDiagnosticsResult 
                     <Text fw={700}>{getDiagnosticsOverallStatusLabel(result.status)}</Text>
                     {result.status === 'unsupported_app' && (
                         <Text size="sm">
-                            Remnawave вернул заглушку App not supported. Проверьте User-Agent клиента и настройки приложений в Subscription Page.
+                            Remnawave вернул заглушку неподдержанного приложения. Проверьте User-Agent клиента и настройки приложений в Subscription Page.
                         </Text>
                     )}
                     {hasNoTechnicalHostNameMatches && (
@@ -2954,8 +2983,8 @@ function DiagnosticsSummary({ result }: { result: SubscriptionDiagnosticsResult 
             )}
             <Alert color="blue" variant="light">
                 <Group gap="lg">
-                    <Text size="sm">User squads: {result.userSquads.map((squad) => squad.name).join(', ') || '-'}</Text>
-                    <Text size="sm">Accessible nodes: {result.accessibleNodesCount}</Text>
+                    <Text size="sm">Squad пользователя: {result.userSquads.map((squad) => squad.name).join(', ') || '-'}</Text>
+                    <Text size="sm">Доступных нод: {result.accessibleNodesCount}</Text>
                 </Group>
             </Alert>
             {partiallyVisibleGroups.map((group) => (
@@ -2978,11 +3007,11 @@ function DiagnosticsSummary({ result }: { result: SubscriptionDiagnosticsResult 
             {result.unmatchedRemarks.length > 0 && (
                 <Alert color="yellow" variant="light">
                     <Stack gap={4}>
-                        <Text fw={700} size="sm">Unmatched original VLESS remarks</Text>
+                        <Text fw={700} size="sm">Исходные VLESS remarks без совпадения</Text>
                         <Text className={classes.wrapCell} size="sm">
                             {result.unmatchedRemarks.join(', ')}
                         </Text>
-                        <Text size="sm">Add these values as Balancer technicalHostName when they should be managed.</Text>
+                        <Text size="sm">Добавьте эти значения как technicalHostName, если Balancer должен управлять этими ссылками.</Text>
                     </Stack>
                 </Alert>
             )}
@@ -2993,12 +3022,12 @@ function DiagnosticsSummary({ result }: { result: SubscriptionDiagnosticsResult 
                             <Table.Thead>
                                 <Table.Tr>
                                     <Table.Th>Remark</Table.Th>
-                                    <Table.Th>Normalized</Table.Th>
-                                    <Table.Th>Length</Table.Th>
-                                    <Table.Th>Match</Table.Th>
-                                    <Table.Th>Configured technicalHostNames</Table.Th>
-                                    <Table.Th>Closest candidates</Table.Th>
-                                    <Table.Th>Reason</Table.Th>
+                                    <Table.Th>Нормализовано</Table.Th>
+                                    <Table.Th>Длина</Table.Th>
+                                    <Table.Th>Совпадение</Table.Th>
+                                    <Table.Th>Настроенные technicalHostName</Table.Th>
+                                    <Table.Th>Ближайшие кандидаты</Table.Th>
+                                    <Table.Th>Причина</Table.Th>
                                 </Table.Tr>
                             </Table.Thead>
                             <Table.Tbody>
@@ -3010,8 +3039,8 @@ function DiagnosticsSummary({ result }: { result: SubscriptionDiagnosticsResult 
                                         <Table.Td>
                                             <Badge color={diagnostic.matchesTechnicalHostName ? 'green' : 'yellow'} variant="light">
                                                 {diagnostic.matchesTechnicalHostName
-                                                    ? diagnostic.matchedTechnicalHostName ?? 'matched'
-                                                    : 'not matched'}
+                                                    ? diagnostic.matchedTechnicalHostName ?? 'Совпало'
+                                                    : 'Не совпало'}
                                             </Badge>
                                         </Table.Td>
                                         <Table.Td className={classes.wrapCell}>{diagnostic.configuredTechnicalHostNames.join(', ') || '-'}</Table.Td>
@@ -3030,10 +3059,10 @@ function DiagnosticsSummary({ result }: { result: SubscriptionDiagnosticsResult 
                         <Table highlightOnHover>
                             <Table.Thead>
                                 <Table.Tr>
-                                    <Table.Th>Reason</Table.Th>
-                                    <Table.Th>Group</Table.Th>
+                                    <Table.Th>Причина</Table.Th>
+                                    <Table.Th>Группа</Table.Th>
                                     <Table.Th>Remark</Table.Th>
-                                    <Table.Th>Details</Table.Th>
+                                    <Table.Th>Детали</Table.Th>
                                 </Table.Tr>
                             </Table.Thead>
                             <Table.Tbody>
@@ -3060,17 +3089,17 @@ function DiagnosticsSummary({ result }: { result: SubscriptionDiagnosticsResult 
                         <Table highlightOnHover>
                             <Table.Thead>
                                 <Table.Tr>
-                                    <Table.Th>Group</Table.Th>
-                                    <Table.Th>Public name in output</Table.Th>
-                                    <Table.Th>Matched remarks</Table.Th>
-                                    <Table.Th>User squads</Table.Th>
-                                    <Table.Th>Pool</Table.Th>
-                                    <Table.Th>Subscription candidates</Table.Th>
-                                    <Table.Th>Effective candidates</Table.Th>
-                                    <Table.Th>Excluded</Table.Th>
-                                    <Table.Th>Selected</Table.Th>
-                                    <Table.Th>Output remarks</Table.Th>
-                                    <Table.Th>Rewrite</Table.Th>
+                                    <Table.Th>Группа</Table.Th>
+                                    <Table.Th>Публичное имя в выдаче</Table.Th>
+                                    <Table.Th>Совпавшие remarks</Table.Th>
+                                    <Table.Th>Squad пользователя</Table.Th>
+                                    <Table.Th>Пул</Table.Th>
+                                    <Table.Th>Кандидаты из подписки</Table.Th>
+                                    <Table.Th>Эффективные кандидаты</Table.Th>
+                                    <Table.Th>Исключены</Table.Th>
+                                    <Table.Th>Выбранная нода</Table.Th>
+                                    <Table.Th>Выходные remarks</Table.Th>
+                                    <Table.Th>Перезапись</Table.Th>
                                 </Table.Tr>
                             </Table.Thead>
                             <Table.Tbody>
@@ -3079,7 +3108,7 @@ function DiagnosticsSummary({ result }: { result: SubscriptionDiagnosticsResult 
                                         <Table.Td>{group.publicHostCode}:{group.planCode}</Table.Td>
                                         <Table.Td>
                                             <Badge color={group.outputContainsPublicName ? 'green' : 'yellow'} variant="light">
-                                                {group.outputContainsPublicName ? group.publicName : 'missing'}
+                                                {group.outputContainsPublicName ? group.publicName : 'Нет в выдаче'}
                                             </Badge>
                                         </Table.Td>
                                         <Table.Td className={classes.wrapCell}>{group.matchedRemarks.join(', ') || '-'}</Table.Td>
@@ -3277,15 +3306,15 @@ function RecentSubscriptionTraces({ traces }: { traces: SubscriptionTrace[] }) {
                 <Table highlightOnHover>
                     <Table.Thead>
                         <Table.Tr>
-                            <Table.Th>Time</Table.Th>
+                            <Table.Th>Время</Table.Th>
                             <Table.Th>shortUuid</Table.Th>
                             <Table.Th>User-Agent</Table.Th>
-                            <Table.Th>Flow</Table.Th>
-                            <Table.Th>Upstream links</Table.Th>
-                            <Table.Th>Matched</Table.Th>
-                            <Table.Th>Rewritten</Table.Th>
-                            <Table.Th>Status</Table.Th>
-                            <Table.Th>Unsupported fallback</Table.Th>
+                            <Table.Th>Поток</Table.Th>
+                            <Table.Th>Ссылок на входе</Table.Th>
+                            <Table.Th>Совпало</Table.Th>
+                            <Table.Th>Переписано</Table.Th>
+                            <Table.Th>Статус</Table.Th>
+                            <Table.Th>Заглушка приложения</Table.Th>
                         </Table.Tr>
                     </Table.Thead>
                     <Table.Tbody>
@@ -3294,14 +3323,14 @@ function RecentSubscriptionTraces({ traces }: { traces: SubscriptionTrace[] }) {
                                 <Table.Td>{formatDate(trace.request.timestamp)}</Table.Td>
                                 <Table.Td>{trace.request.shortUuid}</Table.Td>
                                 <Table.Td className={classes.wrapCell}>{trace.request.userAgent ?? '-'}</Table.Td>
-                                <Table.Td>{trace.request.flow}</Table.Td>
+                                <Table.Td>{getTraceFlowLabel(trace.request.flow)}</Table.Td>
                                 <Table.Td>{trace.upstream.vlessLinksCount}</Table.Td>
                                 <Table.Td>{trace.balancer.matchedTechnicalLinks}</Table.Td>
                                 <Table.Td>{trace.balancer.rewrittenLinksCount}</Table.Td>
-                                <Table.Td>{trace.balancer.status}</Table.Td>
+                                <Table.Td>{getRuntimeStatusLabel(trace.balancer.status)}</Table.Td>
                                 <Table.Td>
                                     <Badge color={trace.upstream.unsupportedAppFallback || trace.balancer.unsupportedAppFallback ? 'red' : 'green'} variant="light">
-                                        {trace.upstream.unsupportedAppFallback || trace.balancer.unsupportedAppFallback ? 'true' : 'false'}
+                                        {trace.upstream.unsupportedAppFallback || trace.balancer.unsupportedAppFallback ? 'Да' : 'Нет'}
                                     </Badge>
                                 </Table.Td>
                             </Table.Tr>
@@ -3485,19 +3514,19 @@ function getDiscoveredHostStatusBadge({
     }
 
     if (host.status === 'free') {
-        return { color: 'gray', label: texts.discovery.canImport, tooltip: texts.tooltips.discovered }
+        return { color: 'gray', label: 'Свободна', tooltip: texts.tooltips.discovered }
     }
 
     if (host.status === 'not_accessible_to_selected_squad') {
-        return { color: 'red', label: 'not accessible to selected squad', tooltip: 'This Remnawave host is not visible in the group squad scope.' }
+        return { color: 'red', label: 'Конфликт', tooltip: 'Хост Remnawave недоступен в squad выбранной группы.' }
     }
 
     if (host.status === 'in_this_group') {
-        return { color: 'green', label: texts.discovery.alreadyInGroup, tooltip: host.currentGroupName ?? texts.tooltips.imported }
+        return { color: 'green', label: 'В этой группе', tooltip: host.currentGroupName ?? texts.tooltips.imported }
     }
 
     if (host.status === 'in_other_group') {
-        return { color: 'yellow', label: texts.discovery.conflict, tooltip: host.currentGroupName ?? undefined }
+        return { color: 'yellow', label: 'В другой группе', tooltip: host.currentGroupName ?? undefined }
     }
 
     if (host.status === 'conflict') {
@@ -3516,12 +3545,13 @@ function getDiscoveredHostStatusBadge({
         }
     }
 
-    return { color: 'gray', label: texts.discovery.canImport, tooltip: texts.tooltips.discovered }
+    return { color: 'gray', label: 'Свободна', tooltip: texts.tooltips.discovered }
 }
 
 function DiscoveredHostsTable({
     assignments = [],
     hosts,
+    importOneHost,
     importedByTechnicalHostName,
     importStatuses,
     patchNode,
@@ -3532,6 +3562,7 @@ function DiscoveredHostsTable({
 }: {
     assignments?: ToporBalancerAssignment[]
     hosts: DiscoveredHost[]
+    importOneHost?: (technicalHostName: string) => void
     importedByTechnicalHostName: Map<string, ToporBalancerNode>
     importStatuses: Record<string, DiscoveryImportStatusState>
     patchNode?: (node: ToporBalancerNode, patch: Partial<ToporBalancerNode>) => void
@@ -3560,22 +3591,26 @@ function DiscoveredHostsTable({
                     <Table.Thead>
                         <Table.Tr>
                             <Table.Th />
-                            <Table.Th>Remnawave host</Table.Th>
-                            <Table.Th>Node</Table.Th>
-                            <Table.Th>Inbound / profile</Table.Th>
-                            <Table.Th>Squads</Table.Th>
                             <Table.Th>
                                 <HeaderWithHelp help={tooltips.technicalHostName}>Техническая нода</HeaderWithHelp>
                             </Table.Th>
-                            <Table.Th>Статус</Table.Th>
+                            <Table.Th>Участие</Table.Th>
+                            <Table.Th>Текущая группа</Table.Th>
+                            <Table.Th>Squad</Table.Th>
+                            <Table.Th>Inbound / profile</Table.Th>
+                            <Table.Th>Хост Remnawave</Table.Th>
+                            <Table.Th>Нода Remnawave</Table.Th>
                             <Table.Th>Хост</Table.Th>
                             <Table.Th>Порт</Table.Th>
                             <Table.Th>Протокол</Table.Th>
                             <Table.Th>Защита</Table.Th>
                             <Table.Th>Транспорт</Table.Th>
-                            <Table.Th>Серверное имя</Table.Th>
+                            <Table.Th>SNI</Table.Th>
                             <Table.Th>Поток</Table.Th>
-                            <Table.Th>Ключи</Table.Th>
+                            <Table.Th>Секреты</Table.Th>
+                            <Table.Th>Статус Balancer</Table.Th>
+                            <Table.Th>Назначения</Table.Th>
+                            <Table.Th>Действия</Table.Th>
                         </Table.Tr>
                     </Table.Thead>
                     <Table.Tbody>
@@ -3596,6 +3631,10 @@ function DiscoveredHostsTable({
                             })
                             const canAdd = host.canAdd ?? (!isImportedIntoSelectedGroup && !importedNode)
                             const nodeAssignments = importedNode ? assignments.filter((assignment) => assignment.nodeId === importedNode.id) : []
+                            const membershipStatus = host.membershipStatus ?? host.status
+                            const currentGroupName = membershipStatus === 'in_other_group' || membershipStatus === 'conflict'
+                                ? host.currentGroupName ?? importedNode?.publicName ?? '-'
+                                : '-'
 
                             return (
                                 <Table.Tr key={technicalHostName}>
@@ -3606,14 +3645,6 @@ function DiscoveredHostsTable({
                                             onChange={() => toggleSelectedHost(technicalHostName)}
                                         />
                                     </Table.Td>
-                                    <Table.Td>{host.rawRemark ?? technicalHostName}</Table.Td>
-                                    <Table.Td>{host.remnawaveNodeName ?? '-'}</Table.Td>
-                                    <Table.Td className={classes.wrapCell}>
-                                        {[host.remnawaveInboundName, host.remnawaveProfileName].filter(Boolean).join(' / ') || '-'}
-                                    </Table.Td>
-                                    <Table.Td className={classes.wrapCell}>
-                                        {host.accessibleSquads?.map((squad) => squad.name).join(', ') || '-'}
-                                    </Table.Td>
                                     <Table.Td>{technicalHostName}</Table.Td>
                                     <Table.Td>
                                         <Tooltip disabled={!statusBadge.tooltip} label={statusBadge.tooltip} withArrow>
@@ -3622,6 +3653,15 @@ function DiscoveredHostsTable({
                                             </Badge>
                                         </Tooltip>
                                     </Table.Td>
+                                    <Table.Td className={classes.wrapCell}>{currentGroupName}</Table.Td>
+                                    <Table.Td className={classes.wrapCell}>
+                                        {host.accessibleSquads?.map((squad) => squad.name).join(', ') || '-'}
+                                    </Table.Td>
+                                    <Table.Td className={classes.wrapCell}>
+                                        {[host.remnawaveInboundName, host.remnawaveProfileName].filter(Boolean).join(' / ') || '-'}
+                                    </Table.Td>
+                                    <Table.Td className={classes.wrapCell}>{host.rawRemark ?? '-'}</Table.Td>
+                                    <Table.Td className={classes.wrapCell}>{host.remnawaveNodeName ?? '-'}</Table.Td>
                                     <Table.Td>{host.host ?? '-'}</Table.Td>
                                     <Table.Td>{host.port ?? '-'}</Table.Td>
                                     <Table.Td>{host.protocol ?? '-'}</Table.Td>
@@ -3629,22 +3669,39 @@ function DiscoveredHostsTable({
                                     <Table.Td>{host.type ?? '-'}</Table.Td>
                                     <Table.Td>{host.sni ?? '-'}</Table.Td>
                                     <Table.Td>{host.flow ?? '-'}</Table.Td>
-                                    <Table.Td>{[host.pbk, host.sid].filter(Boolean).join(' / ') || '-'}</Table.Td>
-                                    <Table.Td>{importedNode?.status ?? '-'}</Table.Td>
+                                    <Table.Td>{[maskSecret(host.pbk), maskSecret(host.sid)].filter((value) => value !== '-').join(' / ') || '-'}</Table.Td>
+                                    <Table.Td>{importedNode ? statusLabels[importedNode.status] : '-'}</Table.Td>
                                     <Table.Td>{importedNode ? `${importedNode.assignedUsers} (${nodeAssignments.length})` : '-'}</Table.Td>
                                     <Table.Td>
-                                        {importedNode && importedNode.groupId === selectedGroup?.id && (
-                                            <Group gap={6} wrap="nowrap">
-                                                <Button onClick={() => patchNode?.(importedNode, { status: 'disabled' })} size="xs" variant="subtle">
-                                                    Disable
+                                        <Group gap={6} wrap="nowrap">
+                                            {canAdd && (
+                                                <Button loading={false} onClick={() => importOneHost?.(technicalHostName)} size="xs" variant="light">
+                                                    Добавить в группу
                                                 </Button>
-                                                <Button onClick={() => patchNode?.(importedNode, { status: 'draining' })} size="xs" variant="light">
-                                                    Draining
-                                                </Button>
-                                                <Button color="red" onClick={() => patchNode?.(importedNode, { status: 'dead' })} size="xs" variant="subtle">
-                                                    Dead
-                                                </Button>
+                                            )}
+                                            {importedNode && importedNode.groupId === selectedGroup?.id && (
+                                                <>
+                                                    <Button disabled={importedNode.status === 'active'} onClick={() => patchNode?.(importedNode, { status: 'active' })} size="xs" variant="light">
+                                                        Включить
+                                                    </Button>
+                                                    <Button disabled={importedNode.status === 'draining'} onClick={() => patchNode?.(importedNode, { status: 'draining' })} size="xs" variant="light">
+                                                        Выводить
+                                                    </Button>
+                                                    <Button color="red" disabled={importedNode.status === 'disabled'} onClick={() => patchNode?.(importedNode, { status: 'disabled' })} size="xs" variant="subtle">
+                                                        Отключить
+                                                    </Button>
+                                                    <Button color="red" disabled={importedNode.status === 'dead'} onClick={() => patchNode?.(importedNode, { status: 'dead' })} size="xs" variant="subtle">
+                                                        Авария
+                                                    </Button>
+                                                    <Button color="red" disabled={importedNode.assignedUsers > 0} onClick={() => removeNode?.(importedNode)} size="xs" variant="subtle">
+                                                        Убрать из группы
+                                                    </Button>
+                                                </>
+                                            )}
+                                            {importedNode && importedNode.groupId === selectedGroup?.id && (
+                                                <>
                                                 <NumberInput
+                                                    aria-label="Изменить вес"
                                                     min={0.0001}
                                                     onBlur={(event) => patchNode?.(importedNode, { weight: Number(event.currentTarget.value) || 1 })}
                                                     size="xs"
@@ -3652,17 +3709,16 @@ function DiscoveredHostsTable({
                                                     w={80}
                                                 />
                                                 <NumberInput
+                                                    aria-label="Изменить лимит пользователей"
                                                     min={1}
                                                     onBlur={(event) => patchNode?.(importedNode, { maxUsers: Number(event.currentTarget.value) || 300 })}
                                                     size="xs"
                                                     value={importedNode.maxUsers}
                                                     w={90}
                                                 />
-                                                <Button color="red" disabled={importedNode.assignedUsers > 0} onClick={() => removeNode?.(importedNode)} size="xs" variant="subtle">
-                                                    Remove
-                                                </Button>
-                                            </Group>
-                                        )}
+                                                </>
+                                            )}
+                                        </Group>
                                     </Table.Td>
                                 </Table.Tr>
                             )
@@ -3694,17 +3750,26 @@ function GroupProblemsPanel({
     const problems = [
         nodes.every((node) => node.status !== 'active') ? 'Нет активных нод.' : '',
         squadKeys.size > 1 ? 'В группе есть ноды из разных squad.' : '',
+        latestGroup?.excludedNodes.some((node) => node.reason === 'not_accessible_to_group_squad')
+            ? 'В группе есть нода из другой squad.'
+            : '',
+        latest?.warnings.some((warning) => warning.includes('technicalHostName')) ||
+        latestGroup?.warnings.some((warning) => warning.includes('technicalHostName'))
+            ? 'Есть несовпадение technicalHostName.'
+            : '',
         latestGroup
             ? `Для последней проверенной подписки доступно ${latestGroup.effectiveCandidateNodes.length} из ${latestGroup.subscriptionCandidateNodes.length} нод группы.`
             : '',
         latestGroup?.previousAssignedNodeStatus === 'disabled' || latestGroup?.previousAssignedNodeStatus === 'dead'
             ? `Текущее назначение пользователя указывает на ${latestGroup.previousAssignedNodeStatus} ноду: ${latestGroup.previousAssignedNode}.`
             : '',
-        latest?.status === 'unsupported_app' ? 'Обнаружена заглушка unsupported app fallback.' : '',
-        latest?.status === 'passed_through' ? 'Подписка прошла без rewrite.' : '',
-        latest?.status === 'no_effective_candidates' ? 'Нет effective candidates.' : '',
-        latest?.status === 'no_active_candidates' ? 'Нет active candidates.' : '',
-        latest?.status === 'failed_open' || latestGroup?.failOpenReason ? 'Использован fail-open.' : '',
+        latest?.status === 'unsupported_app' ? 'Обнаружена заглушка неподдержанного приложения.' : '',
+        latest?.status === 'passed_through' ? 'Подписка прошла без перезаписи ссылок.' : '',
+        latest?.status === 'no_effective_candidates' ? 'Нет эффективных кандидатов.' : '',
+        latest?.status === 'no_active_candidates' ? 'Нет активных кандидатов.' : '',
+        latest?.status === 'failed_open' || latestGroup?.failOpenReason ? 'Использован режим отдачи исходной подписки при ошибке.' : '',
+        ...(latestGroup?.excludedNodes.map((node) => `${node.technicalHostName}: ${node.message}`) ?? []),
+        ...(latestGroup?.warnings ?? []),
         ...(latest?.warnings ?? [])
     ].filter(Boolean)
 
@@ -3745,12 +3810,12 @@ function GroupRecentDiagnosticsTable({ diagnostics }: { diagnostics: GroupRuntim
                             <Table.Th>Время</Table.Th>
                             <Table.Th>shortUuid</Table.Th>
                             <Table.Th>User-Agent</Table.Th>
-                            <Table.Th>Total</Table.Th>
-                            <Table.Th>Matched</Table.Th>
-                            <Table.Th>Rewritten</Table.Th>
-                            <Table.Th>Selected node</Table.Th>
-                            <Table.Th>Status</Table.Th>
-                            <Table.Th>Warnings</Table.Th>
+                            <Table.Th>Всего ссылок</Table.Th>
+                            <Table.Th>Совпало</Table.Th>
+                            <Table.Th>Переписано</Table.Th>
+                            <Table.Th>Выбранная нода</Table.Th>
+                            <Table.Th>Статус</Table.Th>
+                            <Table.Th>Предупреждения</Table.Th>
                         </Table.Tr>
                     </Table.Thead>
                     <Table.Tbody>
@@ -3763,7 +3828,7 @@ function GroupRecentDiagnosticsTable({ diagnostics }: { diagnostics: GroupRuntim
                                 <Table.Td>{diagnostic.matchedLinks ?? '-'}</Table.Td>
                                 <Table.Td>{diagnostic.rewrittenLinks ?? '-'}</Table.Td>
                                 <Table.Td>{diagnostic.selectedNode ?? '-'}</Table.Td>
-                                <Table.Td>{diagnostic.status ?? '-'}</Table.Td>
+                                <Table.Td>{getRuntimeStatusLabel(diagnostic.status)}</Table.Td>
                                 <Table.Td className={classes.wrapCell}>{diagnostic.warnings.join('; ') || '-'}</Table.Td>
                             </Table.Tr>
                         ))}
@@ -3791,6 +3856,12 @@ function AssignmentBehaviorInfo({ strategy }: { strategy: ToporBalancerGroupStra
 
 function AssignmentsTable({ assignments, nodes }: { assignments: ToporBalancerAssignment[]; nodes: ToporBalancerNode[] }) {
     const nodeById = new Map(nodes.map((node) => [node.id, node]))
+    const sortedAssignments = [...assignments].sort((left, right) => {
+        const leftNode = left.technicalHostName || nodeById.get(left.nodeId)?.technicalHostName || ''
+        const rightNode = right.technicalHostName || nodeById.get(right.nodeId)?.technicalHostName || ''
+
+        return leftNode.localeCompare(rightNode, 'ru') || left.shortUuid.localeCompare(right.shortUuid, 'ru')
+    })
 
     return (
         <Card className={classes.tableCard} p={0} radius="md">
@@ -3798,23 +3869,31 @@ function AssignmentsTable({ assignments, nodes }: { assignments: ToporBalancerAs
                 <Table className={classes.assignmentsTable} highlightOnHover stickyHeader>
                     <Table.Thead>
                         <Table.Tr>
+                            <Table.Th>Нода Balancer</Table.Th>
                             <Table.Th>UUID подписки</Table.Th>
                             <Table.Th>Код группы</Table.Th>
                             <Table.Th>Тариф</Table.Th>
-                            <Table.Th>Техническая нода</Table.Th>
+                            <Table.Th>Выбранная нода</Table.Th>
+                            <Table.Th>Создано</Table.Th>
                             <Table.Th>Обновлено</Table.Th>
                         </Table.Tr>
                     </Table.Thead>
                     <Table.Tbody>
-                        {assignments.map((assignment) => (
-                            <Table.Tr key={assignment.id}>
-                                <Table.Td>{maskShort(assignment.shortUuid)}</Table.Td>
-                                <Table.Td>{assignment.publicHostCode}</Table.Td>
-                                <Table.Td>{assignment.planCode}</Table.Td>
-                                <Table.Td>{assignment.technicalHostName || nodeById.get(assignment.nodeId)?.technicalHostName || '-'}</Table.Td>
-                                <Table.Td>{formatDate(assignment.updatedAt)}</Table.Td>
-                            </Table.Tr>
-                        ))}
+                        {sortedAssignments.map((assignment) => {
+                            const selectedNode = assignment.technicalHostName || nodeById.get(assignment.nodeId)?.technicalHostName || '-'
+
+                            return (
+                                <Table.Tr key={assignment.id}>
+                                    <Table.Td>{selectedNode}</Table.Td>
+                                    <Table.Td>{maskShort(assignment.shortUuid)}</Table.Td>
+                                    <Table.Td>{assignment.publicHostCode}</Table.Td>
+                                    <Table.Td>{assignment.planCode}</Table.Td>
+                                    <Table.Td>{selectedNode}</Table.Td>
+                                    <Table.Td>{formatDate(assignment.createdAt)}</Table.Td>
+                                    <Table.Td>{formatDate(assignment.updatedAt)}</Table.Td>
+                                </Table.Tr>
+                            )
+                        })}
                     </Table.Tbody>
                 </Table>
             </ScrollArea>

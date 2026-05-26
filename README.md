@@ -39,6 +39,78 @@ GET /api/topor-balancer/bootstrap
 
 Если Docker уже установлен, пропустите раздел установки Docker.
 
+## Release gate: ready/not ready
+
+Главная команда готовности:
+
+```bash
+sh scripts/topor-balancer-release-check.sh
+```
+
+Она должна завершиться строкой `PASS: TopoR Balancer release check passed`. Любой другой результат означает, что сборку нельзя считать готовой к релизу.
+
+Проверка выполняет:
+
+- backend build;
+- frontend build;
+- backend tests;
+- TopoR Balancer unit tests;
+- TopoR Balancer e2e tests;
+- Docker build;
+- Docker smoke с локальным mocked Remnawave response.
+
+Docker smoke проверяет, что Nest app стартует, frontend assets есть в runtime image, `/admin/topor-balancer` возвращает HTML, `/assets/.app-config-v2.json` возвращает JSON, raw subscription fixture обрабатывается Balancer, disabled/dead node не приводит к `502`, fallback `App not supported` определяется, а в логах нет `SQLSTATE 42601`.
+
+Если нужно быстро прогнать только build/test без runtime smoke:
+
+```bash
+TOPOR_RELEASE_DOCKER_SMOKE=0 sh scripts/topor-balancer-release-check.sh
+```
+
+Для полного release gate не отключайте Docker smoke.
+
+### Команды для разработчиков
+
+```bash
+cd backend
+npm ci
+npm run build
+npm test
+npm run test:topor-balancer
+npm run test:topor-balancer:e2e
+```
+
+```bash
+cd frontend
+npm ci --legacy-peer-deps
+npm run cb
+npm run typecheck
+```
+
+Docker build из корня проекта:
+
+```bash
+docker build -t remnawave-subscription-page-with-balancer:local .
+```
+
+### Docker smoke для операторов
+
+После запуска production compose проверьте живой сервис:
+
+```bash
+docker compose -f examples/docker-compose.topor-balancer.yml up -d --build
+sh scripts/topor-balancer-smoke-check.sh sub.example.com <shortUuid> "v2rayNG/1.9.0"
+```
+
+Полезные команды диагностики:
+
+```bash
+docker compose -f examples/docker-compose.topor-balancer.yml ps
+docker compose -f examples/docker-compose.topor-balancer.yml logs --tail=200 remnawave-subscription-page-with-balancer
+curl -i http://127.0.0.1:3011/admin/topor-balancer
+curl -i http://127.0.0.1:3011/assets/.app-config-v2.json
+```
+
 ## Установка Docker
 
 Команды для Ubuntu/Debian:

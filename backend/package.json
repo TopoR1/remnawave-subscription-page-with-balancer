@@ -17,6 +17,7 @@
   "scripts": {
     "build": "nest build",
     "format": "prettier --write \"src/**/*.ts\" \"test/**/*.ts\"",
+    "test": "npm run test:topor-balancer",
     "test:topor-balancer": "node --require ts-node/register --require tsconfig-paths/register src/modules/topor-balancer/topor-balancer-subscription.parser.spec.ts",
     "test:topor-balancer:watch": "node --watch --require ts-node/register --require tsconfig-paths/register src/modules/topor-balancer/topor-balancer-subscription.parser.spec.ts",
     "test:topor-balancer:e2e": "node --require ts-node/register --require tsconfig-paths/register src/modules/topor-balancer/topor-balancer-subscription.parser.spec.ts",
