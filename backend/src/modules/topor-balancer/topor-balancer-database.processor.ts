@@ -108,7 +108,15 @@ export async function processSubscriptionWithDatabaseBalancer(
 
     const technicalNodeMap = buildTechnicalNodeMap(input.config);
     const matchingLines = collectMatchingLines(plainBody, technicalNodeMap);
-    const selection = await selectNodesByPublicGroupKey(input, matchingLines);
+    let selection: Awaited<ReturnType<typeof selectNodesByPublicGroupKey>>;
+
+    try {
+        selection = await selectNodesByPublicGroupKey(input, matchingLines);
+    } catch (error) {
+        input.logger?.(`TopoR database assignment selection failed open: ${formatSafeError(error)}`);
+
+        return buildDatabaseFailOpenResult(input, format, plainBody, 'assignment_selection_failed');
+    }
     const outputPlainBody = filterSubscriptionBody(
         plainBody,
         technicalNodeMap,
@@ -125,7 +133,7 @@ export async function processSubscriptionWithDatabaseBalancer(
         outputPlainBody,
     );
 
-    await input.repository.recordRequest({
+    await recordRequestFailOpen(input, {
         groupCandidateDiagnostics: debugInfo.groupCandidateDiagnostics ?? [],
         shortUuid: input.shortUuid,
         userAgent: input.userAgent,
@@ -177,7 +185,7 @@ async function buildUnsupportedAppResult(
         warnings: ['Remnawave returned App not supported fallback.'],
     };
 
-    await input.repository.recordRequest({
+    await recordRequestFailOpen(input, {
         groupCandidateDiagnostics: debugInfo.groupCandidateDiagnostics ?? [],
         shortUuid: input.shortUuid,
         userAgent: input.userAgent,
@@ -197,6 +205,52 @@ async function buildUnsupportedAppResult(
         body: input.body,
         debugInfo,
     };
+}
+
+async function recordRequestFailOpen(
+    input: ProcessSubscriptionWithDatabaseBalancerInput,
+    request: Parameters<ToporBalancerAssignmentRepository['recordRequest']>[0],
+): Promise<void> {
+    try {
+        await input.repository.recordRequest(request);
+    } catch (error) {
+        input.logger?.(`TopoR optional request history write failed: ${formatSafeError(error)}`);
+    }
+}
+
+function buildDatabaseFailOpenResult(
+    input: ProcessSubscriptionWithDatabaseBalancerInput,
+    format: SubscriptionFormat,
+    plainBody: string,
+    reason: string,
+): ToporBalancerProcessResult {
+    const totalVlessLinks = extractVlessLinks(plainBody).length;
+    const debugInfo: ToporBalancerDebugInfo = {
+        shortUuid: input.shortUuid,
+        requestPath: input.requestPath,
+        userAgent: input.userAgent,
+        detectedFormat: format,
+        totalVlessLinks,
+        matchedTechnicalLinks: 0,
+        selectedNodes: {},
+        outputLinkCount: totalVlessLinks,
+        warnings: [`TopoR database balancer failed open: ${reason}.`],
+    };
+
+    return {
+        body: input.body,
+        debugInfo,
+    };
+}
+
+function formatSafeError(error: unknown): string {
+    if (error instanceof Error) {
+        const code = (error as Error & { code?: string }).code;
+
+        return [code ? `code=${code}` : undefined, error.message].filter(Boolean).join(' ');
+    }
+
+    return String(error);
 }
 
 function buildUnchangedResult(

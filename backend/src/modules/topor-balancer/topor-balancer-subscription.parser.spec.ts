@@ -3,6 +3,7 @@ import { ConfigService } from '@nestjs/config';
 
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
+import { readFileSync } from 'node:fs';
 import { test } from 'node:test';
 
 import type {
@@ -1336,6 +1337,143 @@ test('database balancer creates a new assignment', async () => {
     assert.equal(Object.keys(result.debugInfo.selectedNodes).length, 1);
     assert.equal(repository.assignments.size, 1);
     assert.equal(parseSubscription(result.body).links.length, 1);
+});
+
+test('database balancer keeps processing when optional request history write fails', async () => {
+    const repository = InMemoryToporBalancerRepository.fromConfig(balancerConfig);
+    const body = [buildVlessLink('FI-STD-01'), buildVlessLink('FI-STD-02')].join('\n');
+    const logs: string[] = [];
+
+    repository.recordRequest = async () => {
+        throw buildPgSyntaxError('broken request insert');
+    };
+
+    const result = await processSubscriptionWithDatabaseBalancer({
+        shortUuid: 'db-user-request-history-fails',
+        body,
+        config: balancerConfig,
+        repository,
+        logger: (message) => logs.push(message),
+    });
+
+    assert.equal(parseSubscription(result.body).links.length, 1);
+    assert.equal(parseSubscription(result.body).links[0].remark, '\u{1F1EB}\u{1F1EE} Finland');
+    assert.equal(result.debugInfo.selectedNodes['fi_standard:standard'], 'FI-STD-01');
+    assert.equal(repository.assignments.size, 1);
+    assert.ok(
+        logs.some((message) =>
+            message.includes('TopoR optional request history write failed: code=42601'),
+        ),
+    );
+});
+
+test('database balancer keeps unsupported app fallback when optional diagnostics write fails', async () => {
+    const repository = InMemoryToporBalancerRepository.fromConfig(balancerConfig);
+    const unsupportedBody =
+        'vless://11111111-1111-4111-8111-111111111111@0.0.0.0:1?type=tcp#App%20not%20supported';
+    const logs: string[] = [];
+
+    repository.recordRequest = async () => {
+        throw buildPgSyntaxError('broken diagnostics insert');
+    };
+
+    const result = await processSubscriptionWithDatabaseBalancer({
+        shortUuid: 'db-user-unsupported-history-fails',
+        body: unsupportedBody,
+        config: balancerConfig,
+        repository,
+        logger: (message) => logs.push(message),
+    });
+
+    assert.equal(result.body, unsupportedBody);
+    assert.deepEqual(result.debugInfo.selectedNodes, {});
+    assert.deepEqual(result.debugInfo.warnings, ['Remnawave returned App not supported fallback.']);
+    assert.equal(repository.assignments.size, 0);
+    assert.ok(
+        logs.some((message) =>
+            message.includes('TopoR optional request history write failed: code=42601'),
+        ),
+    );
+});
+
+test('database balancer fails open when assignment write fails', async () => {
+    const repository = InMemoryToporBalancerRepository.fromConfig(balancerConfig);
+    const body = [buildVlessLink('FI-STD-01'), buildVlessLink('FI-STD-02')].join('\n');
+    const logs: string[] = [];
+
+    repository.getOrCreateAssignment = async () => {
+        throw buildPgSyntaxError('broken assignment insert');
+    };
+
+    const result = await processSubscriptionWithDatabaseBalancer({
+        shortUuid: 'db-user-assignment-fails',
+        body,
+        config: balancerConfig,
+        repository,
+        logger: (message) => logs.push(message),
+    });
+
+    assert.equal(result.body, body);
+    assert.deepEqual(result.debugInfo.selectedNodes, {});
+    assert.equal(repository.assignments.size, 0);
+    assert.ok(
+        result.debugInfo.warnings?.some((warning) =>
+            warning.includes('TopoR database balancer failed open: assignment_selection_failed'),
+        ),
+    );
+    assert.ok(
+        logs.some((message) =>
+            message.includes('TopoR database assignment selection failed open: code=42601'),
+        ),
+    );
+});
+
+test('topor_balancer_requests insert has matching column and value counts', () => {
+    const source = readFileSync(
+        `${__dirname}/topor-balancer-database.repository.ts`,
+        'utf8',
+    );
+    const insert = source.match(
+        /INSERT INTO topor_balancer_requests\s*\(([\s\S]*?)\)\s*VALUES\s*\(([\s\S]*?)\)/,
+    );
+
+    assert.ok(insert, 'topor_balancer_requests INSERT must exist');
+
+    const columns = splitSqlList(insert[1]);
+    const values = splitSqlList(insert[2]);
+
+    assert.equal(columns.length, values.length);
+    assert.equal(columns.length, 13);
+    assert.deepEqual(columns, [
+        'id',
+        'short_uuid',
+        'user_agent',
+        'response_format',
+        'input_links_count',
+        'matched_technical_links',
+        'output_links_count',
+        'rewritten_links_count',
+        'selected_nodes',
+        'group_candidate_diagnostics',
+        'status',
+        'error_message',
+        'warnings',
+    ]);
+    assert.deepEqual(values, [
+        '$1',
+        '$2',
+        '$3',
+        '$4',
+        '$5',
+        '$6',
+        '$7',
+        '$8',
+        '$9::jsonb',
+        '$10::jsonb',
+        '$11',
+        '$12',
+        '$13::jsonb',
+    ]);
 });
 
 test('database balancer excludes nodes not accessible to the runtime user squad', async () => {
@@ -3986,4 +4124,15 @@ function assignmentKey(shortUuid: string, publicHostCode: string, planCode: stri
 
 function groupKey(publicHostCode: string, planCode: string): string {
     return `${publicHostCode}:${planCode}`;
+}
+
+function buildPgSyntaxError(message: string): Error & { code: string } {
+    return Object.assign(new Error(message), { code: '42601' });
+}
+
+function splitSqlList(value: string): string[] {
+    return value
+        .split(',')
+        .map((item) => item.trim())
+        .filter(Boolean);
 }

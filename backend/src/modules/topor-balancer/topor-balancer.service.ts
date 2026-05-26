@@ -2134,7 +2134,7 @@ export class ToporBalancerService implements OnModuleDestroy, OnModuleInit {
     private async processWithDatabase(
         input: ToporBalancerProcessInput,
         bodyText: string,
-    ): Promise<{ body: string }> {
+    ): Promise<ToporBalancerProcessResult> {
         try {
             const databaseUrl = this.configService.get<string | undefined>(
                 'TOPOR_BALANCER_DATABASE_URL',
@@ -2175,7 +2175,7 @@ export class ToporBalancerService implements OnModuleDestroy, OnModuleInit {
             this.logger.error('TopoR database balancer failed', error);
 
             if (!this.shouldFallbackToHash()) {
-                throw error;
+                return this.buildDatabaseFailOpenProcessResult(input, bodyText, error);
             }
 
             this.logger.warn('Falling back to TopoR hash balancer.');
@@ -2191,6 +2191,34 @@ export class ToporBalancerService implements OnModuleDestroy, OnModuleInit {
                 logger: (message) => this.logger.log(message),
             });
         }
+    }
+
+    private buildDatabaseFailOpenProcessResult(
+        input: ToporBalancerProcessInput,
+        bodyText: string,
+        error: unknown,
+    ): ToporBalancerProcessResult {
+        const format = detectSubscriptionFormat(bodyText, input.contentType);
+        const plainBody = decodeSubscriptionBody(bodyText, format);
+        const totalVlessLinks = extractVlessLinks(plainBody).length;
+        const code = (error as { code?: string }).code;
+
+        return {
+            body: bodyText,
+            debugInfo: {
+                shortUuid: input.shortUuid,
+                requestPath: input.requestPath,
+                userAgent: input.userAgent,
+                detectedFormat: format,
+                totalVlessLinks,
+                matchedTechnicalLinks: 0,
+                selectedNodes: {},
+                outputLinkCount: totalVlessLinks,
+                warnings: [
+                    `TopoR database balancer failed open${code ? ` with SQLSTATE ${code}` : ''}.`,
+                ],
+            },
+        };
     }
 
     private async resolveRuntimeUserAccess(

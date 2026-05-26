@@ -558,6 +558,7 @@ export class ToporBalancerPostgresRepository implements ToporBalancerAssignmentR
             return selectedNode;
         } catch (error) {
             await client.query('ROLLBACK');
+            this.logDatabaseWriteError('getOrCreateAssignment', 'topor_balancer_assignments', error, 3);
 
             throw error;
         } finally {
@@ -566,7 +567,8 @@ export class ToporBalancerPostgresRepository implements ToporBalancerAssignmentR
     }
 
     public async recordRequest(input: ToporBalancerRequestLogInput): Promise<void> {
-        await this.pool.query(
+        try {
+            await this.pool.query(
             `
             INSERT INTO topor_balancer_requests (
                 id,
@@ -583,7 +585,7 @@ export class ToporBalancerPostgresRepository implements ToporBalancerAssignmentR
                 error_message,
                 warnings
             )
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb, $9::jsonb, $10, $11, $12::jsonb)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9::jsonb, $10::jsonb, $11, $12, $13::jsonb)
             `,
             [
                 randomUUID(),
@@ -600,7 +602,12 @@ export class ToporBalancerPostgresRepository implements ToporBalancerAssignmentR
                 input.errorMessage ?? null,
                 JSON.stringify(input.warnings ?? []),
             ],
-        );
+            );
+        } catch (error) {
+            this.logDatabaseWriteError('recordRequest', 'topor_balancer_requests', error, 13);
+
+            throw error;
+        }
     }
 
     public async healthCheck(): Promise<boolean> {
@@ -1686,7 +1693,8 @@ export class ToporBalancerPostgresRepository implements ToporBalancerAssignmentR
         input: ToporBalancerAssignmentSelectionInput,
         nodeId: string,
     ): Promise<ToporBalancerDbAssignment> {
-        const result = await client.query<DbAssignmentRow>(
+        try {
+            const result = await client.query<DbAssignmentRow>(
             `
             INSERT INTO topor_balancer_assignments (
                 id,
@@ -1708,9 +1716,27 @@ export class ToporBalancerPostgresRepository implements ToporBalancerAssignmentR
                 input.location.planCode,
                 nodeId,
             ],
-        );
+            );
 
-        return mapAssignmentRow(result.rows[0]);
+            return mapAssignmentRow(result.rows[0]);
+        } catch (error) {
+            this.logDatabaseWriteError('upsertAssignment', 'topor_balancer_assignments', error, 5);
+
+            throw error;
+        }
+    }
+
+    private logDatabaseWriteError(
+        operation: string,
+        table: string,
+        error: unknown,
+        parameterCount: number,
+    ): void {
+        const dbError = error as { code?: string; message?: string };
+
+        console.error(
+            `[TopoRDatabaseWriteError] operation=${operation} table=${table} code=${dbError.code ?? 'unknown'} parameterCount=${parameterCount} message=${dbError.message ?? String(error)}`,
+        );
     }
 
     private async groupExists(id: string): Promise<boolean> {
