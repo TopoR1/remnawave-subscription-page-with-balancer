@@ -157,6 +157,17 @@ export function replaceVlessRemark(link: string, newRemark: string): string {
     return parseVlessLink(replacedLink) === null ? link : replacedLink;
 }
 
+export function serializeVlessLink(
+    parsedLink: ParsedVlessLink,
+    options: { remark?: string } = {},
+): string {
+    if (options.remark === undefined) {
+        return parsedLink.raw;
+    }
+
+    return replaceVlessRemark(parsedLink.raw, options.remark);
+}
+
 function extractRawQuery(link: string): string {
     const queryIndex = link.indexOf('?');
 

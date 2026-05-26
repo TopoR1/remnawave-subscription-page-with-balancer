@@ -1,0 +1,2 @@
+vless://44444444-4444-4444-8444-000000000001@fi-std-01.example.com:443?security=reality&type=tcp&sni=example.com&pbk=key&sid=sid#FI-STD-01
+vless://44444444-4444-4444-8444-000000000002@fi-std-02.example.com:443?security=reality&type=tcp&sni=example.com&pbk=key&sid=sid#FI-STD-02

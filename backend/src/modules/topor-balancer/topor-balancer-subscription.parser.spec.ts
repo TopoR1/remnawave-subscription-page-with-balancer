@@ -3,7 +3,8 @@ import { ConfigService } from '@nestjs/config';
 
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
-import { readFileSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
+import path from 'node:path';
 import { test } from 'node:test';
 
 import type {
@@ -42,6 +43,7 @@ import {
     parseSubscription,
     parseVlessLink,
     replaceVlessRemark,
+    serializeVlessLink,
 } from './topor-balancer-subscription.parser';
 import { buildMaskedVlessDiff } from './topor-balancer-subscription.diagnostics';
 import {
@@ -54,6 +56,7 @@ import { parseToporBalancerConfig } from './topor-balancer-config.loader';
 import { ToporBalancerAdminGuard } from './topor-balancer-admin.guard';
 import { ToporBalancerDiscoveryService } from './topor-balancer-discovery.service';
 import { ToporBalancerService } from './topor-balancer.service';
+import { ToporBalancerModule } from './topor-balancer.module';
 import { AxiosService } from '../../common/axios';
 import { checkAssetsCookieMiddleware } from '../../common/middlewares/check-assets-cookie.middleware';
 import { RuntimeConfigService } from '../root/runtime-config.service';
@@ -64,6 +67,8 @@ const realityLink =
 
 const complexRealityLink =
     'vless://99999999-9999-4999-8999-999999999999@reality.example.com:443?type=tcp&security=reality&sni=www.cloudflare.com&fp=chrome&pbk=veryPublicRealityKeyValue&sid=1234abcd&flow=xtls-rprx-vision&path=%2Fgrpc&serviceName=grpc-service&alpn=h2%2Chttp%2F1.1#FI-STD-01';
+
+const fixturesDirectory = path.resolve(__dirname, '../../../../fixtures/subscriptions');
 
 const balancerConfig: ToporBalancerConfig = {
     enabled: true,
@@ -278,6 +283,42 @@ test('preserves VLESS REALITY and transport parameters during remark replacement
     assert.equal(parsedLink.alpn, 'h2,http/1.1');
 });
 
+test('serializes VLESS link by rewriting only the remark fragment', () => {
+    const link =
+        'vless://aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa@reality.example.com:8443?type=tcp&security=reality&sni=front.example.com&fp=chrome&pbk=publicKey&sid=abc123&flow=xtls-rprx-vision&unknown=keep-me#FI-STD-01';
+    const parsedLink = parseVlessLink(link);
+
+    assert.ok(parsedLink);
+
+    const serializedLink = serializeVlessLink(parsedLink, {
+        remark: '\u{1F1EB}\u{1F1EE} Finland',
+    });
+    const reparsedLink = parseVlessLink(serializedLink);
+
+    assert.ok(reparsedLink);
+    assert.equal(serializedLink.slice(0, serializedLink.indexOf('#')), link.slice(0, link.indexOf('#')));
+    assert.equal(serializedLink.endsWith('#%F0%9F%87%AB%F0%9F%87%AE%20Finland'), true);
+    assert.equal(reparsedLink.uuid, parsedLink.uuid);
+    assert.equal(reparsedLink.host, parsedLink.host);
+    assert.equal(reparsedLink.port, parsedLink.port);
+    assert.equal(reparsedLink.security, 'reality');
+    assert.equal(reparsedLink.sni, 'front.example.com');
+    assert.equal(reparsedLink.fp, 'chrome');
+    assert.equal(reparsedLink.pbk, 'publicKey');
+    assert.equal(reparsedLink.sid, 'abc123');
+    assert.equal(reparsedLink.flow, 'xtls-rprx-vision');
+    assert.equal(reparsedLink.type, 'tcp');
+    assert.equal(reparsedLink.queryParams.unknown, 'keep-me');
+    assert.equal(reparsedLink.remark, '\u{1F1EB}\u{1F1EE} Finland');
+});
+
+test('serialize without an explicit remark preserves the original raw VLESS link', () => {
+    const parsedLink = parseVlessLink(complexRealityLink);
+
+    assert.ok(parsedLink);
+    assert.equal(serializeVlessLink(parsedLink), complexRealityLink);
+});
+
 test('unsafe remark replacement fails open to the original VLESS link', () => {
     const invalidUnicodeRemark = '\uD800';
 
@@ -314,6 +355,23 @@ test('detects unpadded base64 subscription and decodes valid VLESS links', () =>
 
     assert.equal(detectSubscriptionFormat(base64Body), 'base64_links');
     assert.equal(decodeSubscriptionBody(base64Body, 'base64_links'), plainBody);
+});
+
+test('subscription fixtures cover base64, decoded, and unsupported app formats', () => {
+    const decodedFixture = readFixture('v2raytun-standard.decoded.txt');
+    const base64Fixture = readFixture('v2raytun-standard.base64.txt').trim();
+    const unsupportedFixture = readFixture('app-not-supported.base64.txt').trim();
+    const unsupportedDecoded = decodeSubscriptionBody(unsupportedFixture, 'base64_links');
+
+    assert.equal(detectSubscriptionFormat(decodedFixture), 'plain_links');
+    assert.equal(detectSubscriptionFormat(base64Fixture), 'base64_links');
+    assert.equal(decodeSubscriptionBody(base64Fixture, 'base64_links'), decodedFixture);
+    assert.equal(encodeSubscriptionBody(decodedFixture, 'base64_links'), base64Fixture);
+    assert.equal(detectSubscriptionFormat(unsupportedFixture), 'base64_links');
+    assert.equal(
+        unsupportedDecoded.trim(),
+        'vless://44444444-4444-4444-8444-444444444444@0.0.0.0:1?security=reality&type=tcp&sni=example.com&pbk=key&sid=sid#App%20not%20supported',
+    );
 });
 
 test('safely ignores invalid or malformed VLESS link', () => {
@@ -978,6 +1036,10 @@ test('ToporBalancerService fails open when enabled processing throws', async () 
         }),
     );
 
+    (service as unknown as { logger: { error: () => void } }).logger = {
+        error: () => undefined,
+    };
+
     const result = await service.process({
         shortUuid: 'abc123',
         body: originalBody,
@@ -1393,6 +1455,30 @@ test('database balancer keeps unsupported app fallback when optional diagnostics
         logs.some((message) =>
             message.includes('TopoR optional request history write failed: code=42601'),
         ),
+    );
+});
+
+test('database balancer detects unsupported app fixture without assignment', async () => {
+    const repository = InMemoryToporBalancerRepository.fromConfig(balancerConfig);
+    const unsupportedBody = readFixture('app-not-supported.base64.txt').trim();
+
+    const result = await processSubscriptionWithDatabaseBalancer({
+        shortUuid: 'db-user-unsupported-fixture',
+        body: unsupportedBody,
+        config: balancerConfig,
+        repository,
+    });
+
+    assert.equal(result.body, unsupportedBody);
+    assert.equal(result.debugInfo.detectedFormat, 'base64_links');
+    assert.deepEqual(result.debugInfo.selectedNodes, {});
+    assert.equal(repository.assignments.size, 0);
+    assert.equal(repository.requests.at(-1)?.status, 'unsupported_app');
+    assert.equal(
+        result.debugInfo.groupCandidateDiagnostics?.some((group) =>
+            group.excludedNodes.some((node) => node.reason === 'not_in_subscription'),
+        ),
+        false,
     );
 });
 
@@ -2049,6 +2135,58 @@ test('ToporBalancerDiscoveryService has concrete Nest DI metadata', () => {
     assert.notEqual(dependencies[0], Function);
     assert.equal(dependencies[1], ConfigService);
     assert.equal(dependencies[2], ToporBalancerService);
+});
+
+test('ToporBalancerModule compiles without runtime DI errors', () => {
+    const imports = getNestModuleMetadata(ToporBalancerModule, 'imports');
+    const providers = getNestModuleMetadata(ToporBalancerModule, 'providers');
+    const controllers = getNestModuleMetadata(ToporBalancerModule, 'controllers');
+    const configService = createConfigServiceStub({
+        REMNAWAVE_API_TOKEN: 'test-token',
+        REMNAWAVE_PANEL_URL: 'https://remnawave.example.test',
+        TOPOR_BALANCER_ASSIGNMENT_MODE: 'hash',
+        TOPOR_BALANCER_CONFIG_PATH: '/tmp/topor-balancer.config.json',
+        TOPOR_BALANCER_DB_FALLBACK_TO_HASH: true,
+        TOPOR_BALANCER_DEBUG: false,
+        TOPOR_BALANCER_ENABLED: false,
+        TOPOR_BALANCER_IMPORT_CONFIG_ON_START: false,
+    });
+    const axiosService = new AxiosService(configService);
+    const balancerService = new ToporBalancerService(configService, axiosService);
+    const discoveryService = new ToporBalancerDiscoveryService(
+        axiosService,
+        configService,
+        balancerService,
+    );
+
+    assert.ok(imports.length > 0);
+    assert.ok(providers.includes(ToporBalancerService));
+    assert.ok(providers.includes(ToporBalancerDiscoveryService));
+    assert.ok(controllers.length > 0);
+    assert.equal(balancerService.isEnabled(), false);
+    assert.ok(discoveryService);
+});
+
+test('AppModule compiles without runtime DI errors', async () => {
+    await withTemporaryEnv(
+        {
+            INTERNAL_JWT_SECRET: 'test-secret',
+            REMNAWAVE_API_TOKEN: 'test-token',
+            REMNAWAVE_PANEL_URL: 'https://remnawave.example.test',
+            TOPOR_BALANCER_ASSIGNMENT_MODE: 'hash',
+            TOPOR_BALANCER_ENABLED: 'false',
+        },
+        async () => {
+            const { AppModule } = require('../../app.module') as typeof import('../../app.module');
+            const imports = getNestModuleMetadata(AppModule, 'imports');
+
+            assert.ok(imports.length >= 2);
+            assert.equal(
+                imports.some((item) => String(item).includes('SubscriptionPageBackendModule')),
+                true,
+            );
+        },
+    );
 });
 
 test('static asset middleware allows public frontend assets without session cookie', () => {
@@ -3360,6 +3498,42 @@ function createConfigServiceStub(values: Record<string, unknown>): ConfigService
         get: (key: string) => values[key],
         getOrThrow: (key: string) => values[key],
     } as ConfigService;
+}
+
+function readFixture(filename: string): string {
+    const fixturePath = path.join(fixturesDirectory, filename);
+
+    assert.equal(existsSync(fixturePath), true, `Missing fixture: ${fixturePath}`);
+
+    return readFileSync(fixturePath, 'utf8');
+}
+
+function getNestModuleMetadata(moduleClass: unknown, key: string): unknown[] {
+    return (Reflect.getMetadata(key, moduleClass as object) as unknown[] | undefined) ?? [];
+}
+
+async function withTemporaryEnv<T>(
+    values: Record<string, string>,
+    callback: () => Promise<T>,
+): Promise<T> {
+    const previousValues = new Map<string, string | undefined>();
+
+    for (const [key, value] of Object.entries(values)) {
+        previousValues.set(key, process.env[key]);
+        process.env[key] = value;
+    }
+
+    try {
+        return await callback();
+    } finally {
+        for (const [key, value] of previousValues.entries()) {
+            if (value === undefined) {
+                delete process.env[key];
+            } else {
+                process.env[key] = value;
+            }
+        }
+    }
 }
 
 function createExecutionContextStub(authorization?: string): ExecutionContext {
