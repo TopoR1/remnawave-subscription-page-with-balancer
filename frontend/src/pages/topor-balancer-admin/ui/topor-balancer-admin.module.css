@@ -52,23 +52,32 @@
 }
 
 .adminShell {
-    width: calc(100vw - 48px);
-    max-width: 1680px;
+    width: 100%;
+    max-width: none;
     margin-right: auto;
     margin-left: auto;
 }
 
 .adminLayout {
-    display: grid;
-    grid-template-columns: clamp(360px, 26vw, 440px) minmax(0, 1fr);
+    display: flex;
     gap: var(--mantine-spacing-lg);
     align-items: start;
+    min-width: 0;
 }
 
 .groupsPanel,
 .groupContextPanel {
+    min-width: 0;
     background: rgb(22 27 35 / 72%);
     border: 1px solid rgb(255 255 255 / 8%);
+}
+
+.groupsPanel {
+    flex: 0 0 clamp(360px, 26vw, 440px);
+}
+
+.groupContextPanel {
+    flex: 1 1 0;
 }
 
 .groupListViewport {
@@ -123,11 +132,13 @@
 .groupEditorTabs {
     display: flex;
     flex-direction: column;
+    min-width: 0;
     height: 100%;
 }
 
 .groupEditorPanel {
     min-height: 0;
+    min-width: 0;
     overflow: auto;
 }
 
@@ -136,6 +147,7 @@
 }
 
 .tableCard {
+    min-width: 0;
     width: 100%;
     overflow: hidden;
     background: rgb(22 27 35 / 72%);
@@ -147,9 +159,13 @@
     border-bottom: 1px solid rgb(255 255 255 / 8%);
 }
 
+.tableScrollArea {
+    max-width: 100%;
+}
+
 .nodesTable {
     width: 100%;
-    min-width: 860px;
+    min-width: 1180px;
 }
 
 .groupsTable {
@@ -175,53 +191,68 @@
 .stickyFirstColumn {
     position: sticky;
     left: 0;
-    z-index: 2;
+    z-index: 3;
     width: 48px;
+    min-width: 48px;
     background: rgb(22 27 35);
+}
+
+.stickyNodeNameColumn,
+.stickyNodeNameWithSelectionColumn {
+    position: sticky;
+    z-index: 3;
+    min-width: 240px;
+    background: rgb(22 27 35);
+    box-shadow: 8px 0 16px rgb(0 0 0 / 12%);
+}
+
+.stickyNodeNameColumn {
+    left: 0;
+}
+
+.stickyNodeNameWithSelectionColumn {
+    left: 48px;
 }
 
 .stickyActionsColumn {
     position: sticky;
     right: 0;
-    z-index: 2;
-    min-width: 280px;
+    z-index: 3;
+    min-width: 360px;
     background: rgb(22 27 35);
     box-shadow: -8px 0 16px rgb(0 0 0 / 18%);
 }
 
-.discoveryTable th:first-child,
-.discoveryTable td:first-child {
-    position: sticky;
-    left: 0;
-    z-index: 2;
-    width: 48px;
-    background: rgb(22 27 35);
-}
-
-.discoveryTable th:last-child,
-.discoveryTable td:last-child {
-    position: sticky;
-    right: 0;
-    z-index: 2;
-    min-width: 280px;
-    background: rgb(22 27 35);
-    box-shadow: -8px 0 16px rgb(0 0 0 / 18%);
-}
-
-.nodesTable th {
-    white-space: nowrap;
-}
-
+.nodesTable th,
 .groupsTable th {
     white-space: nowrap;
 }
 
-.nodesTable td {
+.nodesTable td,
+.groupsTable td {
     white-space: nowrap;
 }
 
-.groupsTable td {
-    white-space: nowrap;
+.nodesTable thead .stickyNodeNameColumn,
+.nodesTable thead .stickyActionsColumn,
+.discoveryTable thead .stickyFirstColumn,
+.discoveryTable thead .stickyNodeNameWithSelectionColumn,
+.discoveryTable thead .stickyActionsColumn {
+    z-index: 4;
+}
+
+.compactTable th,
+.compactTable td {
+    padding: 6px 8px;
+}
+
+.compactTable .stickyFirstColumn {
+    width: 42px;
+    min-width: 42px;
+}
+
+.compactTable .stickyNodeNameWithSelectionColumn {
+    left: 42px;
 }
 
 .assignmentsTable th {
@@ -278,7 +309,16 @@
 }
 
 @media (width <= 900px) {
-    .adminLayout,
+    .adminLayout {
+        flex-direction: column;
+    }
+
+    .groupsPanel,
+    .groupContextPanel {
+        flex-basis: auto;
+        width: 100%;
+    }
+
     .groupOverviewGrid {
         grid-template-columns: 1fr;
     }

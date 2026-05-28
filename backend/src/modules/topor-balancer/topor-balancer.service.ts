@@ -35,6 +35,7 @@ import type {
     ToporBalancerConfig,
     ToporBalancerDbAssignment,
     ToporBalancerDbNode,
+    ToporBalancerDiscoveredHost,
     ToporBalancerDiscoveryImportInput,
     ToporBalancerDiscoveryImportResult,
     ToporBalancerDebugProcessSubscriptionResult,
@@ -77,6 +78,7 @@ import {
     getTechnicalHostNameMismatchReason,
     normalizeTechnicalHostName,
 } from './topor-balancer-technical-host-name';
+import { buildToporBalancerIdentityKeyFromTopologyHost } from './topor-balancer-node-identity';
 
 interface ToporBalancerProcessInput {
     shortUuid: string;
@@ -529,6 +531,12 @@ export class ToporBalancerService implements OnModuleDestroy, OnModuleInit {
 
         const group = await this.getAdminGroup(groupId);
         const existingNodes = await this.getAdminRepository().listNodes();
+        const topology = await this.getRemnawaveTopologyCache().catch(() => ({
+            hosts: [],
+        }));
+        const topologyByName = new Map(
+            topology.hosts.map((host) => [this.normalizeTechnicalHostName(host.remark), host]),
+        );
         const created: ToporBalancerAdminNode[] = [];
         const alreadyInGroup: ToporBalancerGroupNodeImportResult['alreadyInGroup'] = [];
         const inOtherGroup: ToporBalancerGroupNodeImportResult['inOtherGroup'] = [];
@@ -549,6 +557,7 @@ export class ToporBalancerService implements OnModuleDestroy, OnModuleInit {
             );
             const nodeInThisGroup = matchingNodes.find((node) => node.groupId === group.id);
             const nodeInOtherGroup = matchingNodes.find((node) => node.groupId !== group.id);
+            const topologyHost = topologyByName.get(technicalHostName);
 
             if (nodeInThisGroup) {
                 alreadyInGroup.push({
@@ -568,8 +577,19 @@ export class ToporBalancerService implements OnModuleDestroy, OnModuleInit {
             }
 
             const createdNode = await this.getAdminRepository().createGroupNode(group.id, {
+                currentTechnicalHostName: technicalHostName,
+                identityKey: topologyHost
+                    ? buildToporBalancerIdentityKeyFromTopologyHost(topologyHost)
+                    : undefined,
+                lastSeenAt: topologyHost?.lastSeenAt ?? topologyHost?.updatedAt,
                 maxUsers: input.defaults.maxUsers,
                 priority: input.defaults.priority ?? 100,
+                remnawaveConfigProfileUuid: topologyHost?.profileUuid ?? null,
+                remnawaveHostName: topologyHost?.remark ?? null,
+                remnawaveHostUuid: topologyHost?.uuid ?? null,
+                remnawaveInboundUuid: topologyHost?.inboundUuid ?? null,
+                remnawaveNodeName: topologyHost?.nodeName ?? null,
+                remnawaveNodeUuid: topologyHost?.nodeUuid ?? null,
                 status: input.defaults.status,
                 technicalHostName,
                 weight: input.defaults.weight,
@@ -592,6 +612,57 @@ export class ToporBalancerService implements OnModuleDestroy, OnModuleInit {
             errors,
             inOtherGroup,
         };
+    }
+
+    public async syncRemnawaveDiscoveredNodes(
+        discoveredHosts: ToporBalancerDiscoveredHost[],
+    ): Promise<void> {
+        const repository = this.getAdminRepository();
+        const existingNodes = await repository.listNodes();
+
+        for (const host of discoveredHosts) {
+            const technicalHostName = this.normalizeTechnicalHostName(host.technicalHostName);
+            const matchedNode =
+                existingNodes.find((node) => host.remnawaveHostUuid && node.remnawaveHostUuid === host.remnawaveHostUuid) ??
+                existingNodes.find((node) => host.remnawaveNodeUuid && node.remnawaveNodeUuid === host.remnawaveNodeUuid) ??
+                existingNodes.find((node) => host.identityKey && node.identityKey === host.identityKey) ??
+                existingNodes.find(
+                    (node) =>
+                        this.normalizeTechnicalHostName(node.technicalHostName) === technicalHostName ||
+                        this.normalizeTechnicalHostName(node.previousTechnicalHostName ?? '') === technicalHostName,
+                );
+
+            if (!matchedNode) {
+                continue;
+            }
+
+            const previousTechnicalHostName =
+                this.normalizeTechnicalHostName(matchedNode.technicalHostName) !== technicalHostName
+                    ? matchedNode.technicalHostName
+                    : matchedNode.previousTechnicalHostName ?? null;
+
+            const updatedNode = await repository.updateNode(matchedNode.id, {
+                currentTechnicalHostName: technicalHostName,
+                identityKey: host.identityKey,
+                lastSeenAt: host.lastSeenAt,
+                previousTechnicalHostName,
+                remnawaveConfigProfileUuid: host.remnawaveConfigProfileUuid ?? null,
+                remnawaveHostName: host.remnawaveHostName ?? host.rawRemark ?? null,
+                remnawaveHostUuid: host.remnawaveHostUuid ?? null,
+                remnawaveInboundUuid: host.remnawaveInboundUuid ?? null,
+                remnawaveNodeName: host.remnawaveNodeName ?? null,
+                remnawaveNodeUuid: host.remnawaveNodeUuid ?? null,
+                technicalHostName,
+            });
+
+            if (updatedNode) {
+                const index = existingNodes.findIndex((node) => node.id === updatedNode.id);
+
+                if (index >= 0) {
+                    existingNodes[index] = updatedNode;
+                }
+            }
+        }
     }
 
     public async listAdminNodes(): Promise<ToporBalancerAdminNode[]> {
@@ -2682,8 +2753,18 @@ export class ToporBalancerService implements OnModuleDestroy, OnModuleInit {
                 enabled: group.enabled,
                 locationCode: group.locationCode,
                 nodes: nodes.map((node) => ({
+                    currentTechnicalHostName: node.currentTechnicalHostName,
+                    identityKey: node.identityKey,
+                    identityStatus: node.identityStatus,
                     maxUsers: node.maxUsers,
+                    previousTechnicalHostName: node.previousTechnicalHostName,
                     priority: node.priority,
+                    remnawaveConfigProfileUuid: node.remnawaveConfigProfileUuid,
+                    remnawaveHostName: node.remnawaveHostName,
+                    remnawaveHostUuid: node.remnawaveHostUuid,
+                    remnawaveInboundUuid: node.remnawaveInboundUuid,
+                    remnawaveNodeName: node.remnawaveNodeName,
+                    remnawaveNodeUuid: node.remnawaveNodeUuid,
                     status: node.status,
                     technicalHostName: node.technicalHostName,
                     weight: node.weight,
@@ -2725,6 +2806,16 @@ export class ToporBalancerService implements OnModuleDestroy, OnModuleInit {
                 };
 
             location.nodes.push({
+                currentTechnicalHostName: node.currentTechnicalHostName,
+                identityKey: node.identityKey,
+                identityStatus: node.identityStatus,
+                previousTechnicalHostName: node.previousTechnicalHostName,
+                remnawaveConfigProfileUuid: node.remnawaveConfigProfileUuid,
+                remnawaveHostName: node.remnawaveHostName,
+                remnawaveHostUuid: node.remnawaveHostUuid,
+                remnawaveInboundUuid: node.remnawaveInboundUuid,
+                remnawaveNodeName: node.remnawaveNodeName,
+                remnawaveNodeUuid: node.remnawaveNodeUuid,
                 technicalHostName: node.technicalHostName,
                 weight: node.weight,
                 maxUsers: node.maxUsers,

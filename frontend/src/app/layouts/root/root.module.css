@@ -7,11 +7,19 @@
 .content {
     display: flex;
     flex-direction: column;
+    min-width: 0;
     width: 100%;
 }
 
 .main {
-    max-width: 800px;
-    width: 100%;
-    align-self: center;
+    width: min(1680px, calc(100vw - 48px));
+    max-width: none;
+    margin: 0 auto;
+    align-self: stretch;
+}
+
+@media (max-width: 768px) {
+    .main {
+        width: calc(100vw - 24px);
+    }
 }

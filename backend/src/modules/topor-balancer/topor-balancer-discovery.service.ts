@@ -16,6 +16,12 @@ import { parseSubscription } from './topor-balancer-subscription.parser';
 import { normalizeTechnicalHostName } from './topor-balancer-technical-host-name';
 import { ToporBalancerService } from './topor-balancer.service';
 import { ToporRemnawaveTopologyService } from './topor-remnawave-topology.service';
+import {
+    buildToporBalancerIdentityKeyFromDiscoveredHost,
+    buildToporBalancerIdentityKeyFromParsedLink,
+    buildToporBalancerIdentityKeyFromTopologyHost,
+    maskToporBalancerIdentityKey,
+} from './topor-balancer-node-identity';
 
 @Injectable()
 export class ToporBalancerDiscoveryService {
@@ -60,14 +66,38 @@ export class ToporBalancerDiscoveryService {
             .filter((host) => normalizeTechnicalHostName(host.remark).length > 0)
             .map((host): ToporBalancerDiscoveredHost => {
                 const technicalHostName = normalizeTechnicalHostName(host.remark);
-                const matchedNode = importedNodes.get(technicalHostName);
                 const firstRemnawaveNodeUuid = host.nodes[0];
                 const topologyHost = topologyByRemark.get(technicalHostName);
+                const remnawaveHostUuid = host.uuid;
+                const identityKey = buildToporBalancerIdentityKeyFromTopologyHost({
+                    accessibleSquads: topologyHost?.accessibleSquads ?? [],
+                    address: host.address,
+                    flow: topologyHost?.flow,
+                    inboundUuid: topologyHost?.inboundUuid,
+                    nodeUuid: firstRemnawaveNodeUuid,
+                    port: host.port,
+                    profileUuid: topologyHost?.profileUuid,
+                    remark: host.remark,
+                    security: host.securityLayer.toLowerCase(),
+                    sni: host.sni ?? undefined,
+                    transport: topologyHost?.transport,
+                    uuid: remnawaveHostUuid,
+                });
+                const matchedNode = this.findImportedNodeForDiscovery(importedNodes, {
+                    identityKey,
+                    remnawaveHostUuid,
+                    remnawaveNodeUuid: firstRemnawaveNodeUuid,
+                    technicalHostName,
+                });
 
                 return {
                     accessibleSquads: topologyHost?.accessibleSquads ?? [],
                     alreadyImported: Boolean(matchedNode),
+                    currentTechnicalHostName: technicalHostName,
                     host: host.address,
+                    identityKey,
+                    identityKeyMasked: maskToporBalancerIdentityKey(identityKey),
+                    identityStatus: identityKey ? 'stable' : 'unknown',
                     matchedGroupId: matchedNode?.groupId,
                     matchedGroupPlanCode: matchedNode?.planCode,
                     matchedGroupPublicHostCode: matchedNode?.publicHostCode,
@@ -75,12 +105,14 @@ export class ToporBalancerDiscoveryService {
                     port: host.port,
                     protocol: 'vless',
                     rawRemark: host.remark,
+                    remnawaveConfigProfileUuid: topologyHost?.profileUuid,
+                    remnawaveHostName: host.remark,
+                    remnawaveHostUuid,
+                    remnawaveInboundUuid: topologyHost?.inboundUuid,
                     remnawaveNodeName: firstRemnawaveNodeUuid
                         ? remnawaveNodes.get(firstRemnawaveNodeUuid)
                         : undefined,
-                    remnawaveNodeUuid: firstRemnawaveNodeUuid
-                        ? this.maskSecret(firstRemnawaveNodeUuid)
-                        : undefined,
+                    remnawaveNodeUuid: firstRemnawaveNodeUuid,
                     remnawaveInboundName: topologyHost?.inboundName,
                     remnawaveProfileName: topologyHost?.profileName,
                     security: host.securityLayer.toLowerCase(),
@@ -129,12 +161,20 @@ export class ToporBalancerDiscoveryService {
             .filter((link) => Boolean(link.remark))
             .map((link): ToporBalancerDiscoveredHost => {
                 const technicalHostName = normalizeTechnicalHostName(link.remark ?? '');
-                const matchedNode = importedNodes.get(technicalHostName);
+                const identityKey = buildToporBalancerIdentityKeyFromParsedLink(link);
+                const matchedNode = this.findImportedNodeForDiscovery(importedNodes, {
+                    identityKey,
+                    technicalHostName,
+                });
 
                 return {
                     alreadyImported: Boolean(matchedNode),
+                    currentTechnicalHostName: technicalHostName,
                     flow: link.flow,
                     host: link.host,
+                    identityKey,
+                    identityKeyMasked: maskToporBalancerIdentityKey(identityKey),
+                    identityStatus: identityKey ? 'stable' : 'unknown',
                     matchedGroupId: matchedNode?.groupId,
                     matchedGroupPlanCode: matchedNode?.planCode,
                     matchedGroupPublicHostCode: matchedNode?.publicHostCode,
@@ -178,20 +218,29 @@ export class ToporBalancerDiscoveryService {
             cacheStale: this.isTopologyCacheStale(topology),
             items: topology.hosts.map((host): ToporBalancerDiscoveredHost => {
                 const technicalHostName = normalizeTechnicalHostName(host.remark);
+                const identityKey = buildToporBalancerIdentityKeyFromTopologyHost(host);
 
                 return {
                     accessibleSquads: host.accessibleSquads,
                     alreadyImported: false,
+                    currentTechnicalHostName: technicalHostName,
                     flow: host.flow,
                     host: host.address,
+                    identityKey,
+                    identityKeyMasked: maskToporBalancerIdentityKey(identityKey),
+                    identityStatus: identityKey ? 'stable' : 'unknown',
                     lastSeenAt: host.lastSeenAt ?? host.updatedAt,
                     matchedNodeId: null,
                     port: host.port,
                     protocol: host.protocol ?? 'vless',
                     rawRemark: host.remark,
+                    remnawaveConfigProfileUuid: host.profileUuid,
+                    remnawaveHostName: host.remark,
+                    remnawaveHostUuid: host.uuid,
                     remnawaveInboundName: host.inboundName,
+                    remnawaveInboundUuid: host.inboundUuid,
                     remnawaveNodeName: host.nodeName,
-                    remnawaveNodeUuid: this.maskSecret(host.nodeUuid),
+                    remnawaveNodeUuid: host.nodeUuid,
                     remnawaveProfileName: host.profileName,
                     security: host.security,
                     squadStatus: host.accessibleSquads.length ? 'accessible' : 'unknown',
@@ -251,6 +300,7 @@ export class ToporBalancerDiscoveryService {
         response: ToporBalancerDiscoveryResponse,
     ): Promise<ToporBalancerGroupDiscoveryResponse> {
         const group = await this.toporBalancerService.getAdminGroup(groupId);
+        await this.toporBalancerService.syncRemnawaveDiscoveredNodes(response.items);
         const importedNodes = await this.toporBalancerService.listAdminNodes();
         const items = response.items.map((item) =>
             this.mapDiscoveredHostToGroupItem(item, group, importedNodes),
@@ -276,9 +326,24 @@ export class ToporBalancerDiscoveryService {
             group.squadScope !== 'specific_internal_squad' ||
             !group.internalSquadUuid ||
             Boolean(item.accessibleSquads?.some((squad) => squad.uuid === group.internalSquadUuid));
-        const matchingNodes = importedNodes.filter(
-            (node) => normalizeTechnicalHostName(node.technicalHostName) === technicalHostName,
-        );
+        const matchingNodes = importedNodes.filter((node) => {
+            if (item.remnawaveHostUuid && node.remnawaveHostUuid === item.remnawaveHostUuid) {
+                return true;
+            }
+
+            if (item.remnawaveNodeUuid && node.remnawaveNodeUuid === item.remnawaveNodeUuid) {
+                return true;
+            }
+
+            if (item.identityKey && node.identityKey === item.identityKey) {
+                return true;
+            }
+
+            return (
+                normalizeTechnicalHostName(node.technicalHostName) === technicalHostName ||
+                normalizeTechnicalHostName(node.previousTechnicalHostName ?? '') === technicalHostName
+            );
+        });
         const nodeInThisGroup = matchingNodes.find((node) => node.groupId === group.id);
         const nodesInOtherGroups = matchingNodes.filter((node) => node.groupId !== group.id);
 
@@ -291,6 +356,7 @@ export class ToporBalancerDiscoveryService {
                 currentGroupName: nodeInThisGroup?.publicName ?? null,
                 matchedNodeId: nodeInThisGroup?.id ?? null,
                 membershipStatus: 'not_accessible_to_selected_squad',
+                previousTechnicalHostName: nodeInThisGroup?.previousTechnicalHostName,
                 squadStatus: 'not_accessible_to_selected_squad',
                 status: 'not_accessible_to_selected_squad',
                 technicalHostName,
@@ -309,6 +375,7 @@ export class ToporBalancerDiscoveryService {
                 matchedGroupPublicHostCode: nodeInThisGroup.publicHostCode,
                 matchedNodeId: nodeInThisGroup.id,
                 membershipStatus: 'conflict',
+                previousTechnicalHostName: nodeInThisGroup.previousTechnicalHostName,
                 status: 'conflict',
                 technicalHostName,
             };
@@ -326,6 +393,7 @@ export class ToporBalancerDiscoveryService {
                 matchedGroupPublicHostCode: nodeInThisGroup.publicHostCode,
                 matchedNodeId: nodeInThisGroup.id,
                 membershipStatus: 'in_this_group',
+                previousTechnicalHostName: nodeInThisGroup.previousTechnicalHostName,
                 status: 'in_this_group',
                 technicalHostName,
             };
@@ -345,6 +413,7 @@ export class ToporBalancerDiscoveryService {
                 matchedGroupPublicHostCode: nodeInOtherGroup.publicHostCode,
                 matchedNodeId: nodeInOtherGroup.id,
                 membershipStatus: 'in_other_group',
+                previousTechnicalHostName: nodeInOtherGroup.previousTechnicalHostName,
                 status: 'in_other_group',
                 technicalHostName,
             };
@@ -397,16 +466,35 @@ export class ToporBalancerDiscoveryService {
 
     private async getImportedNodesSafe() {
         try {
-            const nodes = await this.toporBalancerService.listAdminNodes();
-
-            return new Map(
-                nodes.map((node) => [normalizeTechnicalHostName(node.technicalHostName), node]),
-            );
+            return await this.toporBalancerService.listAdminNodes();
         } catch (error) {
             this.logger.warn(`[ToporBalancerDiscovery] local node lookup failed: ${error}`);
 
-            return new Map();
+            return [];
         }
+    }
+
+    private findImportedNodeForDiscovery(
+        nodes: Awaited<ReturnType<ToporBalancerService['listAdminNodes']>>,
+        input: {
+            identityKey?: string;
+            remnawaveHostUuid?: string;
+            remnawaveNodeUuid?: string;
+            technicalHostName: string;
+        },
+    ) {
+        return (
+            nodes.find((node) => Boolean(input.remnawaveHostUuid) && node.remnawaveHostUuid === input.remnawaveHostUuid) ??
+            nodes.find((node) => Boolean(input.remnawaveNodeUuid) && node.remnawaveNodeUuid === input.remnawaveNodeUuid) ??
+            nodes.find((node) => Boolean(input.identityKey) && node.identityKey === input.identityKey) ??
+            nodes.find(
+                (node) =>
+                    normalizeTechnicalHostName(node.technicalHostName) ===
+                        normalizeTechnicalHostName(input.technicalHostName) ||
+                    normalizeTechnicalHostName(node.previousTechnicalHostName ?? '') ===
+                        normalizeTechnicalHostName(input.technicalHostName),
+            )
+        );
     }
 
     private async getTopologySafe() {
@@ -455,7 +543,7 @@ export class ToporBalancerDiscoveryService {
         return Array.from(
             new Map(
                 items.map((item) => [
-                    normalizeTechnicalHostName(item.technicalHostName),
+                    item.identityKey ?? normalizeTechnicalHostName(item.technicalHostName),
                     {
                         ...item,
                         technicalHostName: normalizeTechnicalHostName(item.technicalHostName),

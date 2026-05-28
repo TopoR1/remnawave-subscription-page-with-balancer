@@ -45,6 +45,8 @@ import classes from './topor-balancer-admin.module.css'
 
 const ADMIN_TOKEN_STORAGE_KEY = 'toporBalancerAdminToken'
 const ADMIN_LOCALE_STORAGE_KEY = 'toporBalancerAdminLocale'
+const ADMIN_NODE_COLUMNS_STORAGE_KEY = 'toporBalancerAdminNodeColumns'
+const ADMIN_NODE_COMPACT_STORAGE_KEY = 'toporBalancerAdminNodeCompact'
 const ADMIN_HEALTH_URL = '/api/topor-balancer/health'
 const ADMIN_GROUPS_URL = '/api/topor-balancer/groups'
 const ADMIN_NODES_URL = '/api/topor-balancer/nodes'
@@ -82,12 +84,37 @@ const DIAGNOSTICS_USER_AGENTS = [
 ] as const
 
 const DISCOVERY_COLUMN_LABELS = {
+    assignments: 'Назначения',
+    flow: 'Flow',
+    host: 'Host/IP',
     inbound: texts.fields.inboundProfile,
+    port: 'Port',
+    protocol: 'Protocol',
+    remnawaveHost: 'Remnawave host',
+    remnawaveNode: 'Remnawave node',
+    security: 'Security',
     sni: 'SNI',
-    squad: texts.fields.squad
+    squad: texts.fields.squad,
+    transport: 'Transport'
 } as const
 
 type DiscoveryColumnKey = keyof typeof DISCOVERY_COLUMN_LABELS
+type DiscoveryColumnVisibility = Record<DiscoveryColumnKey, boolean>
+
+const DEFAULT_DISCOVERY_COLUMN_VISIBILITY: DiscoveryColumnVisibility = {
+    assignments: true,
+    flow: true,
+    host: true,
+    inbound: true,
+    port: true,
+    protocol: true,
+    remnawaveHost: true,
+    remnawaveNode: true,
+    security: true,
+    sni: false,
+    squad: true,
+    transport: true
+}
 
 type ToporBalancerNodeStatus = (typeof NODE_STATUSES)[number]
 type ToporBalancerGroupStrategy = 'least_loaded' | 'manual' | 'priority_failover' | 'sticky_hash' | 'weighted'
@@ -132,13 +159,20 @@ interface ToporBalancerGroup {
 
 interface ToporBalancerNode {
     assignedUsers: number
+    currentTechnicalHostName?: string
     groupId?: string
     id: string
+    identityKey?: string
+    identityKeyMasked?: string
+    identityStatus?: 'stable' | 'fallback_by_name' | 'unknown'
+    lastSeenAt?: string
     locationCode?: string
     maxUsers: number
     planCode: string
+    previousTechnicalHostName?: string
     publicHostCode: string
     publicName: string
+    remnawaveHostUuid?: string
     status: ToporBalancerNodeStatus
     technicalHostName: string
     updatedAt?: string
@@ -223,9 +257,13 @@ interface DiscoveredHost {
     canAdd?: boolean
     currentGroupId?: null | string
     currentGroupName?: null | string
+    currentTechnicalHostName?: string
     discoveryMissing?: boolean
     flow?: string
     host?: string
+    identityKey?: string
+    identityKeyMasked?: string
+    identityStatus?: 'stable' | 'fallback_by_name' | 'unknown'
     matchedGroupId?: string
     matchedGroupPlanCode?: string
     matchedGroupPublicHostCode?: string
@@ -234,7 +272,10 @@ interface DiscoveredHost {
     pbk?: string
     port?: number
     protocol?: 'vless'
+    previousTechnicalHostName?: string
     rawRemark?: string
+    remnawaveHostName?: string
+    remnawaveHostUuid?: string
     remnawaveNodeName?: string
     remnawaveNodeUuid?: string
     remnawaveInboundName?: string
@@ -576,11 +617,29 @@ function redactSensitiveText(value?: string) {
         .replace(/(token|key|secret|password)=([^&\s]+)/gi, `$1=[${texts.common.hidden}]`)
         .replace(/vless:\/\/[^\s]+/gi, `[${texts.common.linkHidden}]`)
         .replace(/[a-f0-9]{8}-[a-f0-9-]{27,}/gi, `[${texts.common.uuidHidden}]`)
-        .replace(/\b(?:\d{1,3}\.){3}\d{1,3}\b/g, `[${texts.common.ipHidden}]`)
 }
 
 function safeArray<T>(value: unknown): T[] {
     return Array.isArray(value) ? (value as T[]) : []
+}
+
+function getInitialDiscoveryColumnVisibility(): DiscoveryColumnVisibility {
+    try {
+        const parsed = JSON.parse(localStorage.getItem(ADMIN_NODE_COLUMNS_STORAGE_KEY) ?? '{}') as Partial<DiscoveryColumnVisibility>
+
+        return {
+            ...DEFAULT_DISCOVERY_COLUMN_VISIBILITY,
+            ...Object.fromEntries(
+                Object.entries(parsed).filter(([key, value]) => key in DEFAULT_DISCOVERY_COLUMN_VISIBILITY && typeof value === 'boolean')
+            )
+        }
+    } catch {
+        return DEFAULT_DISCOVERY_COLUMN_VISIBILITY
+    }
+}
+
+function getInitialCompactNodeTables() {
+    return localStorage.getItem(ADMIN_NODE_COMPACT_STORAGE_KEY) === 'true'
 }
 
 function statusOptions() {
@@ -830,6 +889,7 @@ export function ToporBalancerAdminPage() {
     const [showOnlyFreeDiscovery, setShowOnlyFreeDiscovery] = useState(true)
     const [nodeDiscoverySearch, setNodeDiscoverySearch] = useState('')
     const [nodeDiscoveryFilter, setNodeDiscoveryFilter] = useState<string | null>(null)
+    const [isCompactNodeTable, setIsCompactNodeTable] = useState(getInitialCompactNodeTables)
     const [selectedGroupId, setSelectedGroupId] = useState<string | null>(null)
     const [assignmentNodeFilter, setAssignmentNodeFilter] = useState<string | null>(null)
     const [groupSearch, setGroupSearch] = useState('')
@@ -919,21 +979,27 @@ export function ToporBalancerAdminPage() {
     }, [assignments, selectedGroupNodes])
     const groupNodeDiscoveryRows = useMemo(() => {
         const rowsByName = new Map(
-            discoveredHosts.map((host) => [normalizeTechnicalHostName(host.technicalHostName), host])
+            discoveredHosts.map((host) => [host.identityKey ?? normalizeTechnicalHostName(host.technicalHostName), host])
         )
 
         for (const node of selectedGroupNodes) {
             const technicalHostName = normalizeTechnicalHostName(node.technicalHostName)
+            const rowKey = node.identityKey ?? technicalHostName
 
-            if (!rowsByName.has(technicalHostName)) {
-                rowsByName.set(technicalHostName, {
+            if (!rowsByName.has(rowKey)) {
+                rowsByName.set(rowKey, {
                     alreadyImported: true,
                     canAdd: false,
                     currentGroupId: selectedGroup?.id ?? node.groupId ?? null,
                     currentGroupName: selectedGroup?.publicName ?? node.publicName,
+                    currentTechnicalHostName: node.currentTechnicalHostName,
                     discoveryMissing: true,
+                    identityKey: node.identityKey,
+                    identityStatus: node.identityStatus,
                     matchedNodeId: node.id,
                     membershipStatus: 'in_this_group',
+                    previousTechnicalHostName: node.previousTechnicalHostName,
+                    remnawaveHostUuid: node.remnawaveHostUuid,
                     status: 'in_this_group',
                     technicalHostName
                 })
@@ -947,6 +1013,9 @@ export function ToporBalancerAdminPage() {
             const inThisGroup = status === 'in_this_group'
             const searchable = [
                 host.technicalHostName,
+                host.previousTechnicalHostName,
+                host.identityKey,
+                host.remnawaveHostUuid,
                 host.currentGroupName,
                 host.remnawaveNodeName,
                 host.remnawaveInboundName,
@@ -999,21 +1068,35 @@ export function ToporBalancerAdminPage() {
         )
     }, [groupSearch, groups])
     const discoveredByTechnicalHostName = useMemo(
-        () =>
-            new Map(
-                discoveredHosts.map((host) => [
-                    normalizeTechnicalHostName(host.technicalHostName),
-                    host
-                ])
-            ),
+        () => {
+            const byKey = new Map<string, DiscoveredHost>()
+
+            for (const host of discoveredHosts) {
+                byKey.set(normalizeTechnicalHostName(host.technicalHostName), host)
+                if (host.identityKey) {
+                    byKey.set(host.identityKey, host)
+                }
+            }
+
+            return byKey
+        },
         [discoveredHosts]
     )
     const importedByTechnicalHostName = useMemo(
         () => {
-            const byName = new Map(nodes.map((node) => [normalizeTechnicalHostName(node.technicalHostName), node]))
+            const byName = new Map<string, ToporBalancerNode>()
 
-            for (const node of selectedGroupNodes) {
+            for (const node of [...nodes, ...selectedGroupNodes]) {
                 byName.set(normalizeTechnicalHostName(node.technicalHostName), node)
+                if (node.currentTechnicalHostName) {
+                    byName.set(normalizeTechnicalHostName(node.currentTechnicalHostName), node)
+                }
+                if (node.previousTechnicalHostName) {
+                    byName.set(normalizeTechnicalHostName(node.previousTechnicalHostName), node)
+                }
+                if (node.identityKey) {
+                    byName.set(node.identityKey, node)
+                }
             }
 
             return byName
@@ -1154,6 +1237,10 @@ export function ToporBalancerAdminPage() {
             refreshAdminData()
         }
     }, [adminToken, refreshAdminData])
+
+    useEffect(() => {
+        localStorage.setItem(ADMIN_NODE_COMPACT_STORAGE_KEY, String(isCompactNodeTable))
+    }, [isCompactNodeTable])
 
     const saveToken = (event: FormEvent<HTMLFormElement>) => {
         event.preventDefault()
@@ -2037,6 +2124,8 @@ export function ToporBalancerAdminPage() {
                                 )}
                                 <DiscoveredHostsTable
                                     assignments={selectedGroupAssignments}
+                                    isCompact={isCompactNodeTable}
+                                    setIsCompact={setIsCompactNodeTable}
                                     hosts={groupNodeDiscoveryRows}
                                     importedByTechnicalHostName={importedByTechnicalHostName}
                                     importStatuses={discoveryImportStatuses}
@@ -2162,6 +2251,8 @@ export function ToporBalancerAdminPage() {
                                 )}
                                 <DiscoveredHostsTable
                                     assignments={selectedGroupAssignments}
+                                    isCompact={isCompactNodeTable}
+                                    setIsCompact={setIsCompactNodeTable}
                                     hosts={groupNodeDiscoveryRows}
                                     importedByTechnicalHostName={importedByTechnicalHostName}
                                     importStatuses={discoveryImportStatuses}
@@ -2597,6 +2688,8 @@ export function ToporBalancerAdminPage() {
                                                 assignments={selectedGroupAssignments}
                                                 deleteNode={deleteNode}
                                                 discoveredByTechnicalHostName={discoveredByTechnicalHostName}
+                                                isCompact={isCompactNodeTable}
+                                                setIsCompact={setIsCompactNodeTable}
                                                 migrateNodeAssignments={migrateNodeAssignments}
                                                 nodes={selectedGroupNodes}
                                                 patchNode={patchNode}
@@ -2744,6 +2837,8 @@ export function ToporBalancerAdminPage() {
                                             assignments={selectedGroupAssignments}
                                             deleteNode={deleteNode}
                                             discoveredByTechnicalHostName={discoveredByTechnicalHostName}
+                                            isCompact={isCompactNodeTable}
+                                            setIsCompact={setIsCompactNodeTable}
                                             migrateNodeAssignments={migrateNodeAssignments}
                                             nodes={selectedGroupNodes}
                                             patchNode={patchNode}
@@ -3424,17 +3519,21 @@ function TechnicalNodesTable({
     assignments = [],
     deleteNode,
     discoveredByTechnicalHostName,
+    isCompact,
     migrateNodeAssignments,
     nodes,
     patchNode,
+    setIsCompact,
     viewNodeAssignments
 }: {
     assignments?: ToporBalancerAssignment[]
     deleteNode: (node: ToporBalancerNode) => void
     discoveredByTechnicalHostName: Map<string, DiscoveredHost>
+    isCompact: boolean
     migrateNodeAssignments?: (node: ToporBalancerNode) => void
     nodes: ToporBalancerNode[]
     patchNode: (node: ToporBalancerNode, patch: Partial<ToporBalancerNode>) => void
+    setIsCompact: (value: boolean) => void
     viewNodeAssignments?: (node: ToporBalancerNode) => void
 }) {
     const totalAssignments = assignments.length
@@ -3454,13 +3553,24 @@ function TechnicalNodesTable({
 
     return (
         <Card className={classes.tableCard} p={0} radius="md">
-            <ScrollArea>
-                <Table className={classes.nodesTable} highlightOnHover stickyHeader>
+            <Group className={classes.tableToolbar} justify="space-between">
+                <Text fw={700} size="sm">{texts.nodes.title}</Text>
+                <Switch
+                    checked={isCompact}
+                    label="Компактно"
+                    onChange={(event) => setIsCompact(event.currentTarget.checked)}
+                    size="sm"
+                />
+            </Group>
+            <ScrollArea className={classes.tableScrollArea}>
+                <Table className={`${classes.nodesTable} ${isCompact ? classes.compactTable : ''}`} highlightOnHover stickyHeader>
                     <Table.Thead>
                         <Table.Tr>
-                            <Table.Th>
+                            <Table.Th className={classes.stickyNodeNameColumn}>
                                 <HeaderWithHelp help={tooltips.technicalHostName}>Техническая нода</HeaderWithHelp>
                             </Table.Th>
+                            <Table.Th>Предыдущее имя</Table.Th>
+                            <Table.Th>Identity</Table.Th>
                             <Table.Th>
                                 <HeaderWithHelp help={tooltips.status}>Статус</HeaderWithHelp>
                             </Table.Th>
@@ -3472,12 +3582,12 @@ function TechnicalNodesTable({
                             </Table.Th>
                             <Table.Th>Назначения</Table.Th>
                             <Table.Th>Импорт</Table.Th>
-                            <Table.Th>{texts.common.actions}</Table.Th>
+                            <Table.Th className={classes.stickyActionsColumn}>{texts.common.actions}</Table.Th>
                         </Table.Tr>
                     </Table.Thead>
                     <Table.Tbody>
                         {nodes.map((node) => {
-                            const discoveredHost = discoveredByTechnicalHostName.get(normalizeTechnicalHostName(node.technicalHostName))
+                            const discoveredHost = (node.identityKey ? discoveredByTechnicalHostName.get(node.identityKey) : undefined) ?? discoveredByTechnicalHostName.get(normalizeTechnicalHostName(node.technicalHostName))
                             const nodeAssignments = assignments.filter((assignment) => assignment.nodeId === node.id)
                             const nodePercent = totalAssignments > 0 ? Math.round((nodeAssignments.length / totalAssignments) * 100) : 0
                             const lastAssignment = nodeAssignments
@@ -3488,7 +3598,25 @@ function TechnicalNodesTable({
 
                             return (
                                 <Table.Tr className={classes[`row-${node.status}`]} key={node.id}>
-                                    <Table.Td>{node.technicalHostName}</Table.Td>
+                                    <Table.Td className={classes.stickyNodeNameColumn}>
+                                        <Stack gap={2}>
+                                            <Text size="sm">{node.technicalHostName}</Text>
+                                            {node.previousTechnicalHostName && node.previousTechnicalHostName !== node.technicalHostName && (
+                                                <Text c="blue" size="xs">
+                                                    Нода переименована: {node.previousTechnicalHostName} → {node.technicalHostName}
+                                                </Text>
+                                            )}
+                                        </Stack>
+                                    </Table.Td>
+                                    <Table.Td>{node.previousTechnicalHostName ?? '-'}</Table.Td>
+                                    <Table.Td>
+                                        <Stack gap={2}>
+                                            <Badge color={node.identityStatus === 'stable' ? 'green' : node.identityStatus === 'fallback_by_name' ? 'yellow' : 'gray'} variant="light">
+                                                {node.identityStatus ?? 'unknown'}
+                                            </Badge>
+                                            <Text c="dimmed" size="xs">{node.remnawaveHostUuid ?? node.identityKeyMasked ?? maskSecret(node.identityKey)}</Text>
+                                        </Stack>
+                                    </Table.Td>
                                     <Table.Td>
                                         <Select
                                             data={statusOptions()}
@@ -3533,7 +3661,7 @@ function TechnicalNodesTable({
                                             {discoveredHost ? 'Импортировано' : 'Не импортировано'}
                                         </Badge>
                                     </Table.Td>
-                                    <Table.Td>
+                                    <Table.Td className={classes.stickyActionsColumn}>
                                         <Group gap={6} wrap="nowrap">
                                             <Button disabled={node.status === 'active'} onClick={() => patchNode(node, { status: 'active' })} size="xs" variant="light">
                                                 {texts.actions.enable}
@@ -3632,10 +3760,12 @@ function DiscoveredHostsTable({
     importOneHost,
     importedByTechnicalHostName,
     importStatuses,
+    isCompact,
     patchNode,
     removeNode,
     selectedGroup,
     selectedHosts,
+    setIsCompact,
     toggleSelectedHost
 }: {
     assignments?: ToporBalancerAssignment[]
@@ -3643,19 +3773,21 @@ function DiscoveredHostsTable({
     importOneHost?: (technicalHostName: string) => void
     importedByTechnicalHostName: Map<string, ToporBalancerNode>
     importStatuses: Record<string, DiscoveryImportStatusState>
+    isCompact: boolean
     patchNode?: (node: ToporBalancerNode, patch: Partial<ToporBalancerNode>) => void
     removeNode?: (node: ToporBalancerNode) => void
     selectedGroup: null | ToporBalancerGroup
     selectedHosts: string[]
+    setIsCompact: (value: boolean) => void
     toggleSelectedHost: (technicalHostName: string) => void
 }) {
-    const [visibleColumns, setVisibleColumns] = useState<Record<DiscoveryColumnKey, boolean>>({
-        inbound: true,
-        sni: false,
-        squad: true
-    })
+    const [visibleColumns, setVisibleColumns] = useState<DiscoveryColumnVisibility>(getInitialDiscoveryColumnVisibility)
 
-    const isColumnVisible = (key: string) => visibleColumns[key as DiscoveryColumnKey] ?? true
+    useEffect(() => {
+        localStorage.setItem(ADMIN_NODE_COLUMNS_STORAGE_KEY, JSON.stringify(visibleColumns))
+    }, [visibleColumns])
+
+    const isColumnVisible = (key: DiscoveryColumnKey) => visibleColumns[key]
     const toggleColumn = (key: DiscoveryColumnKey) => {
         setVisibleColumns((current) => ({ ...current, [key]: !current[key] }))
     }
@@ -3680,10 +3812,17 @@ function DiscoveredHostsTable({
                     <Text fw={700} size="sm">Ноды группы</Text>
                     <Text c="dimmed" size="xs">Показываются рабочие колонки. Остальные можно включить при разборе Remnawave.</Text>
                 </Stack>
+                <Group gap="sm">
+                <Switch
+                    checked={isCompact}
+                    label="Компактно"
+                    onChange={(event) => setIsCompact(event.currentTarget.checked)}
+                    size="sm"
+                />
                 <Menu closeOnItemClick={false} position="bottom-end" withArrow>
                     <Menu.Target>
                         <Button leftSection={<IconSettings size={16} />} size="xs" variant="light">
-                            Настроить колонки
+                            Колонки
                         </Button>
                     </Menu.Target>
                     <Menu.Dropdown>
@@ -3694,38 +3833,41 @@ function DiscoveredHostsTable({
                         ))}
                     </Menu.Dropdown>
                 </Menu>
+                </Group>
             </Group>
-            <ScrollArea>
-                <Table className={classes.discoveryTable} highlightOnHover stickyHeader>
+            <ScrollArea className={classes.tableScrollArea}>
+                <Table className={`${classes.discoveryTable} ${isCompact ? classes.compactTable : ''}`} highlightOnHover stickyHeader>
                     <Table.Thead>
                         <Table.Tr>
                             <Table.Th className={classes.stickyFirstColumn} />
-                            <Table.Th>
+                            <Table.Th className={classes.stickyNodeNameWithSelectionColumn}>
                                 <HeaderWithHelp help={tooltips.technicalHostName}>Техническая нода</HeaderWithHelp>
                             </Table.Th>
+                            <Table.Th>Предыдущее имя</Table.Th>
+                            <Table.Th>Identity</Table.Th>
                             <Table.Th>Участие</Table.Th>
                             <Table.Th>Текущая группа</Table.Th>
                             {isColumnVisible('squad') && <Table.Th>Squad</Table.Th>}
                             {isColumnVisible('inbound') && <Table.Th>{texts.fields.inboundProfile}</Table.Th>}
-                            <Table.Th>Хост Remnawave</Table.Th>
-                            <Table.Th>Нода Remnawave</Table.Th>
-                            <Table.Th>Хост</Table.Th>
-                            <Table.Th>Порт</Table.Th>
-                            <Table.Th>Протокол</Table.Th>
-                            <Table.Th>Защита</Table.Th>
-                            <Table.Th>Транспорт</Table.Th>
+                            {isColumnVisible('remnawaveHost') && <Table.Th>Хост Remnawave</Table.Th>}
+                            {isColumnVisible('remnawaveNode') && <Table.Th>Нода Remnawave</Table.Th>}
+                            {isColumnVisible('host') && <Table.Th>Host/IP</Table.Th>}
+                            {isColumnVisible('port') && <Table.Th>Порт</Table.Th>}
+                            {isColumnVisible('protocol') && <Table.Th>Протокол</Table.Th>}
+                            {isColumnVisible('security') && <Table.Th>Защита</Table.Th>}
+                            {isColumnVisible('transport') && <Table.Th>Транспорт</Table.Th>}
                             {isColumnVisible('sni') && <Table.Th>SNI</Table.Th>}
-                            <Table.Th>Поток</Table.Th>
+                            {isColumnVisible('flow') && <Table.Th>Поток</Table.Th>}
                             <Table.Th>Секреты</Table.Th>
                             <Table.Th>Статус Balancer</Table.Th>
-                            <Table.Th>Назначения</Table.Th>
-                            <Table.Th>Действия</Table.Th>
+                            {isColumnVisible('assignments') && <Table.Th>Назначения</Table.Th>}
+                            <Table.Th className={classes.stickyActionsColumn}>Действия</Table.Th>
                         </Table.Tr>
                     </Table.Thead>
                     <Table.Tbody>
                         {hosts.map((host) => {
                             const technicalHostName = normalizeTechnicalHostName(host.technicalHostName)
-                            const importedNode = importedByTechnicalHostName.get(technicalHostName)
+                            const importedNode = (host.identityKey ? importedByTechnicalHostName.get(host.identityKey) : undefined) ?? importedByTechnicalHostName.get(technicalHostName)
                             const importStatus = importStatuses[technicalHostName]
                             const isImportedIntoSelectedGroup = Boolean(
                                 selectedGroup &&
@@ -3747,14 +3889,14 @@ function DiscoveredHostsTable({
 
                             return (
                                 <Table.Tr key={technicalHostName}>
-                                    <Table.Td>
+                                    <Table.Td className={classes.stickyFirstColumn}>
                                         <Checkbox
                                             checked={selectedHosts.includes(technicalHostName)}
                                             disabled={!canAdd}
                                             onChange={() => toggleSelectedHost(technicalHostName)}
                                         />
                                     </Table.Td>
-                                    <Table.Td className={classes.wrapCell}>
+                                    <Table.Td className={`${classes.stickyNodeNameWithSelectionColumn} ${classes.wrapCell}`}>
                                         <Stack gap={2}>
                                             <Text size="sm">{technicalHostName}</Text>
                                             {host.discoveryMissing && (
@@ -3762,6 +3904,22 @@ function DiscoveredHostsTable({
                                                     Нода есть в Balancer, но не найдена в последнем списке Remnawave.
                                                 </Text>
                                             )}
+                                            {host.previousTechnicalHostName && host.previousTechnicalHostName !== technicalHostName && (
+                                                <Text c="blue" size="xs">
+                                                    Нода переименована: {host.previousTechnicalHostName} → {technicalHostName}
+                                                </Text>
+                                            )}
+                                        </Stack>
+                                    </Table.Td>
+                                    <Table.Td>{host.previousTechnicalHostName ?? '-'}</Table.Td>
+                                    <Table.Td>
+                                        <Stack gap={2}>
+                                            <Badge color={host.identityStatus === 'stable' ? 'green' : host.identityStatus === 'fallback_by_name' ? 'yellow' : 'gray'} variant="light">
+                                                {host.identityStatus ?? 'unknown'}
+                                            </Badge>
+                                            <Text c="dimmed" size="xs">
+                                                {host.remnawaveHostUuid ?? host.identityKeyMasked ?? maskSecret(host.identityKey)}
+                                            </Text>
                                         </Stack>
                                     </Table.Td>
                                     <Table.Td>
@@ -3771,26 +3929,26 @@ function DiscoveredHostsTable({
                                             </Badge>
                                         </Tooltip>
                                     </Table.Td>
-                                    {isColumnVisible('currentGroup') && <Table.Td className={classes.wrapCell}>{currentGroupName}</Table.Td>}
+                                    <Table.Td className={classes.wrapCell}>{currentGroupName}</Table.Td>
                                     {isColumnVisible('squad') && <Table.Td className={classes.wrapCell}>
                                         {host.accessibleSquads?.map((squad) => squad.name).join(', ') || '-'}
                                     </Table.Td>}
                                     {isColumnVisible('inbound') && <Table.Td className={classes.wrapCell}>
                                         {[host.remnawaveInboundName, host.remnawaveProfileName].filter(Boolean).join(' / ') || '-'}
                                     </Table.Td>}
-                                    {isColumnVisible('rawRemark') && <Table.Td className={classes.wrapCell}>{host.rawRemark ?? '-'}</Table.Td>}
-                                    {isColumnVisible('node') && <Table.Td className={classes.wrapCell}>{host.remnawaveNodeName ?? '-'}</Table.Td>}
+                                    {isColumnVisible('remnawaveHost') && <Table.Td className={classes.wrapCell}>{host.rawRemark ?? '-'}</Table.Td>}
+                                    {isColumnVisible('remnawaveNode') && <Table.Td className={classes.wrapCell}>{host.remnawaveNodeName ?? '-'}</Table.Td>}
                                     {isColumnVisible('host') && <Table.Td>{host.host ?? '-'}</Table.Td>}
                                     {isColumnVisible('port') && <Table.Td>{host.port ?? '-'}</Table.Td>}
                                     {isColumnVisible('protocol') && <Table.Td>{host.protocol ?? '-'}</Table.Td>}
                                     {isColumnVisible('security') && <Table.Td>{host.security ?? '-'}</Table.Td>}
                                     {isColumnVisible('transport') && <Table.Td>{host.type ?? '-'}</Table.Td>}
                                     {isColumnVisible('sni') && <Table.Td>{host.sni ?? '-'}</Table.Td>}
-                                    {isColumnVisible('stream') && <Table.Td>{host.flow ?? '-'}</Table.Td>}
-                                    {isColumnVisible('secrets') && <Table.Td>{[maskSecret(host.pbk), maskSecret(host.sid)].filter((value) => value !== '-').join(' / ') || '-'}</Table.Td>}
-                                    {isColumnVisible('balancerStatus') && <Table.Td>{importedNode ? statusLabels[importedNode.status] : '-'}</Table.Td>}
+                                    {isColumnVisible('flow') && <Table.Td>{host.flow ?? '-'}</Table.Td>}
+                                    <Table.Td>{[maskSecret(host.pbk), maskSecret(host.sid)].filter((value) => value !== '-').join(' / ') || '-'}</Table.Td>
+                                    <Table.Td>{importedNode ? statusLabels[importedNode.status] : '-'}</Table.Td>
                                     {isColumnVisible('assignments') && <Table.Td>{importedNode ? `${importedNode.assignedUsers} (${nodeAssignments.length})` : '-'}</Table.Td>}
-                                    <Table.Td>
+                                    <Table.Td className={classes.stickyActionsColumn}>
                                         <Group gap={6} wrap="nowrap">
                                             {canAdd && (
                                                 <Button loading={false} onClick={() => importOneHost?.(technicalHostName)} size="xs" variant="light">

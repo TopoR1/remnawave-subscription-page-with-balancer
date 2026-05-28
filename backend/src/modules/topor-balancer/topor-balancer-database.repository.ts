@@ -85,6 +85,16 @@ export interface ToporBalancerRequestFilters {
 }
 
 export interface ToporBalancerNodeUpdateInput {
+    currentTechnicalHostName?: string;
+    identityKey?: string;
+    lastSeenAt?: string;
+    previousTechnicalHostName?: string | null;
+    remnawaveConfigProfileUuid?: string | null;
+    remnawaveHostName?: string | null;
+    remnawaveHostUuid?: string | null;
+    remnawaveInboundUuid?: string | null;
+    remnawaveNodeName?: string | null;
+    remnawaveNodeUuid?: string | null;
     technicalHostName?: string;
     publicHostCode?: string;
     weight?: number;
@@ -98,6 +108,16 @@ export interface ToporBalancerNodeUpdateInput {
 
 export interface ToporBalancerNodeCreateInput {
     groupId?: string;
+    currentTechnicalHostName?: string;
+    identityKey?: string;
+    lastSeenAt?: string;
+    previousTechnicalHostName?: string | null;
+    remnawaveConfigProfileUuid?: string | null;
+    remnawaveHostName?: string | null;
+    remnawaveHostUuid?: string | null;
+    remnawaveInboundUuid?: string | null;
+    remnawaveNodeName?: string | null;
+    remnawaveNodeUuid?: string | null;
     technicalHostName: string;
     publicHostCode: string;
     publicName: string;
@@ -136,6 +156,16 @@ export interface ToporBalancerGroupUpdateInput {
 }
 
 export interface ToporBalancerGroupNodeCreateInput {
+    currentTechnicalHostName?: string;
+    identityKey?: string;
+    lastSeenAt?: string;
+    previousTechnicalHostName?: string | null;
+    remnawaveConfigProfileUuid?: string | null;
+    remnawaveHostName?: string | null;
+    remnawaveHostUuid?: string | null;
+    remnawaveInboundUuid?: string | null;
+    remnawaveNodeName?: string | null;
+    remnawaveNodeUuid?: string | null;
     technicalHostName: string;
     weight: number;
     maxUsers: number;
@@ -206,6 +236,16 @@ export interface ToporBalancerAssignmentRepository {
 interface DbNodeRow {
     id: string;
     group_id: string | null;
+    current_technical_host_name?: string | null;
+    identity_key?: string | null;
+    last_seen_at?: Date | string | null;
+    previous_technical_host_name?: string | null;
+    remnawave_config_profile_uuid?: string | null;
+    remnawave_host_name?: string | null;
+    remnawave_host_uuid?: string | null;
+    remnawave_inbound_uuid?: string | null;
+    remnawave_node_name?: string | null;
+    remnawave_node_uuid?: string | null;
     technical_host_name: string;
     public_host_code: string;
     public_name: string;
@@ -353,6 +393,16 @@ export class ToporBalancerPostgresRepository implements ToporBalancerAssignmentR
             CREATE TABLE IF NOT EXISTS topor_balancer_nodes (
                 id UUID PRIMARY KEY,
                 group_id UUID,
+                identity_key TEXT,
+                remnawave_host_uuid TEXT,
+                remnawave_node_uuid TEXT,
+                remnawave_inbound_uuid TEXT,
+                remnawave_config_profile_uuid TEXT,
+                current_technical_host_name TEXT,
+                previous_technical_host_name TEXT,
+                remnawave_host_name TEXT,
+                remnawave_node_name TEXT,
+                last_seen_at TIMESTAMPTZ,
                 technical_host_name TEXT NOT NULL,
                 public_host_code TEXT NOT NULL,
                 public_name TEXT NOT NULL,
@@ -371,6 +421,22 @@ export class ToporBalancerPostgresRepository implements ToporBalancerAssignmentR
 
             ALTER TABLE topor_balancer_nodes
                 ADD COLUMN IF NOT EXISTS priority INTEGER NOT NULL DEFAULT 100;
+
+            ALTER TABLE topor_balancer_nodes
+                ADD COLUMN IF NOT EXISTS identity_key TEXT,
+                ADD COLUMN IF NOT EXISTS remnawave_host_uuid TEXT,
+                ADD COLUMN IF NOT EXISTS remnawave_node_uuid TEXT,
+                ADD COLUMN IF NOT EXISTS remnawave_inbound_uuid TEXT,
+                ADD COLUMN IF NOT EXISTS remnawave_config_profile_uuid TEXT,
+                ADD COLUMN IF NOT EXISTS current_technical_host_name TEXT,
+                ADD COLUMN IF NOT EXISTS previous_technical_host_name TEXT,
+                ADD COLUMN IF NOT EXISTS remnawave_host_name TEXT,
+                ADD COLUMN IF NOT EXISTS remnawave_node_name TEXT,
+                ADD COLUMN IF NOT EXISTS last_seen_at TIMESTAMPTZ;
+
+            UPDATE topor_balancer_nodes
+            SET current_technical_host_name = technical_host_name
+            WHERE current_technical_host_name IS NULL;
 
             ALTER TABLE topor_balancer_groups
                 ADD COLUMN IF NOT EXISTS strategy TEXT NOT NULL DEFAULT 'least_loaded';
@@ -431,6 +497,18 @@ export class ToporBalancerPostgresRepository implements ToporBalancerAssignmentR
 
             CREATE UNIQUE INDEX IF NOT EXISTS topor_balancer_nodes_group_technical_host_name_key
                 ON topor_balancer_nodes (group_id, technical_host_name);
+
+            CREATE INDEX IF NOT EXISTS topor_balancer_nodes_identity_key_idx
+                ON topor_balancer_nodes (identity_key)
+                WHERE identity_key IS NOT NULL;
+
+            CREATE INDEX IF NOT EXISTS topor_balancer_nodes_remnawave_host_uuid_idx
+                ON topor_balancer_nodes (remnawave_host_uuid)
+                WHERE remnawave_host_uuid IS NOT NULL;
+
+            CREATE INDEX IF NOT EXISTS topor_balancer_nodes_remnawave_node_uuid_idx
+                ON topor_balancer_nodes (remnawave_node_uuid)
+                WHERE remnawave_node_uuid IS NOT NULL;
 
             CREATE TABLE IF NOT EXISTS topor_balancer_assignments (
                 id UUID PRIMARY KEY,
@@ -837,6 +915,16 @@ export class ToporBalancerPostgresRepository implements ToporBalancerAssignmentR
             INSERT INTO topor_balancer_nodes (
                 id,
                 group_id,
+                identity_key,
+                remnawave_host_uuid,
+                remnawave_node_uuid,
+                remnawave_inbound_uuid,
+                remnawave_config_profile_uuid,
+                current_technical_host_name,
+                previous_technical_host_name,
+                remnawave_host_name,
+                remnawave_node_name,
+                last_seen_at,
                 technical_host_name,
                 public_host_code,
                 public_name,
@@ -847,13 +935,23 @@ export class ToporBalancerPostgresRepository implements ToporBalancerAssignmentR
                 status,
                 priority
             )
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21)
             ON CONFLICT (group_id, technical_host_name) DO NOTHING
             RETURNING *
             `,
             [
                 id,
                 group.id,
+                input.identityKey ?? null,
+                input.remnawaveHostUuid ?? null,
+                input.remnawaveNodeUuid ?? null,
+                input.remnawaveInboundUuid ?? null,
+                input.remnawaveConfigProfileUuid ?? null,
+                input.currentTechnicalHostName ?? input.technicalHostName,
+                input.previousTechnicalHostName ?? null,
+                input.remnawaveHostName ?? null,
+                input.remnawaveNodeName ?? null,
+                input.lastSeenAt ?? null,
                 input.technicalHostName,
                 group.publicHostCode,
                 group.publicName,
@@ -917,6 +1015,16 @@ export class ToporBalancerPostgresRepository implements ToporBalancerAssignmentR
             SELECT
                 n.id,
                 n.group_id,
+                n.identity_key,
+                n.remnawave_host_uuid,
+                n.remnawave_node_uuid,
+                n.remnawave_inbound_uuid,
+                n.remnawave_config_profile_uuid,
+                n.current_technical_host_name,
+                n.previous_technical_host_name,
+                n.remnawave_host_name,
+                n.remnawave_node_name,
+                n.last_seen_at,
                 n.technical_host_name,
                 COALESCE(g.public_host_code, n.public_host_code) AS public_host_code,
                 COALESCE(g.public_name, n.public_name) AS public_name,
@@ -992,7 +1100,28 @@ export class ToporBalancerPostgresRepository implements ToporBalancerAssignmentR
         const updates: string[] = [];
         const params: unknown[] = [];
 
-        addUpdate(updates, params, 'technical_host_name', input.technicalHostName);
+        if (input.technicalHostName !== undefined) {
+            const normalizedCurrent = existingNode.current_technical_host_name ?? existingNode.technical_host_name;
+
+            if (input.technicalHostName !== normalizedCurrent) {
+                addUpdate(updates, params, 'previous_technical_host_name', normalizedCurrent);
+            }
+
+            addUpdate(updates, params, 'technical_host_name', input.technicalHostName);
+            addUpdate(updates, params, 'current_technical_host_name', input.technicalHostName);
+        }
+        addUpdate(updates, params, 'identity_key', input.identityKey);
+        addUpdate(updates, params, 'remnawave_host_uuid', input.remnawaveHostUuid);
+        addUpdate(updates, params, 'remnawave_node_uuid', input.remnawaveNodeUuid);
+        addUpdate(updates, params, 'remnawave_inbound_uuid', input.remnawaveInboundUuid);
+        addUpdate(updates, params, 'remnawave_config_profile_uuid', input.remnawaveConfigProfileUuid);
+        if (input.technicalHostName === undefined) {
+            addUpdate(updates, params, 'current_technical_host_name', input.currentTechnicalHostName);
+        }
+        addUpdate(updates, params, 'previous_technical_host_name', input.previousTechnicalHostName);
+        addUpdate(updates, params, 'remnawave_host_name', input.remnawaveHostName);
+        addUpdate(updates, params, 'remnawave_node_name', input.remnawaveNodeName);
+        addUpdate(updates, params, 'last_seen_at', input.lastSeenAt);
         if (!existingNode.group_id) {
             addUpdate(updates, params, 'public_host_code', input.publicHostCode);
             addUpdate(updates, params, 'public_name', input.publicName);
@@ -1957,7 +2086,18 @@ function mapNodeRow(row: DbNodeRow): ToporBalancerDbNode {
     return {
         id: row.id,
         groupId: row.group_id ?? undefined,
-        technicalHostName: row.technical_host_name,
+        currentTechnicalHostName: row.current_technical_host_name ?? row.technical_host_name,
+        identityKey: row.identity_key ?? undefined,
+        identityStatus: row.identity_key ? 'stable' : 'fallback_by_name',
+        lastSeenAt: row.last_seen_at?.toString(),
+        previousTechnicalHostName: row.previous_technical_host_name ?? undefined,
+        remnawaveConfigProfileUuid: row.remnawave_config_profile_uuid ?? undefined,
+        remnawaveHostName: row.remnawave_host_name ?? undefined,
+        remnawaveHostUuid: row.remnawave_host_uuid ?? undefined,
+        remnawaveInboundUuid: row.remnawave_inbound_uuid ?? undefined,
+        remnawaveNodeName: row.remnawave_node_name ?? undefined,
+        remnawaveNodeUuid: row.remnawave_node_uuid ?? undefined,
+        technicalHostName: row.current_technical_host_name ?? row.technical_host_name,
         publicHostCode: row.public_host_code,
         publicName: row.public_name,
         locationCode: row.location_code ?? undefined,

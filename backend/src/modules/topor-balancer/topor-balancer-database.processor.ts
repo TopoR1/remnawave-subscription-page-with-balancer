@@ -21,6 +21,7 @@ import {
     replaceVlessRemark,
 } from './topor-balancer-subscription.parser';
 import { normalizeTechnicalHostName } from './topor-balancer-technical-host-name';
+import { buildToporBalancerIdentityKeyFromParsedLink } from './topor-balancer-node-identity';
 
 export interface ProcessSubscriptionWithDatabaseBalancerInput {
     shortUuid: string;
@@ -46,8 +47,15 @@ interface TechnicalNodeRef {
     node: ToporBalancerLocation['nodes'][number];
 }
 
+interface TechnicalNodeLookup {
+    byIdentityKey: Map<string, TechnicalNodeRef>;
+    byCurrentName: Map<string, TechnicalNodeRef>;
+    byPreviousName: Map<string, TechnicalNodeRef>;
+}
+
 interface MatchingLine {
     line: string;
+    matchStatus: 'stable' | 'fallback_by_name' | 'fallback_by_previous_name';
     parsedLink: ParsedVlessLink;
     nodeRef: TechnicalNodeRef;
 }
@@ -292,24 +300,44 @@ function buildUnchangedResult(
     };
 }
 
-function buildTechnicalNodeMap(config: ToporBalancerConfig): Map<string, TechnicalNodeRef> {
-    const technicalNodeMap = new Map<string, TechnicalNodeRef>();
+function buildTechnicalNodeMap(config: ToporBalancerConfig): TechnicalNodeLookup {
+    const byIdentityKey = new Map<string, TechnicalNodeRef>();
+    const byCurrentName = new Map<string, TechnicalNodeRef>();
+    const byPreviousName = new Map<string, TechnicalNodeRef>();
 
     for (const location of config.locations) {
         for (const node of location.nodes) {
-            technicalNodeMap.set(normalizeTechnicalHostName(node.technicalHostName), {
+            const nodeRef = {
                 location,
                 node,
-            });
+            };
+
+            if (node.identityKey) {
+                byIdentityKey.set(node.identityKey, nodeRef);
+            }
+
+            byCurrentName.set(normalizeTechnicalHostName(node.technicalHostName), nodeRef);
+
+            if (node.currentTechnicalHostName) {
+                byCurrentName.set(normalizeTechnicalHostName(node.currentTechnicalHostName), nodeRef);
+            }
+
+            if (node.previousTechnicalHostName) {
+                byPreviousName.set(normalizeTechnicalHostName(node.previousTechnicalHostName), nodeRef);
+            }
         }
     }
 
-    return technicalNodeMap;
+    return {
+        byIdentityKey,
+        byCurrentName,
+        byPreviousName,
+    };
 }
 
 function collectMatchingLines(
     plainBody: string,
-    technicalNodeMap: Map<string, TechnicalNodeRef>,
+    technicalNodeMap: TechnicalNodeLookup,
 ): MatchingLine[] {
     const matchingLines: MatchingLine[] = [];
 
@@ -320,20 +348,62 @@ function collectMatchingLines(
             continue;
         }
 
-        const nodeRef = technicalNodeMap.get(normalizeTechnicalHostName(parsedLink.remark));
+        const match = findTechnicalNodeRefForParsedLink(technicalNodeMap, parsedLink);
 
-        if (!nodeRef) {
+        if (!match) {
             continue;
         }
 
         matchingLines.push({
             line,
+            matchStatus: match.matchStatus,
             parsedLink,
-            nodeRef,
+            nodeRef: match.nodeRef,
         });
     }
 
     return matchingLines;
+}
+
+function findTechnicalNodeRefForParsedLink(
+    technicalNodeMap: TechnicalNodeLookup,
+    parsedLink: ParsedVlessLink,
+): { matchStatus: MatchingLine['matchStatus']; nodeRef: TechnicalNodeRef } | undefined {
+    const identityKey = buildToporBalancerIdentityKeyFromParsedLink(parsedLink);
+
+    if (identityKey) {
+        const byIdentity = technicalNodeMap.byIdentityKey.get(identityKey);
+
+        if (byIdentity) {
+            return {
+                matchStatus: 'stable',
+                nodeRef: byIdentity,
+            };
+        }
+    }
+
+    if (!parsedLink.remark) {
+        return undefined;
+    }
+
+    const normalizedRemark = normalizeTechnicalHostName(parsedLink.remark);
+    const byCurrentName = technicalNodeMap.byCurrentName.get(normalizedRemark);
+
+    if (byCurrentName) {
+        return {
+            matchStatus: 'fallback_by_name',
+            nodeRef: byCurrentName,
+        };
+    }
+
+    const byPreviousName = technicalNodeMap.byPreviousName.get(normalizedRemark);
+
+    return byPreviousName
+        ? {
+              matchStatus: 'fallback_by_previous_name',
+              nodeRef: byPreviousName,
+          }
+        : undefined;
 }
 
 async function selectNodesByPublicGroupKey(
@@ -394,7 +464,25 @@ async function selectNodesByPublicGroupKey(
             nodeStatusByTechnicalHostName,
             subscriptionCandidateTechnicalHostNames,
         });
-        const warnings = [...accessResult.warnings];
+        const warnings = [
+            ...accessResult.warnings,
+            ...group
+                .filter((matchingLine) => {
+                    const remark = normalizeTechnicalHostName(matchingLine.parsedLink.remark ?? '');
+                    const currentName = normalizeTechnicalHostName(matchingLine.nodeRef.node.technicalHostName);
+
+                    return (
+                        matchingLine.matchStatus === 'fallback_by_previous_name' ||
+                        (matchingLine.matchStatus === 'stable' && remark !== currentName)
+                    );
+                })
+                .map((matchingLine) => {
+                    const previousName = matchingLine.parsedLink.remark ?? '';
+                    const currentName = matchingLine.nodeRef.node.technicalHostName;
+
+                    return `Node name changed: previous=${previousName}, current=${currentName}, identity matched=${matchingLine.matchStatus === 'stable'}, group preserved=true.`;
+                }),
+        ];
         const groupDisabled = location.enabled === false;
 
         if (
@@ -787,7 +875,7 @@ function buildExcludedCandidateNodes(input: {
 
 function filterSubscriptionBody(
     plainBody: string,
-    technicalNodeMap: Map<string, TechnicalNodeRef>,
+    technicalNodeMap: TechnicalNodeLookup,
     selectedByPublicGroupKey: Map<string, ToporBalancerDbNode>,
 ): string {
     const keptSelectedPublicGroupKeys = new Set<string>();
@@ -802,13 +890,14 @@ function filterSubscriptionBody(
             continue;
         }
 
-        const nodeRef = technicalNodeMap.get(normalizeTechnicalHostName(parsedLink.remark));
+        const match = findTechnicalNodeRefForParsedLink(technicalNodeMap, parsedLink);
 
-        if (!nodeRef) {
+        if (!match) {
             outputLines.push(line);
             continue;
         }
 
+        const { nodeRef } = match;
         const publicGroupKey = getPublicGroupKey(nodeRef.location);
         const selectedNode = selectedByPublicGroupKey.get(publicGroupKey);
 
@@ -820,8 +909,7 @@ function filterSubscriptionBody(
         }
 
         if (
-            normalizeTechnicalHostName(parsedLink.remark) !==
-            normalizeTechnicalHostName(selectedNode.technicalHostName)
+            !doesParsedLinkMatchSelectedNode(parsedLink, selectedNode)
         ) {
             continue;
         }
@@ -835,6 +923,25 @@ function filterSubscriptionBody(
     }
 
     return outputLines.join('\n');
+}
+
+function doesParsedLinkMatchSelectedNode(
+    parsedLink: ParsedVlessLink,
+    selectedNode: ToporBalancerDbNode,
+): boolean {
+    const identityKey = buildToporBalancerIdentityKeyFromParsedLink(parsedLink);
+
+    if (identityKey && selectedNode.identityKey) {
+        return identityKey === selectedNode.identityKey;
+    }
+
+    const remark = normalizeTechnicalHostName(parsedLink.remark ?? '');
+
+    return (
+        remark === normalizeTechnicalHostName(selectedNode.technicalHostName) ||
+        remark === normalizeTechnicalHostName(selectedNode.currentTechnicalHostName ?? '') ||
+        remark === normalizeTechnicalHostName(selectedNode.previousTechnicalHostName ?? '')
+    );
 }
 
 function buildDebugInfo(

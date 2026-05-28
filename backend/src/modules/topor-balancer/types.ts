@@ -16,6 +16,16 @@ export type ToporBalancerGroupSquadScope =
 export type ToporBalancerUnavailablePolicy = 'hide_group' | 'pass_through_original';
 
 export interface ToporBalancerNode {
+    currentTechnicalHostName?: string;
+    identityKey?: string;
+    identityStatus?: 'stable' | 'fallback_by_name' | 'unknown';
+    previousTechnicalHostName?: string;
+    remnawaveConfigProfileUuid?: string;
+    remnawaveHostName?: string;
+    remnawaveHostUuid?: string;
+    remnawaveInboundUuid?: string;
+    remnawaveNodeName?: string;
+    remnawaveNodeUuid?: string;
     technicalHostName: string;
     weight: number;
     maxUsers: number;
@@ -323,6 +333,17 @@ export interface ToporBalancerSubscriptionDiagnosticsResult {
 export interface ToporBalancerDbNode {
     id: string;
     groupId?: string;
+    currentTechnicalHostName?: string;
+    identityKey?: string;
+    identityStatus?: 'stable' | 'fallback_by_name' | 'unknown';
+    lastSeenAt?: string;
+    previousTechnicalHostName?: string;
+    remnawaveConfigProfileUuid?: string;
+    remnawaveHostName?: string;
+    remnawaveHostUuid?: string;
+    remnawaveInboundUuid?: string;
+    remnawaveNodeName?: string;
+    remnawaveNodeUuid?: string;
     technicalHostName: string;
     publicHostCode: string;
     publicName: string;
@@ -582,6 +603,11 @@ export interface ToporBalancerBootstrap {
 }
 
 export interface ToporBalancerDiscoveredHost {
+    currentTechnicalHostName?: string;
+    identityKey?: string;
+    identityKeyMasked?: string;
+    identityStatus?: 'stable' | 'fallback_by_name' | 'unknown';
+    previousTechnicalHostName?: string;
     technicalHostName: string;
     protocol?: 'vless';
     host?: string;
@@ -594,6 +620,10 @@ export interface ToporBalancerDiscoveredHost {
     pbk?: string;
     sid?: string;
     rawRemark?: string;
+    remnawaveHostName?: string;
+    remnawaveHostUuid?: string;
+    remnawaveConfigProfileUuid?: string;
+    remnawaveInboundUuid?: string;
     remnawaveNodeName?: string;
     remnawaveNodeUuid?: string;
     remnawaveInboundName?: string;

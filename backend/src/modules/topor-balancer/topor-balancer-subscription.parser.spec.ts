@@ -52,6 +52,7 @@ import {
 } from './topor-balancer-config.validator';
 import { processSubscriptionWithDatabaseBalancer } from './topor-balancer-database.processor';
 import { processSubscriptionWithHashBalancer } from './topor-balancer-hash.processor';
+import { buildToporBalancerIdentityKeyFromParsedLink } from './topor-balancer-node-identity';
 import { parseToporBalancerConfig } from './topor-balancer-config.loader';
 import { ToporBalancerAdminGuard } from './topor-balancer-admin.guard';
 import { ToporBalancerDiscoveryService } from './topor-balancer-discovery.service';
@@ -2189,6 +2190,166 @@ test('database balancer avoids duplicate assignment on concurrent duplicate requ
     assert.equal(repository.assignments.size, 1);
 });
 
+test('identity_key ignores remark and runtime matching survives a Remnawave rename', async () => {
+    const oldRemarkLink =
+        'vless://44444444-4444-4444-8444-444444444444@rename-safe.example.com:443?security=reality&type=tcp&sni=example.com&pbk=key&sid=sid&flow=xtls-rprx-vision#FI-OLD-01';
+    const renamedLink =
+        'vless://44444444-4444-4444-8444-444444444444@rename-safe.example.com:443?security=reality&type=tcp&sni=example.com&pbk=key&sid=sid&flow=xtls-rprx-vision#FI-NEW-01';
+    const identityKey = buildToporBalancerIdentityKeyFromParsedLink(parseVlessLink(oldRemarkLink)!);
+
+    assert.equal(identityKey, buildToporBalancerIdentityKeyFromParsedLink(parseVlessLink(renamedLink)!));
+
+    const config: ToporBalancerConfig = {
+        enabled: true,
+        locations: [
+            {
+                publicHostCode: 'fi',
+                publicName: 'Finland',
+                planCode: 'standard',
+                nodes: [
+                    {
+                        identityKey,
+                        previousTechnicalHostName: 'FI-OLD-01',
+                        technicalHostName: 'FI-OLD-01',
+                        weight: 1,
+                        maxUsers: 300,
+                        status: 'active',
+                    },
+                ],
+            },
+        ],
+    };
+    const repository = InMemoryToporBalancerRepository.fromConfig(config);
+    const result = await processSubscriptionWithDatabaseBalancer({
+        shortUuid: 'renamed-runtime-user',
+        body: renamedLink,
+        config,
+        repository,
+    });
+
+    const links = parseSubscription(result.body).links;
+
+    assert.equal(links.length, 1);
+    assert.equal(links[0].remark, 'Finland');
+    assert.deepEqual(result.debugInfo.selectedNodes, {
+        'fi:standard': 'FI-OLD-01',
+    });
+});
+
+test('runtime identity matching keeps similar node names from colliding', async () => {
+    const firstLink =
+        'vless://44444444-4444-4444-8444-444444444444@node-a.example.com:443?security=reality&type=tcp&sni=example.com&pbk=key-a&sid=sid#FI-EDGE';
+    const secondRenamedLink =
+        'vless://44444444-4444-4444-8444-444444444444@node-b.example.com:443?security=reality&type=tcp&sni=example.com&pbk=key-b&sid=sid#FI-EDGE-RENAMED';
+    const firstIdentityKey = buildToporBalancerIdentityKeyFromParsedLink(parseVlessLink(firstLink)!);
+    const secondIdentityKey = buildToporBalancerIdentityKeyFromParsedLink(parseVlessLink(secondRenamedLink)!);
+    const config: ToporBalancerConfig = {
+        enabled: true,
+        locations: [
+            {
+                publicHostCode: 'fi',
+                publicName: 'Finland',
+                planCode: 'standard',
+                nodes: [
+                    {
+                        identityKey: firstIdentityKey,
+                        technicalHostName: 'FI-EDGE',
+                        weight: 1,
+                        maxUsers: 300,
+                        status: 'active',
+                    },
+                    {
+                        identityKey: secondIdentityKey,
+                        previousTechnicalHostName: 'FI-EDGE-2',
+                        technicalHostName: 'FI-EDGE-2',
+                        weight: 1,
+                        maxUsers: 300,
+                        status: 'active',
+                    },
+                ],
+            },
+        ],
+    };
+    const repository = InMemoryToporBalancerRepository.fromConfig(config);
+    const result = await processSubscriptionWithDatabaseBalancer({
+        shortUuid: 'similar-names-user',
+        body: secondRenamedLink,
+        config,
+        repository,
+    });
+
+    assert.deepEqual(result.debugInfo.groupCandidateDiagnostics?.[0]?.subscriptionCandidateNodes, [
+        'FI-EDGE-2',
+    ]);
+});
+
+test('Remnawave discovery rename keeps group, assignments and node settings', async () => {
+    const repository = InMemoryToporBalancerRepository.fromConfig({
+        enabled: true,
+        locations: [
+            {
+                publicHostCode: 'fi',
+                publicName: 'Finland',
+                planCode: 'standard',
+                nodes: [
+                    {
+                        identityKey: 'vless-stable:rename-safe',
+                        remnawaveHostUuid: 'host-uuid-1',
+                        technicalHostName: 'FI-OLD-01',
+                        weight: 3,
+                        maxUsers: 42,
+                        status: 'draining',
+                    },
+                ],
+            },
+        ],
+    });
+    repository.assign('assigned-user', 'fi', 'standard', 'FI-OLD-01');
+    const service = new ToporBalancerService(
+        createConfigServiceStub({
+            TOPOR_BALANCER_DATABASE_URL: 'postgres://unused',
+        }),
+    );
+    setServiceRepository(service, repository);
+
+    await service.syncRemnawaveDiscoveredNodes([
+        {
+            alreadyImported: true,
+            host: 'rename-safe.example.com',
+            identityKey: 'vless-stable:rename-safe',
+            lastSeenAt: '2026-05-28T19:00:00.000Z',
+            matchedNodeId: null,
+            port: 443,
+            protocol: 'vless',
+            remnawaveHostName: 'FI-NEW-01',
+            remnawaveHostUuid: 'host-uuid-1',
+            remnawaveNodeName: 'Renamed node',
+            remnawaveNodeUuid: 'node-uuid-1',
+            security: 'reality',
+            technicalHostName: 'FI-NEW-01',
+            type: 'tcp',
+        },
+    ]);
+
+    const nodes = await repository.listNodes();
+    const renamedNode = nodes[0];
+    const assignments = await repository.listAssignments({
+        publicHostCode: 'fi',
+        planCode: 'standard',
+        shortUuid: 'assigned-user',
+    });
+
+    assert.equal(nodes.length, 1);
+    assert.equal(renamedNode.groupId, 'fi:standard');
+    assert.equal(renamedNode.technicalHostName, 'FI-NEW-01');
+    assert.equal(renamedNode.previousTechnicalHostName, 'FI-OLD-01');
+    assert.equal(renamedNode.status, 'draining');
+    assert.equal(renamedNode.weight, 3);
+    assert.equal(renamedNode.maxUsers, 42);
+    assert.equal(assignments.length, 1);
+    assert.equal(assignments[0].nodeId, renamedNode.id);
+});
+
 test('admin guard disables routes when token is not configured', () => {
     const service = new ToporBalancerService(
         createConfigServiceStub({
@@ -3687,9 +3848,13 @@ class InMemoryToporBalancerRepository implements ToporBalancerAssignmentReposito
                 const nodeId = repository.buildNodeId(groupId, node.technicalHostName);
 
                 repository.nodes.set(nodeId, {
+                    currentTechnicalHostName: node.currentTechnicalHostName ?? node.technicalHostName,
                     id: nodeId,
                     groupId,
+                    identityKey: node.identityKey,
                     technicalHostName: node.technicalHostName,
+                    previousTechnicalHostName: node.previousTechnicalHostName,
+                    remnawaveHostUuid: node.remnawaveHostUuid,
                     publicHostCode: location.publicHostCode,
                     publicName: location.publicName,
                     locationCode: location.locationCode,
@@ -3865,14 +4030,24 @@ class InMemoryToporBalancerRepository implements ToporBalancerAssignmentReposito
         }
 
         const node: ToporBalancerDbNode = {
+            currentTechnicalHostName: input.currentTechnicalHostName ?? input.technicalHostName,
             id: this.buildNodeId(groupId, input.technicalHostName),
+            identityKey: input.identityKey,
+            lastSeenAt: input.lastSeenAt,
             groupId,
             locationCode: group.locationCode,
             maxUsers: input.maxUsers,
             planCode: group.planCode,
+            previousTechnicalHostName: input.previousTechnicalHostName ?? undefined,
             publicHostCode: group.publicHostCode,
             publicName: group.publicName,
             priority: input.priority ?? 100,
+            remnawaveConfigProfileUuid: input.remnawaveConfigProfileUuid ?? undefined,
+            remnawaveHostName: input.remnawaveHostName ?? undefined,
+            remnawaveHostUuid: input.remnawaveHostUuid ?? undefined,
+            remnawaveInboundUuid: input.remnawaveInboundUuid ?? undefined,
+            remnawaveNodeName: input.remnawaveNodeName ?? undefined,
+            remnawaveNodeUuid: input.remnawaveNodeUuid ?? undefined,
             status: input.status,
             technicalHostName: input.technicalHostName,
             weight: input.weight,
@@ -3947,13 +4122,23 @@ class InMemoryToporBalancerRepository implements ToporBalancerAssignmentReposito
         }
 
         const node: ToporBalancerDbNode = {
+            currentTechnicalHostName: input.currentTechnicalHostName ?? input.technicalHostName,
             id: this.buildNodeId(groupId, input.technicalHostName),
             groupId,
+            identityKey: input.identityKey,
+            lastSeenAt: input.lastSeenAt,
             technicalHostName: input.technicalHostName,
             publicHostCode: input.publicHostCode,
             publicName: input.publicName,
             locationCode: input.locationCode,
             planCode: input.planCode,
+            previousTechnicalHostName: input.previousTechnicalHostName ?? undefined,
+            remnawaveConfigProfileUuid: input.remnawaveConfigProfileUuid ?? undefined,
+            remnawaveHostName: input.remnawaveHostName ?? undefined,
+            remnawaveHostUuid: input.remnawaveHostUuid ?? undefined,
+            remnawaveInboundUuid: input.remnawaveInboundUuid ?? undefined,
+            remnawaveNodeName: input.remnawaveNodeName ?? undefined,
+            remnawaveNodeUuid: input.remnawaveNodeUuid ?? undefined,
             weight: input.weight,
             maxUsers: input.maxUsers,
             status: input.status,
@@ -3981,10 +4166,51 @@ class InMemoryToporBalancerRepository implements ToporBalancerAssignmentReposito
         }
 
         if (input.technicalHostName !== undefined) {
-            this.nodes.delete(id);
-            node.id = input.technicalHostName;
+            if (node.technicalHostName !== input.technicalHostName) {
+                node.previousTechnicalHostName = node.technicalHostName;
+            }
             node.technicalHostName = input.technicalHostName;
-            this.nodes.set(node.id, node);
+            node.currentTechnicalHostName = input.technicalHostName;
+        }
+
+        if (input.identityKey !== undefined) {
+            node.identityKey = input.identityKey;
+        }
+
+        if (input.currentTechnicalHostName !== undefined) {
+            node.currentTechnicalHostName = input.currentTechnicalHostName;
+        }
+
+        if (input.previousTechnicalHostName !== undefined) {
+            node.previousTechnicalHostName = input.previousTechnicalHostName ?? undefined;
+        }
+
+        if (input.remnawaveHostUuid !== undefined) {
+            node.remnawaveHostUuid = input.remnawaveHostUuid ?? undefined;
+        }
+
+        if (input.remnawaveNodeUuid !== undefined) {
+            node.remnawaveNodeUuid = input.remnawaveNodeUuid ?? undefined;
+        }
+
+        if (input.remnawaveInboundUuid !== undefined) {
+            node.remnawaveInboundUuid = input.remnawaveInboundUuid ?? undefined;
+        }
+
+        if (input.remnawaveConfigProfileUuid !== undefined) {
+            node.remnawaveConfigProfileUuid = input.remnawaveConfigProfileUuid ?? undefined;
+        }
+
+        if (input.remnawaveHostName !== undefined) {
+            node.remnawaveHostName = input.remnawaveHostName ?? undefined;
+        }
+
+        if (input.remnawaveNodeName !== undefined) {
+            node.remnawaveNodeName = input.remnawaveNodeName ?? undefined;
+        }
+
+        if (input.lastSeenAt !== undefined) {
+            node.lastSeenAt = input.lastSeenAt;
         }
 
         if (input.publicHostCode !== undefined) {
